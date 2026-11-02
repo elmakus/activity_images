@@ -41,7 +41,10 @@ class ActivityImageQueue:
             k: v for k, v in failed.items()
             if isinstance(k, str) and isinstance(v, str)
         } if isinstance(failed, dict) else {}
-        self._next_run = float(data.get("next_run") or 0)
+        try:
+            self._next_run = max(0.0, float(data.get("next_run") or 0))
+        except (ValueError, TypeError):
+            self._next_run = 0.0
         if self._pending:
             self._kick()
 
@@ -93,7 +96,8 @@ class ActivityImageQueue:
         async with self._lock:
             original = len(self._pending)
             self._pending = [
-                t for t in self._pending if normalize_title(t) not in keys
+                t for t in self._pending
+                if normalize_title(t) not in keys or t == self._current
             ]
             removed = original - len(self._pending)
             if removed:
@@ -126,6 +130,10 @@ class ActivityImageQueue:
     def _on_worker_done(self, worker: asyncio.Task) -> None:
         """A title queued during the worker's final return must not be stranded."""
         if worker.cancelled() or self._closed:
+            return
+        failure = worker.exception()
+        if failure is not None:
+            _LOGGER.error("Activity image queue worker stopped: %s", failure)
             return
         if self._pending:
             self._kick()
