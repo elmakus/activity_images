@@ -1,0 +1,54 @@
+generate_image:
+  name: Generate activity image
+  description: Generate or reuse an image for a named activity. Optional response contains image_url, reused, and processing status.
+  fields:
+    title:
+      name: Activity title
+      required: true
+      selector:
+        text:
+    force:
+      name: Generate a new image instead of using cache
+      selector:
+        boolean:
+resolve_images:
+  name: Resolve activity images
+  description: Find cached images and optionally enqueue any missing activities for background generation.
+  fields:
+    titles:
+      name: Activity titles
+      required: true
+      selector:
+        text:
+          multiple: true
+    enqueue_missing:
+      name: Generate missing in background
+      selector:
+        boolean:
+queue_status:
+  name: Get queue status
+  description: Return pending activities, current activity, failures and cooldown time.
+cancel_queued:
+  name: Cancel queued activities
+  fields:
+    titles:
+      name: Titles
+      required: true
+      selector:
+        text:
+          multiple: true
+clear_errors:
+  name: Clear queue failures
+  description: Forget failed activity titles so they can be enqueued again.
+forget_image:
+  name: Forget cached image
+  description: Forget a title or image URL without deleting the underlying image file.
+  fields:
+    title:
+      name: Activity title
+      selector:
+        text:
+    image_url:
+      name: Image URL
+      selector:
+        text:

@@ -1,0 +1,22 @@
+{
+  "domain": "activity_images",
+  "name": "Activity Images",
+  "version": "0.1.0",
+  "documentation": "https://github.com/elmakus/activity_images",
+  "issue_tracker": "https://github.com/elmakus/activity_images/issues",
+  "codeowners": [
+    "@elmakus"
+  ],
+  "config_flow": true,
+  "iot_class": "local_push",
+  "integration_type": "service",
+  "after_dependencies": [
+    "ai_task"
+  ],
+  "dependencies": [
+    "media_source"
+  ],
+  "requirements": [
+    "Pillow>=10.0.0"
+  ]
+}
