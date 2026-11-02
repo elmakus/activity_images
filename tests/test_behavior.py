@@ -289,12 +289,15 @@ async def test_queue_provider_error_persists(ha, configured):
     await queue.async_enqueue(["Niepowodzenie"])
     await asyncio.wait_for(queue._worker, 5)
     assert len(queue.status()["failed"]) == 1
+    # The private fork keeps failed activity jobs for later cooldown retry.
+    # A failed entry must survive restart instead of being discarded.
+    await queue.async_shutdown()
     restored = queue_module.ActivityImageQueue(ha, engine)
+    restored._kick = lambda: None
     await restored.async_setup()
-    assert not restored.status()["pending"]
+    assert restored.status()["pending"] == ["Niepowodzenie"]
     assert len(restored.status()["failed"]) == 1
     assert await restored.async_clear_errors() == 1
-    await queue.async_shutdown()
     await restored.async_shutdown()
 
 
@@ -497,3 +500,54 @@ async def test_lucida_is_skipped_for_existing_alpha(ha, monkeypatch):
     assert await generated_module._maybe_remove_background(
         ha, raw.getvalue(), "http://lucida.test/remove"
     ) == raw.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_selective_resolve_matches_original_calendar_contract(ha, configured, monkeypatch):
+    cache, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_setup()
+    path = ha.base / "www/activity_images/known.png"
+    path.parent.mkdir(parents=True)
+    Image.new("RGBA", (40, 30)).save(path)
+    await cache.async_remember("Znane", "/local/activity_images/known.png")
+    images, added = await queue.async_resolve_activity_images(
+        ["Znane", "Historyczne", "Nowe", "Nowe"], enqueue_titles=["Nowe"]
+    )
+    assert images == {"Znane": "/local/activity_images/known.png"}
+    assert added == ["Nowe"]
+    assert queue.status()["pending"] == ["Nowe"]
+    images, added = await queue.async_resolve_activity_images(
+        ["Historyczne"], enqueue_titles=[]
+    )
+    assert images == {} and added == []
+    resolved = await queue.async_resolve(["Znane"], enqueue_missing=False)
+    assert resolved["image_metadata"]["Znane"] == {"width": 40, "height": 30}
+    assert resolved["queue_size"] == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_job_remains_pending_and_schedules_retry(ha, configured):
+    _, engine = configured
+    ha.services.fail = True
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    await queue.async_setup()
+    await queue.async_enqueue(["Pozniej"])
+    await asyncio.wait_for(queue._worker, 5)
+    assert queue.status()["pending"] == ["Pozniej"]
+    assert queue.status()["next_run_at"] > 0
+    assert queue._retry_task is not None
+    ha.services.fail = False
+    # Simulate the cooldown elapsed, without delaying the suite for a minute.
+    queue._retry_task.cancel()
+    try:
+        await queue._retry_task
+    except asyncio.CancelledError:
+        pass
+    queue._retry_task = None
+    queue._next_run = 0
+    await queue._run()
+    assert queue.status()["pending"] == []
+    assert queue.status()["failed"] == {}
+    await queue.async_shutdown()
