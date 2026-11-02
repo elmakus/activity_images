@@ -27,6 +27,7 @@ class ActivityImageQueue:
         self._next_run: float = 0.0
         self._current: str | None = None
         self._worker: asyncio.Task | None = None
+        self._retry_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -67,7 +68,7 @@ class ActivityImageQueue:
                     continue
                 title = value.strip()
                 key = normalize_title(title)
-                if not title or len(title) > 255 or not key or key in known or key in self._failed:
+                if not title or len(title) > 255 or not key or key in known:
                     continue
                 if await self.engine.cache.async_find(title):
                     continue
@@ -80,16 +81,34 @@ class ActivityImageQueue:
             self._kick()
         return accepted
 
-    async def async_resolve(self, titles: list[str], enqueue_missing: bool = False) -> dict:
+    async def async_resolve_activity_images(
+        self, titles: list[str], enqueue_titles: list[str] | None = None
+    ) -> tuple[dict[str, str], list[str]]:
+        """Original source API: enqueue only explicitly allowed missing titles.
+
+        An omitted enqueue_titles means all missing titles may be queued.
+        An empty list means resolve-only, without generating historical items.
+        """
         unique = list(dict.fromkeys(
-            title.strip() for title in titles[:64]
-            if isinstance(title, str) and title.strip()
-        ))
+            title.strip() for title in titles if isinstance(title, str) and title.strip()
+        ))[:64]
         images = await self.engine.cache.async_find_many(unique)
-        accepted = await self.async_enqueue(
-            [title for title in unique if title not in images]
-        ) if enqueue_missing else []
-        return {"images": images, "queued": accepted}
+        wanted = set(unique if enqueue_titles is None else enqueue_titles)
+        pending = [title for title in unique if title in wanted and title not in images]
+        accepted = await self.async_enqueue(pending) if pending else []
+        return images, accepted
+
+    async def async_resolve(self, titles: list[str], enqueue_missing: bool = False) -> dict:
+        images, accepted = await self.async_resolve_activity_images(
+            titles, enqueue_titles=titles if enqueue_missing else []
+        )
+        return {
+            "images": images,
+            "image_metadata": await self.engine.cache.async_image_metadata(images),
+            "queued": accepted,
+            "queue_size": len(self._pending),
+            "next_run_at": self._next_run or None,
+        }
 
     async def async_cancel(self, titles: list[str]) -> int:
         keys = {normalize_title(value) for value in titles}
@@ -122,6 +141,8 @@ class ActivityImageQueue:
     def _kick(self) -> None:
         if self._closed or not self._pending:
             return
+        if self._retry_task and not self._retry_task.done() and self._worker is not None and self._worker.done():
+            return
         if self._worker and not self._worker.done():
             return
         self._worker = self.hass.async_create_task(self._run())
@@ -135,8 +156,30 @@ class ActivityImageQueue:
         if failure is not None:
             _LOGGER.error("Activity image queue worker stopped: %s", failure)
             return
-        if self._pending:
+        if self._pending and (self._retry_task is None or self._retry_task.done()):
             self._kick()
+
+    async def _retry_after(self, delay: float) -> None:
+        """Keep a failed activity queued, as the original source worker did.
+
+        Retrying waits for provider cooldown; a zero-cooldown configuration
+        still applies a one-minute floor after a provider failure.
+        """
+        try:
+            await asyncio.sleep(delay)
+            if not self._closed:
+                self._kick()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._retry_task = None
+
+    def _schedule_retry(self, delay: float) -> None:
+        if self._closed:
+            return
+        if self._retry_task and not self._retry_task.done():
+            return
+        self._retry_task = self.hass.async_create_task(self._retry_after(delay))
 
     async def _run(self) -> None:
         """A single worker; failures are recorded and do not cause busy retries."""
@@ -147,6 +190,7 @@ class ActivityImageQueue:
                 title = self._pending[0]
                 self._current = title
             result = None
+            failed = False
             try:
                 if not await self.engine.cache.async_find(title):
                     wait = max(0.0, self._next_run - time.time())
@@ -158,6 +202,7 @@ class ActivityImageQueue:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                failed = True
                 _LOGGER.warning("Activity image generation failed for %r: %s", title, exc)
                 self._failed[normalize_title(title)] = (
                     f"{type(exc).__name__}: {str(exc)[:300]}"
@@ -165,14 +210,21 @@ class ActivityImageQueue:
             finally:
                 if not self._closed:
                     async with self._lock:
-                        if self._pending and self._pending[0] == title:
+                        if not failed and self._pending and self._pending[0] == title:
                             self._pending.pop(0)
+                            self._failed.pop(normalize_title(title), None)
                         self._current = None
-                        if not result or not result["reused"]:
+                        if failed or (result and not result["reused"]):
                             minimum = max(0, int(self.engine.settings.get(CONF_MIN_INTERVAL, 20)))
                             maximum = max(minimum, int(self.engine.settings.get(CONF_MAX_INTERVAL, 35)))
-                            self._next_run = time.time() + random.uniform(minimum, maximum) * 60
+                            delay = random.uniform(minimum, maximum) * 60
+                            if failed:
+                                delay = max(delay, 60.0)
+                            self._next_run = time.time() + delay
                         await self._save()
+            if failed:
+                self._schedule_retry(max(1.0, self._next_run - time.time()))
+                return
 
     async def async_shutdown(self) -> None:
         self._closed = True
@@ -180,4 +232,8 @@ class ActivityImageQueue:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
+        if self._retry_task and not self._retry_task.done():
+            self._retry_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._retry_task
         await self._save()
