@@ -167,12 +167,12 @@ class ActivityImageQueue:
         """
         try:
             await asyncio.sleep(delay)
-            if not self._closed:
-                self._kick()
         except asyncio.CancelledError:
             raise
         finally:
             self._retry_task = None
+        if not self._closed:
+            self._kick()
 
     def _schedule_retry(self, delay: float) -> None:
         if self._closed:
