@@ -64,6 +64,11 @@ class ActivityImageCache:
                     if isinstance(k, str) and isinstance(v, dict)
                     and isinstance(v.get("image_url"), str)
                 }
+                for value in self._entries.values():
+                    try:
+                        value["last_used_at"] = float(value.get("last_used_at", 0))
+                    except (TypeError, ValueError):
+                        value["last_used_at"] = 0.0
             self._rebuild_index()
             await self._prune()
             self._loaded = True
@@ -80,14 +85,26 @@ class ActivityImageCache:
         await self._store.async_save({"entries": self._entries})
 
     async def _exists(self, url: str) -> bool:
+        """Keep original compatibility with legacy Home Tasks and external URLs."""
         path = _canonical(url)
-        if not path.startswith("/local/activity_images/"):
-            return False
-        name = path.removeprefix("/local/activity_images/")
-        if not name or Path(name).name != name:
+        locations = {
+            "/local/activity_images/": ("www", "activity_images"),
+            "/local/home_tasks/": ("www", "home_tasks"),
+        }
+        location = next(
+            ((prefix, parts) for prefix, parts in locations.items() if path.startswith(prefix)),
+            None,
+        )
+        if location is None:
+            # Original cache accepts non-local URLs (for example externally
+            # hosted icons) without making network requests at lookup time.
+            return True
+        prefix, parts = location
+        name = path[len(prefix):]
+        if not name or Path(name).name != name or "\\" in name:
             return False
         return await self.hass.async_add_executor_job(
-            Path(self.hass.config.path("www", "activity_images", name)).is_file
+            Path(self.hass.config.path(*parts, name)).is_file
         )
 
     async def async_find(self, title: str, *, similar: bool = True, touch: bool = True) -> str | None:
@@ -201,7 +218,14 @@ class ActivityImageCache:
                 return im.size
         output = {}
         for title, url in images.items():
-            filename = _canonical(url).removeprefix("/local/activity_images/")
+            canonical = _canonical(url)
+            if not canonical.startswith("/local/activity_images/"):
+                continue
+            filename = canonical.removeprefix("/local/activity_images/")
+            if (not filename or Path(filename).name != filename
+                    or not filename.lower().endswith(".png")
+                    or filename == "activity-icons-style-board-v1.png"):
+                continue
             path = Path(self.hass.config.path("www", "activity_images", filename))
             try:
                 width, height = await self.hass.async_add_executor_job(read_size, path)
