@@ -133,6 +133,26 @@ def _process(data: bytes, target: Path) -> str:
     return result.background_status
 
 
+def normalize_existing_generated_image(destination: Path) -> int:
+    """Retain the original fork's explicit re-normalization/migration helper.
+
+    Never called automatically at startup: other dashboards may still rely on
+    existing assets. The future opt-in importer may invoke this on copied files.
+    """
+    with Image.open(destination) as image:
+        normalized = normalize_icon_canvas(image)
+    _atomic_save(normalized, destination, "PNG", optimize=True)
+    qa = create_theme_qa_preview(normalized)
+    _atomic_save(qa, destination.with_name(destination.stem + "_qa.webp"), "WEBP", quality=86)
+    thumb = normalized.copy()
+    thumb.thumbnail((512, 512), Image.Resampling.LANCZOS)
+    _atomic_save(
+        thumb, destination.with_name(destination.stem + "_thumb.webp"),
+        "WEBP", quality=82,
+    )
+    return destination.stat().st_mtime_ns
+
+
 async def async_save_generated_image(
     hass: HomeAssistant, image_url: str, filename_stem: str, *,
     lucida_url: str | None = None,
