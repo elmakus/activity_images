@@ -433,6 +433,10 @@ async def test_lucida_valid_transparency_is_used(ha, monkeypatch):
     class Response:
         content_length = len(returned)
 
+        @property
+        def content(self):
+            return self
+
         async def __aenter__(self):
             return self
 
