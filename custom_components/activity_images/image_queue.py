@@ -120,6 +120,10 @@ class ActivityImageQueue:
             ]
             removed = original - len(self._pending)
             if removed:
+                # A canceled retry is not an outstanding generation failure.
+                for key in keys:
+                    if self._current is None or normalize_title(self._current) != key:
+                        self._failed.pop(key, None)
                 await self._save()
         return removed
 
