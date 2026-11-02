@@ -194,14 +194,13 @@ class ActivityImageCache:
             await self._save()
         return before - len(self._entries)
 
-    async def async_metadata(self, titles: list[str]) -> dict[str, dict]:
-        """Dimensions of cached activity images, useful for icon layouts."""
-        found = await self.async_find_many(titles)
+    async def async_image_metadata(self, images: dict[str, str]) -> dict[str, dict[str, int]]:
+        """Return image width/height with the original fork's mapping-shaped API."""
         def read_size(path: Path) -> tuple[int, int]:
             with Image.open(path) as im:
                 return im.size
         output = {}
-        for title, url in found.items():
+        for title, url in images.items():
             filename = _canonical(url).removeprefix("/local/activity_images/")
             path = Path(self.hass.config.path("www", "activity_images", filename))
             try:
@@ -210,6 +209,25 @@ class ActivityImageCache:
             except OSError:
                 continue
         return output
+
+    async def async_metadata(self, titles: list[str]) -> dict[str, dict]:
+        """Convenience wrapper retained for standalone callers."""
+        images = await self.async_find_many(titles)
+        return await self.async_image_metadata(images)
+
+    def references_url(self, url: str | None) -> bool:
+        """Retain the original cache's canonical-URL reference check."""
+        if not url:
+            return False
+        return any(
+            _canonical(entry.get("image_url", "")) == _canonical(url)
+            for entry in self._entries.values()
+        )
+
+    async def async_forget_url(self, image_url: str | None) -> None:
+        """Preserve original API for deliberately rejecting one image."""
+        if image_url:
+            await self.async_forget(url=image_url)
 
     async def _touch(self, urls: list[str]) -> None:
         keys = {_canonical(u) for u in urls}
