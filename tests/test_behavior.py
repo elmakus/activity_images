@@ -349,14 +349,14 @@ async def test_batch_lookup_updates_cache_once(ha):
     await cache.async_remember("Odkurzanie", "/local/activity_images/same.png")
     await cache.async_remember("Sprzątanie", "/local/activity_images/same.png")
     writes = 0
-    original_save = cache._save
+    original_save = cache._async_save
 
     async def count_writes():
         nonlocal writes
         writes += 1
         await original_save()
 
-    cache._save = count_writes
+    cache._async_save = count_writes
     found = await cache.async_find_many(["Odkurzanie", "Sprzątanie"])
     assert len(found) == 2
     assert writes == 1
