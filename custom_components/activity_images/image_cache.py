@@ -1,291 +1,507 @@
-"""Persistent activity image cache, independent from tasks and dashboards.
+"""Persistent library of task images with conservative local title matching."""
 
-The normalizer and conservative local matching follow the user's existing
-Home Tasks customization. No cloud embedding calls are used for cache lookup.
-"""
 from __future__ import annotations
 
 import asyncio
 from difflib import SequenceMatcher
 import logging
+import os
 from pathlib import Path
 import re
 import time
 import unicodedata
 
 from PIL import Image
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
+from .generated_image import normalize_existing_generated_image
 
 _LOGGER = logging.getLogger(__name__)
-STORAGE_VERSION = 1
+
+DATA_IMAGE_CACHE = f"{DOMAIN}_image_cache"
 STORAGE_KEY = f"{DOMAIN}_image_cache"
+STORAGE_VERSION = 1
+CANVAS_NORMALIZATION_VERSION = 2
+
+# High enough to avoid reusing an image merely because two tasks share a common
+# action phrase, while still matching small wording changes such as
+# "pobranie krwi" versus "badanie krwi".
+DEFAULT_SIMILARITY_THRESHOLD = 0.85
+DEFAULT_TOKEN_OVERLAP = 0.50
+MIN_INDEX_TOKEN_LENGTH = 4
 MAX_CACHED_IMAGES = 2000
-SIMILARITY_THRESHOLD = 0.85
-TOKEN_OVERLAP_THRESHOLD = 0.50
+LOCAL_IMAGE_LOCATIONS = {
+    "/local/activity_images/": ("www", "activity_images"),
+    "/local/home_tasks/": ("www", "home_tasks"),
+}
+ACTIVITY_IMAGE_PREFIX = "/local/activity_images/"
+CANVAS_NORMALIZATION_EXCLUDED_FILES = {
+    "activity-icons-style-board-v1.png",
+}
 
 
 def normalize_title(title: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", (title or "").casefold())
-    plain = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return " ".join(re.findall(r"[^\W_]+", plain, flags=re.UNICODE))
+    """Return a language-independent comparison form for a task title."""
+    decomposed = unicodedata.normalize("NFKD", title.casefold())
+    without_marks = "".join(
+        character for character in decomposed if not unicodedata.combining(character)
+    )
+    return " ".join(re.findall(r"[^\W_]+", without_marks, flags=re.UNICODE))
 
 
-def _tokens(title: str) -> set[str]:
-    return {token for token in title.split() if len(token) >= 4}
+def _title_tokens(normalized_title: str) -> set[str]:
+    return {
+        token
+        for token in normalized_title.split()
+        if len(token) >= MIN_INDEX_TOKEN_LENGTH
+    }
 
 
-def _canonical(url: str) -> str:
-    return url.split("?", 1)[0]
+def _canonical_url(image_url: str) -> str:
+    """Ignore cache-busting query parameters when comparing local images."""
+    return image_url.split("?", 1)[0]
 
 
 class ActivityImageCache:
+    """Store generated images independently from the lifetime of tasks."""
+
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._entries: dict[str, dict] = {}
-        self._index: dict[str, set[str]] = {}
-        self._load_lock = asyncio.Lock()
+        self._token_index: dict[str, set[str]] = {}
+        self._canvas_normalization_version = 0
         self._loaded = False
+        self._load_lock = asyncio.Lock()
 
     async def async_setup(self) -> None:
+        """Load the lightweight title index once."""
         if self._loaded:
             return
         async with self._load_lock:
             if self._loaded:
                 return
-            stored = await self._store.async_load() or {}
-            entries = stored.get("entries") or {}
-            if isinstance(entries, dict):
+            data = await self._store.async_load() or {}
+            stored_canvas_version = data.get("canvas_normalization_version", 0)
+            if isinstance(stored_canvas_version, int):
+                self._canvas_normalization_version = stored_canvas_version
+            raw_entries = data.get("entries", {})
+            if isinstance(raw_entries, dict):
                 self._entries = {
-                    k: v for k, v in entries.items()
-                    if isinstance(k, str) and isinstance(v, dict)
-                    and isinstance(v.get("image_url"), str)
+                    key: value
+                    for key, value in raw_entries.items()
+                    if isinstance(key, str)
+                    and isinstance(value, dict)
+                    and value.get("image_url")
                 }
-                for value in self._entries.values():
-                    try:
-                        value["last_used_at"] = float(value.get("last_used_at", 0))
-                    except (TypeError, ValueError):
-                        value["last_used_at"] = 0.0
-            self._rebuild_index()
-            await self._prune()
+                for entry in self._entries.values():
+                    last_used_at = entry.get("last_used_at", 0)
+                    entry["last_used_at"] = (
+                        float(last_used_at)
+                        if isinstance(last_used_at, (int, float))
+                        else 0.0
+                    )
+            self._rebuild_token_index()
+            changed = await self._async_prune_lru()
+            if self._canvas_normalization_version < CANVAS_NORMALIZATION_VERSION:
+                await self._async_migrate_activity_image_canvases()
+                changed = True
             self._loaded = True
+            if changed:
+                await self._async_save()
 
-    def _rebuild_index(self) -> None:
-        self._index = {}
-        for title, record in self._entries.items():
-            tokens = _tokens(title)
-            record["tokens"] = sorted(tokens)
+    def _activity_image_path(self, canonical_url: str) -> Path | None:
+        """Resolve one safe generated activity-image URL to its master file."""
+        if not canonical_url.startswith(ACTIVITY_IMAGE_PREFIX):
+            return None
+        filename = canonical_url[len(ACTIVITY_IMAGE_PREFIX):]
+        if (
+            not filename
+            or filename != os.path.basename(filename)
+            or not filename.lower().endswith(".png")
+            or filename in CANVAS_NORMALIZATION_EXCLUDED_FILES
+        ):
+            return None
+        return Path(self.hass.config.path("www", "activity_images", filename))
+
+    def _activity_url_map(self) -> dict[str, str]:
+        """Return current versioned URLs for generated masters in the cache."""
+        url_map: dict[str, str] = {}
+        for entry in self._entries.values():
+            image_url = entry.get("image_url")
+            if not isinstance(image_url, str):
+                continue
+            canonical = _canonical_url(image_url)
+            if self._activity_image_path(canonical) is not None:
+                url_map[canonical] = image_url
+        return url_map
+
+    async def async_image_metadata(
+        self, images: dict[str, str]
+    ) -> dict[str, dict[str, int]]:
+        """Return intrinsic dimensions for resolved local activity images."""
+
+        def read_size(path: Path) -> tuple[int, int]:
+            with Image.open(path) as image:
+                return image.size
+
+        metadata: dict[str, dict[str, int]] = {}
+        for title, image_url in images.items():
+            if not isinstance(image_url, str):
+                continue
+            path = self._activity_image_path(_canonical_url(image_url))
+            if path is None or not await self.hass.async_add_executor_job(path.is_file):
+                continue
+            try:
+                width, height = await self.hass.async_add_executor_job(read_size, path)
+            except OSError:
+                continue
+            if width > 0 and height > 0:
+                metadata[title] = {"width": width, "height": height}
+        return metadata
+
+    async def _async_migrate_activity_image_canvases(self) -> None:
+        """Normalize cached Gemini masters once and update loaded references."""
+        canonical_urls: set[str] = set()
+        for entry in self._entries.values():
+            image_url = entry.get("image_url")
+            if not isinstance(image_url, str):
+                continue
+            canonical = _canonical_url(image_url)
+            if self._activity_image_path(canonical) is not None:
+                canonical_urls.add(canonical)
+        url_map: dict[str, str] = {}
+        for canonical in sorted(canonical_urls):
+            path = self._activity_image_path(canonical)
+            if path is None or not await self.hass.async_add_executor_job(
+                path.is_file
+            ):
+                continue
+            version = await self.hass.async_add_executor_job(
+                normalize_existing_generated_image, path
+            )
+            url_map[canonical] = f"{canonical}?v={version}"
+
+        if url_map:
+            for entry in self._entries.values():
+                current_url = entry.get("image_url", "")
+                replacement = url_map.get(_canonical_url(current_url))
+                if replacement:
+                    entry["image_url"] = replacement
+            await self._async_rewrite_active_references(url_map)
+
+        self._canvas_normalization_version = CANVAS_NORMALIZATION_VERSION
+        _LOGGER.info(
+            "Normalized %d cached activity-image canvases to version %d",
+            len(url_map),
+            CANVAS_NORMALIZATION_VERSION,
+        )
+
+    async def async_sync_active_references(self) -> None:
+        """Bring newly loaded task stores onto the cache's versioned URLs."""
+        if self._canvas_normalization_version < CANVAS_NORMALIZATION_VERSION:
+            return
+        await self._async_rewrite_active_references(self._activity_url_map())
+
+    async def _async_rewrite_active_references(
+        self, url_map: dict[str, str]
+    ) -> None:
+        """Update task references only through their public store APIs."""
+        if not url_map:
+            return
+        for store in self.hass.data.get(DOMAIN, {}).values():
+            if hasattr(store, "async_update_task") and hasattr(store, "tasks"):
+                updates = [
+                    (
+                        task.get("id"),
+                        url_map.get(_canonical_url(image_url)),
+                        image_url,
+                    )
+                    for task in store.tasks
+                    if isinstance((image_url := task.get("image_url")), str)
+                ]
+                for task_id, replacement, current in updates:
+                    if (
+                        task_id is not None
+                        and replacement
+                        and current != replacement
+                    ):
+                        await store.async_update_task(
+                            task_id, image_url=replacement
+                        )
+            elif hasattr(store, "get_all_overlays") and hasattr(
+                store, "async_set_overlay"
+            ):
+                updates = [
+                    (task_uid, url_map.get(_canonical_url(image_url)), image_url)
+                    for task_uid, overlay in store.get_all_overlays().items()
+                    if isinstance((image_url := overlay.get("image_url")), str)
+                ]
+                for task_uid, replacement, current in updates:
+                    if replacement and current != replacement:
+                        await store.async_set_overlay(
+                            task_uid, image_url=replacement
+                        )
+
+    def _rebuild_token_index(self) -> None:
+        self._token_index = {}
+        for key, entry in self._entries.items():
+            tokens = set(entry.get("tokens") or _title_tokens(key))
+            entry["tokens"] = sorted(tokens)
             for token in tokens:
-                self._index.setdefault(token, set()).add(title)
+                self._token_index.setdefault(token, set()).add(key)
 
-    async def _save(self) -> None:
-        await self._store.async_save({"entries": self._entries})
-
-    async def _exists(self, url: str) -> bool:
-        """Keep original compatibility with legacy Home Tasks and external URLs."""
-        path = _canonical(url)
-        locations = {
-            "/local/activity_images/": ("www", "activity_images"),
-            "/local/home_tasks/": ("www", "home_tasks"),
+    async def async_remember(self, title: str, image_url: str) -> None:
+        """Remember an image mapping and enforce the unique-image LRU limit."""
+        key = normalize_title(title)
+        if not key or not image_url:
+            return
+        old = self._entries.get(key)
+        if old:
+            for token in old.get("tokens", []):
+                keys = self._token_index.get(token)
+                if keys:
+                    keys.discard(key)
+                    if not keys:
+                        self._token_index.pop(token, None)
+        tokens = _title_tokens(key)
+        self._entries[key] = {
+            "title": title.strip(),
+            "image_url": image_url,
+            "tokens": sorted(tokens),
+            "last_used_at": time.time(),
         }
-        location = next(
-            ((prefix, parts) for prefix, parts in locations.items() if path.startswith(prefix)),
-            None,
-        )
-        if location is None:
-            # Original cache accepts non-local URLs (for example externally
-            # hosted icons) without making network requests at lookup time.
-            return True
-        prefix, parts = location
-        name = path[len(prefix):]
-        if not name or Path(name).name != name or "\\" in name:
-            return False
-        return await self.hass.async_add_executor_job(
-            Path(self.hass.config.path(*parts, name)).is_file
-        )
+        for token in tokens:
+            self._token_index.setdefault(token, set()).add(key)
+        await self._async_prune_lru()
+        await self._async_save()
 
-    async def async_find(self, title: str, *, similar: bool = True, touch: bool = True) -> str | None:
+    async def async_remember_many(self, tasks: list[dict]) -> None:
+        """Seed the library from already visible task images with one disk write."""
+        changed = False
+        remembered_at = time.time()
+        for task in tasks:
+            title = (task.get("title") or "").strip()
+            image_url = task.get("image_url")
+            key = normalize_title(title)
+            if not key or not image_url:
+                continue
+            current = self._entries.get(key)
+            if current and current.get("image_url") == image_url:
+                continue
+            self._entries[key] = {
+                "title": title,
+                "image_url": image_url,
+                "tokens": sorted(_title_tokens(key)),
+                "last_used_at": remembered_at,
+            }
+            changed = True
+        if changed:
+            self._rebuild_token_index()
+            await self._async_prune_lru()
+            await self._async_save()
+
+    async def async_find(self, title: str, *, touch: bool = True, similar: bool = True) -> str | None:
+        """Find an exact or conservatively similar cached title locally."""
         key = normalize_title(title)
         if not key:
             return None
+
         exact = self._entries.get(key)
+        if exact and await self._async_url_exists(exact["image_url"]):
+            if touch:
+                await self._async_touch_url(exact["image_url"])
+            return exact["image_url"]
         if exact:
-            url = exact["image_url"]
-            if await self._exists(url):
-                if touch:
-                    await self._touch([url])
-                return url
-            self._entries.pop(key, None)
-            self._rebuild_index()
-            await self._save()
+            await self._async_forget_keys({key})
+
         if not similar:
             return None
-        tokens = _tokens(key)
+        tokens = _title_tokens(key)
         if not tokens:
             return None
-        candidates: set[str] = set()
+        candidate_keys: set[str] = set()
         for token in tokens:
-            candidates.update(self._index.get(token, set()))
-        best_key = None
-        best_score = SIMILARITY_THRESHOLD
-        for candidate in candidates:
-            other = set(self._entries[candidate].get("tokens") or _tokens(candidate))
-            smaller = min(len(tokens), len(other))
-            if not smaller or len(tokens & other) / smaller < TOKEN_OVERLAP_THRESHOLD:
+            candidate_keys.update(self._token_index.get(token, set()))
+
+        best_key: str | None = None
+        best_score = DEFAULT_SIMILARITY_THRESHOLD
+        for candidate_key in candidate_keys:
+            candidate_tokens = set(
+                self._entries[candidate_key].get("tokens")
+                or _title_tokens(candidate_key)
+            )
+            smaller_token_count = min(len(tokens), len(candidate_tokens))
+            if not smaller_token_count:
                 continue
-            score = SequenceMatcher(None, key, candidate).ratio()
+            overlap = len(tokens & candidate_tokens) / smaller_token_count
+            if overlap < DEFAULT_TOKEN_OVERLAP:
+                continue
+            score = SequenceMatcher(None, key, candidate_key).ratio()
             if score >= best_score:
-                best_key, best_score = candidate, score
+                best_key = candidate_key
+                best_score = score
+
         if best_key is None:
             return None
-        url = self._entries[best_key]["image_url"]
-        if not await self._exists(url):
-            self._entries.pop(best_key, None)
-            self._rebuild_index()
-            await self._save()
+        image_url = self._entries[best_key]["image_url"]
+        if not await self._async_url_exists(image_url):
+            await self._async_forget_keys({best_key})
             return None
+
+        # A fuzzy lookup updates the canonical image's recency without creating
+        # an unbounded title alias for every wording variation.
         if touch:
-            await self._touch([url])
-        return url
+            await self._async_touch_url(image_url)
+        return image_url
 
-    async def async_find_many(
-        self, titles: list[str], *, similar: bool = True
-    ) -> dict[str, str]:
-        found: dict[str, str] = {}
+    async def async_find_many(self, titles: list[str]) -> dict[str, str]:
+        """Resolve several titles while persisting their LRU touch only once."""
+        resolved: dict[str, str] = {}
+        touched_urls: set[str] = set()
         for title in titles:
-            url = await self.async_find(title, similar=similar, touch=False)
-            if url:
-                found[title] = url
-        if found:
-            # Batch last-used updates as the original fork did.
-            await self._touch(list(set(found.values())))
-        return found
+            image_url = await self.async_find(title, touch=False)
+            if image_url:
+                resolved[title] = image_url
+                touched_urls.add(image_url)
+        if touched_urls:
+            await self._async_touch_urls(touched_urls)
+        return resolved
 
-    async def async_remember(self, title: str, url: str) -> None:
-        key = normalize_title(title)
-        if not key or not url:
+    async def async_forget_url(self, image_url: str | None) -> None:
+        """Evict a deliberately rejected image from every cached title."""
+        if not image_url:
             return
-        self._entries[key] = {
-            "title": title.strip(),
-            "image_url": url,
-            "last_used_at": time.time(),
-            "tokens": sorted(_tokens(key)),
+        canonical = _canonical_url(image_url)
+        keys = {
+            key
+            for key, entry in self._entries.items()
+            if _canonical_url(entry.get("image_url", "")) == canonical
         }
-        self._rebuild_index()
-        await self._prune()
-        await self._save()
+        await self._async_forget_keys(keys)
 
-    async def async_remember_many(self, pairs: list[dict]) -> None:
-        now = time.time()
-        changed = False
-        for pair in pairs:
-            key = normalize_title(pair.get("title", ""))
-            url = pair.get("image_url")
-            if key and isinstance(url, str) and url:
-                self._entries[key] = {
-                    "title": pair["title"], "image_url": url,
-                    "last_used_at": now, "tokens": sorted(_tokens(key)),
-                }
-                changed = True
-        if changed:
-            self._rebuild_index()
-            await self._prune()
-            await self._save()
-
-    async def async_forget(self, *, title: str | None = None, url: str | None = None) -> int:
-        """Forget mappings, never remove files potentially used by other cards."""
-        before = len(self._entries)
-        if title:
-            self._entries.pop(normalize_title(title), None)
-        if url:
-            canonical = _canonical(url)
-            self._entries = {
-                k: v for k, v in self._entries.items()
-                if _canonical(v.get("image_url", "")) != canonical
-            }
-        if len(self._entries) != before:
-            self._rebuild_index()
-            await self._save()
-        return before - len(self._entries)
-
-    async def async_image_metadata(self, images: dict[str, str]) -> dict[str, dict[str, int]]:
-        """Return image width/height with the original fork's mapping-shaped API."""
-        def read_size(path: Path) -> tuple[int, int]:
-            with Image.open(path) as im:
-                return im.size
-        output = {}
-        for title, url in images.items():
-            canonical = _canonical(url)
-            if not canonical.startswith("/local/activity_images/"):
-                continue
-            filename = canonical.removeprefix("/local/activity_images/")
-            if (not filename or Path(filename).name != filename
-                    or not filename.lower().endswith(".png")
-                    or filename == "activity-icons-style-board-v1.png"):
-                continue
-            path = Path(self.hass.config.path("www", "activity_images", filename))
-            try:
-                width, height = await self.hass.async_add_executor_job(read_size, path)
-                output[title] = {"width": width, "height": height}
-            except OSError:
-                continue
-        return output
-
-    async def async_metadata(self, titles: list[str]) -> dict[str, dict]:
-        """Convenience wrapper retained for standalone callers."""
-        images = await self.async_find_many(titles)
-        return await self.async_image_metadata(images)
-
-    def references_url(self, url: str | None) -> bool:
-        """Retain the original cache's canonical-URL reference check."""
-        if not url:
+    def references_url(self, image_url: str | None) -> bool:
+        """Return whether the persistent library intentionally retains a file."""
+        if not image_url:
             return False
+        canonical = _canonical_url(image_url)
         return any(
-            _canonical(entry.get("image_url", "")) == _canonical(url)
+            _canonical_url(entry.get("image_url", "")) == canonical
             for entry in self._entries.values()
         )
 
-    async def async_forget_url(self, image_url: str | None) -> None:
-        """Preserve original API for deliberately rejecting one image."""
-        if image_url:
-            await self.async_forget(url=image_url)
+    async def _async_forget_keys(self, keys: set[str]) -> None:
+        if not keys:
+            return
+        for key in keys:
+            self._entries.pop(key, None)
+        self._rebuild_token_index()
+        await self._async_save()
 
-    async def _touch(self, urls: list[str]) -> None:
-        keys = {_canonical(u) for u in urls}
+    async def _async_touch_url(self, image_url: str) -> None:
+        """Refresh the recency of every title alias for one canonical image."""
+        await self._async_touch_urls({image_url})
+
+    async def _async_touch_urls(self, image_urls: set[str]) -> None:
+        """Refresh several canonical images with one storage write."""
+        canonicals = {_canonical_url(image_url) for image_url in image_urls}
+        touched = False
         now = time.time()
         for entry in self._entries.values():
-            if _canonical(entry["image_url"]) in keys:
+            if _canonical_url(entry.get("image_url", "")) in canonicals:
                 entry["last_used_at"] = now
-        await self._save()
+                touched = True
+        if touched:
+            await self._async_save()
 
-    async def _prune(self) -> None:
-        unique: dict[str, float] = {}
-        for v in self._entries.values():
-            url = _canonical(v["image_url"])
-            unique[url] = max(unique.get(url, 0), v.get("last_used_at", 0))
-        overflow = len(unique) - MAX_CACHED_IMAGES
+    async def _async_prune_lru(self) -> bool:
+        """Evict least-recently-used unique images above the configured limit."""
+        by_url: dict[str, float] = {}
+        for entry in self._entries.values():
+            canonical = _canonical_url(entry.get("image_url", ""))
+            if not canonical:
+                continue
+            by_url[canonical] = max(
+                by_url.get(canonical, 0.0),
+                float(entry.get("last_used_at", 0.0)),
+            )
+
+        overflow = len(by_url) - MAX_CACHED_IMAGES
         if overflow <= 0:
-            return
-        drop = {
-            url for url, _ in sorted(unique.items(), key=lambda kv: (kv[1], kv[0]))[:overflow]
+            return False
+
+        evicted_urls = {
+            url
+            for url, _last_used in sorted(
+                by_url.items(), key=lambda item: (item[1], item[0])
+            )[:overflow]
         }
         self._entries = {
-            k: v for k, v in self._entries.items()
-            if _canonical(v["image_url"]) not in drop
+            key: entry
+            for key, entry in self._entries.items()
+            if _canonical_url(entry.get("image_url", "")) not in evicted_urls
         }
-        self._rebuild_index()
-        # Deliberately preserve physical files: external clients may hold their URLs.
-        await self._save()
+        self._rebuild_token_index()
+        for image_url in evicted_urls:
+            await self._async_delete_local_image_if_unused(image_url)
+        return True
+
+    async def _async_delete_local_image_if_unused(self, image_url: str) -> None:
+        """Retain files: another HA card may still reference an evicted URL."""
+        return
+
+    async def _async_url_exists(self, image_url: str) -> bool:
+        path = _canonical_url(image_url)
+        location = next(
+            (
+                (prefix, parts)
+                for prefix, parts in LOCAL_IMAGE_LOCATIONS.items()
+                if path.startswith(prefix)
+            ),
+            None,
+        )
+        if location is None:
+            return True
+        prefix, directory_parts = location
+        filename = path[len(prefix):]
+        if not filename or filename != os.path.basename(filename) or "\\" in filename:
+            return False
+        local_path = self.hass.config.path(*directory_parts, filename)
+        return await self.hass.async_add_executor_job(os.path.isfile, local_path)
+
+    async def async_metadata(self, titles: list[str]) -> dict[str, dict]:
+        """Metadata helper for standalone callers."""
+        images = await self.async_find_many(titles)
+        return await self.async_image_metadata(images)
+
+    async def async_forget(
+        self, *, title: str | None = None, url: str | None = None
+    ) -> int:
+        """Forget mappings without ever removing an image file."""
+        before = len(self._entries)
+        if title:
+            await self._async_forget_keys({normalize_title(title)})
+        if url:
+            await self.async_forget_url(url)
+        return before - len(self._entries)
+
+    async def _async_save(self) -> None:
+        await self._store.async_save(
+            {
+                "entries": self._entries,
+                "canvas_normalization_version": self._canvas_normalization_version,
+            }
+        )
 
 
 async def async_get_cache(hass: HomeAssistant) -> ActivityImageCache:
-    key = f"{DOMAIN}_image_cache_instance"
-    cache = hass.data.get(key)
+    """Return the shared cache, loading it lazily for all image entry points."""
+    cache = hass.data.get(DATA_IMAGE_CACHE)
     if cache is None:
         cache = ActivityImageCache(hass)
-        hass.data[key] = cache
+        hass.data[DATA_IMAGE_CACHE] = cache
     await cache.async_setup()
     return cache
