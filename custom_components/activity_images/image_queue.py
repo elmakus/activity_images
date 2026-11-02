@@ -121,6 +121,14 @@ class ActivityImageQueue:
         if self._worker and not self._worker.done():
             return
         self._worker = self.hass.async_create_task(self._run())
+        self._worker.add_done_callback(self._on_worker_done)
+
+    def _on_worker_done(self, worker: asyncio.Task) -> None:
+        """A title queued during the worker's final return must not be stranded."""
+        if worker.cancelled() or self._closed:
+            return
+        if self._pending:
+            self._kick()
 
     async def _run(self) -> None:
         """A single worker; failures are recorded and do not cause busy retries."""
