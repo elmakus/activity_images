@@ -551,3 +551,121 @@ async def test_failed_job_remains_pending_and_schedules_retry(ha, configured):
     assert queue.status()["pending"] == []
     assert queue.status()["failed"] == {}
     await queue.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_legacy_home_tasks_image_urls_still_resolve(ha):
+    """The original cache accepted legacy local Home Tasks pictures."""
+    source = ha.base / "www/home_tasks/legacy.png"
+    source.parent.mkdir(parents=True)
+    Image.new("RGBA", (32, 32), (20, 40, 60, 255)).save(source)
+    cache = cache_module.ActivityImageCache(ha)
+    await cache.async_setup()
+    await cache.async_remember("Stare zadanie", "/local/home_tasks/legacy.png")
+    assert await cache.async_find("Stare zadanie") == "/local/home_tasks/legacy.png"
+
+
+@pytest.mark.asyncio
+async def test_external_image_url_resolves_without_network(ha):
+    """The original fork accepted external URLs from already-linked tasks."""
+    cache = cache_module.ActivityImageCache(ha)
+    await cache.async_setup()
+    await cache.async_remember("Zajecia", "https://example.com/icon.png")
+    assert await cache.async_find("Zajecia") == "https://example.com/icon.png"
+
+
+@pytest.mark.asyncio
+async def test_disable_fuzzy_cache_lookup_without_disabling_exact_match(ha):
+    source = ha.base / "www/activity_images/test.png"
+    source.parent.mkdir(parents=True)
+    Image.new("RGBA", (32, 32)).save(source)
+    cache = cache_module.ActivityImageCache(ha)
+    await cache.async_setup()
+    await cache.async_remember("Odkurzanie pokoju", "/local/activity_images/test.png")
+    assert await cache.async_find("Odkurzanie pokoj", similar=False) is None
+    assert await cache.async_find("ODKURZANIE POKOJU", similar=False) is not None
+    assert await cache.async_find("Odkurzanie pokoj") is not None
+
+
+@pytest.mark.asyncio
+async def test_forget_by_url_preserves_external_references(ha):
+    source = ha.base / "www/activity_images/keep.png"
+    source.parent.mkdir(parents=True)
+    Image.new("RGBA", (32, 32)).save(source)
+    cache = cache_module.ActivityImageCache(ha)
+    await cache.async_setup()
+    await cache.async_remember("Pierwsze", "/local/activity_images/keep.png")
+    await cache.async_remember("Drugie", "/local/activity_images/keep.png")
+    assert cache.references_url("/local/activity_images/keep.png?v=123")
+    await cache.async_forget_url("/local/activity_images/keep.png?v=456")
+    assert not cache.references_url("/local/activity_images/keep.png")
+    assert source.is_file()
+
+
+@pytest.mark.asyncio
+async def test_new_storage_namespace_keeps_old_home_tasks_data_unchanged(ha):
+    import copy
+    original = {"entries": {"old": {"image_url": "https://example.com/icon.png"}}}
+    ha.saved["home_tasks_image_cache"] = copy.deepcopy(original)
+    cache = cache_module.ActivityImageCache(ha)
+    await cache.async_setup()
+    await cache.async_remember("Nowe", "https://example.com/new.png")
+    assert ha.saved["home_tasks_image_cache"] == original
+    assert "activity_images_image_cache" in ha.saved
+
+
+@pytest.mark.asyncio
+async def test_recovery_from_malformed_cache_metadata(ha):
+    ha.saved["activity_images_image_cache"] = {
+        "entries": {
+            "test": {
+                "title": "Test", "image_url": "https://example.com/test.png",
+                "last_used_at": "not-a-number",
+            }
+        },
+        "canvas_normalization_version": 2,
+    }
+    cache = cache_module.ActivityImageCache(ha)
+    await cache.async_setup()
+    assert cache._entries["test"]["last_used_at"] == 0
+    assert await cache.async_find("test") == "https://example.com/test.png"
+
+
+@pytest.mark.asyncio
+async def test_explicit_generation_always_calls_provider(ha, configured):
+    _, engine = configured
+    first = await engine.async_generate("Rozwijanie")
+    second = await engine.async_generate_activity_image("Rozwijanie")
+    assert isinstance(second, str) and second.startswith("/local/activity_images/")
+    assert second != first["image_url"]
+    assert len(ha.services.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_existing_image_normalizer_creates_derived_files(ha):
+    source = ha.base / "www/activity_images/legacy.png"
+    source.parent.mkdir(parents=True)
+    image = Image.new("RGBA", (80, 80), (0, 0, 0, 0))
+    ImageDraw.Draw(image).rectangle((20, 20, 60, 60), fill=(25, 150, 80, 255))
+    image.save(source)
+    stamp = await ha.async_add_executor_job(
+        generated_module.normalize_existing_generated_image, source
+    )
+    assert stamp > 0
+    with Image.open(source) as rendered:
+        assert rendered.height == 512
+    assert source.with_name("legacy_thumb.webp").exists()
+    assert source.with_name("legacy_qa.webp").exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_failed_retry_clears_failure_marker(ha, configured, monkeypatch):
+    _, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_setup()
+    await queue.async_enqueue(["Powtorka"])
+    queue._failed["powtorka"] = "Network unavailable"
+    assert await queue.async_cancel(["Powtorka"]) == 1
+    assert not queue.status()["failed"]
+    assert not queue.status()["pending"]
