@@ -413,3 +413,83 @@ def test_prompts_from_fork_are_kept():
     assert "chroma-key" in room
     assert "isometric" in room
     assert "isometric" not in isolated
+
+
+@pytest.mark.asyncio
+async def test_lucida_valid_transparency_is_used(ha, monkeypatch):
+    from io import BytesIO
+
+    opaque = Image.new("RGB", (64, 64), (255, 255, 255))
+    raw = BytesIO()
+    opaque.save(raw, format="PNG")
+    original = raw.getvalue()
+
+    cutout = Image.new("RGBA", (64, 64), (25, 50, 100, 0))
+    cutout.putpixel((20, 20), (25, 50, 100, 255))
+    out = BytesIO()
+    cutout.save(out, format="PNG")
+    returned = out.getvalue()
+
+    class Response:
+        content_length = len(returned)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            pass
+
+        def raise_for_status(self):
+            pass
+
+        async def iter_chunked(self, _size):
+            yield returned
+
+    class Client:
+        def post(self, url, *, data, timeout):
+            assert url == "http://lucida.test/remove"
+            return Response()
+
+    monkeypatch.setattr(generated_module, "async_get_clientsession", lambda _: Client())
+    result = await generated_module._maybe_remove_background(
+        ha, original, "http://lucida.test/remove"
+    )
+    assert result == returned
+
+
+@pytest.mark.asyncio
+async def test_lucida_failure_uses_original_fallback(ha, monkeypatch):
+    import aiohttp
+    from io import BytesIO
+
+    opaque = Image.new("RGB", (64, 64), (255, 255, 255))
+    raw = BytesIO()
+    opaque.save(raw, format="PNG")
+
+    class Client:
+        def post(self, *args, **kwargs):
+            raise aiohttp.ClientError("Unavailable")
+
+    monkeypatch.setattr(generated_module, "async_get_clientsession", lambda _: Client())
+    result = await generated_module._maybe_remove_background(
+        ha, raw.getvalue(), "http://lucida.test/remove"
+    )
+    assert result == raw.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_lucida_is_skipped_for_existing_alpha(ha, monkeypatch):
+    from io import BytesIO
+
+    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    image.putpixel((20, 20), (50, 20, 100, 255))
+    raw = BytesIO()
+    image.save(raw, format="PNG")
+
+    def must_not_call(_):
+        raise AssertionError("Lucida should not run for transparent PNG")
+
+    monkeypatch.setattr(generated_module, "async_get_clientsession", must_not_call)
+    assert await generated_module._maybe_remove_background(
+        ha, raw.getvalue(), "http://lucida.test/remove"
+    ) == raw.getvalue()
