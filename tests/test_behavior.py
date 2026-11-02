@@ -334,3 +334,82 @@ def test_generated_image_alpha_detection():
     out = BytesIO()
     image.save(out, format="PNG")
     assert generated_module._already_transparent(out.getvalue()) is True
+
+
+@pytest.mark.asyncio
+async def test_batch_lookup_updates_cache_once(ha):
+    path = ha.base / "www/activity_images/same.png"
+    path.parent.mkdir(parents=True)
+    Image.new("RGBA", (5, 5)).save(path)
+    cache = cache_module.ActivityImageCache(ha)
+    await cache.async_setup()
+    await cache.async_remember("Odkurzanie", "/local/activity_images/same.png")
+    await cache.async_remember("Sprzątanie", "/local/activity_images/same.png")
+    writes = 0
+    original_save = cache._save
+
+    async def count_writes():
+        nonlocal writes
+        writes += 1
+        await original_save()
+
+    cache._save = count_writes
+    found = await cache.async_find_many(["Odkurzanie", "Sprzątanie"])
+    assert len(found) == 2
+    assert writes == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_does_not_cancel_active_job(ha, configured, monkeypatch):
+    _, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_setup()
+    await queue.async_enqueue(["Active", "Waiting"])
+    queue._current = "Active"
+    assert await queue.async_cancel(["Active", "Waiting"]) == 1
+    assert queue.status()["pending"] == ["Active"]
+
+
+@pytest.mark.asyncio
+async def test_corrupt_cooldown_recovers(ha, configured, monkeypatch):
+    _, engine = configured
+    ha.saved["activity_images_jobs"] = {"next_run": "not-a-number", "pending": []}
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_setup()
+    assert queue.status()["next_run_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_opaque_background_fallback(ha):
+    from io import BytesIO
+
+    image = Image.new("RGB", (128, 128), (255, 0, 255))
+    ImageDraw.Draw(image).ellipse((30, 30, 98, 98), fill=(25, 90, 180))
+    raw = BytesIO()
+    image.save(raw, format="PNG")
+    data = await generated_module._maybe_remove_background(ha, raw.getvalue(), None)
+    target = ha.base / "www/activity_images/opaque.png"
+    status = await ha.async_add_executor_job(generated_module._process, data, target)
+    assert status in ("background_removed", "review_needed_unsafe_mask", "review_needed_complex_background")
+    with Image.open(target) as normalized:
+        assert normalized.mode == "RGBA"
+        assert normalized.height == 512
+
+
+@pytest.mark.asyncio
+async def test_media_response_without_file_is_rejected(ha, configured):
+    _, engine = configured
+    ha.services.response = {"url": "/api/media_source/proxy/bad-token"}
+    with pytest.raises(ValueError, match="HTTP"):
+        await engine.async_generate("Malformed URL")
+
+
+def test_prompts_from_fork_are_kept():
+    isolated = prompts_module.build_activity_image_instructions("Posprzątaj zabawki")
+    room = prompts_module.build_activity_image_instructions("Pokój Hani")
+    assert "chroma-key" in isolated
+    assert "chroma-key" in room
+    assert "isometric" in room
+    assert "isometric" not in isolated
