@@ -26,6 +26,11 @@ class ActivityImageGenerator:
         self.settings = settings
         self._lock = asyncio.Lock()
 
+    async def async_generate_activity_image(self, title: str) -> str:
+        """Preserve the original manual action's always-regenerate contract."""
+        result = await self.async_generate(title, force=True)
+        return result["image_url"]
+
     async def async_generate(self, title: str, *, force: bool = False) -> dict:
         """Resolve existing or create a new image and return its public URL."""
         title = title.strip()
