@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from PIL import Image, ImageDraw
 
 
@@ -56,7 +57,7 @@ async def fake_resolve_media(hass, source, _user):
     return SimpleNamespace(path=hass.medias[source], url="")
 
 
-class TestHA:
+class MockHA:
     def __init__(self, temp):
         self.base = Path(temp)
         self.data = {}
@@ -96,7 +97,7 @@ class FakeServices:
         return {"media_source_id": "media-source://generated/test"}
 
 
-sys.modules["homeassistant.core"].HomeAssistant = TestHA
+sys.modules["homeassistant.core"].HomeAssistant = MockHA
 sys.modules["homeassistant.helpers.storage"].Store = MemoryStore
 sys.modules["homeassistant.components.media_source"].async_resolve_media = fake_resolve_media
 sys.modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession = lambda hass: None
@@ -111,10 +112,10 @@ prompts_module = importlib.import_module("custom_components.activity_images.prom
 
 @pytest.fixture
 def ha(tmp_path):
-    return TestHA(tmp_path)
+    return MockHA(tmp_path)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def configured(ha):
     cache = cache_module.ActivityImageCache(ha)
     await cache.async_setup()
