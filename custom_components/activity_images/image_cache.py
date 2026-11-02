@@ -90,7 +90,7 @@ class ActivityImageCache:
             Path(self.hass.config.path("www", "activity_images", name)).is_file
         )
 
-    async def async_find(self, title: str, *, similar: bool = True) -> str | None:
+    async def async_find(self, title: str, *, similar: bool = True, touch: bool = True) -> str | None:
         key = normalize_title(title)
         if not key:
             return None
@@ -98,7 +98,8 @@ class ActivityImageCache:
         if exact:
             url = exact["image_url"]
             if await self._exists(url):
-                await self._touch([url])
+                if touch:
+                    await self._touch([url])
                 return url
             self._entries.pop(key, None)
             self._rebuild_index()
@@ -129,7 +130,8 @@ class ActivityImageCache:
             self._rebuild_index()
             await self._save()
             return None
-        await self._touch([url])
+        if touch:
+            await self._touch([url])
         return url
 
     async def async_find_many(
@@ -137,9 +139,12 @@ class ActivityImageCache:
     ) -> dict[str, str]:
         found: dict[str, str] = {}
         for title in titles:
-            url = await self.async_find(title, similar=similar)
+            url = await self.async_find(title, similar=similar, touch=False)
             if url:
                 found[title] = url
+        if found:
+            # Batch last-used updates as the original fork did.
+            await self._touch(list(set(found.values())))
         return found
 
     async def async_remember(self, title: str, url: str) -> None:
