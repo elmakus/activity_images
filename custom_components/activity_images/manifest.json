@@ -15,8 +15,5 @@
   ],
   "dependencies": [
     "media_source"
-  ],
-  "requirements": [
-    "Pillow>=10.0.0"
   ]
 }
