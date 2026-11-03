@@ -2,7 +2,7 @@
 
 Development base: Stage 3 commit `5895b79d3cbfab453781a7173344c892e4201fd4`.
 Target: new test HA `192.168.2.180`, Core `2026.11.0b2`.
-**Status: live sensor, PNG mapping and reactive WebSocket template validated. Browser display of card D still awaits user confirmation.**
+**Status: stage 4 backend and visual icon rendering validated. The user confirmed card D displays the expected image. Automatic visual repaint in an already-open browser has not separately been verified; server-side reactive updates have passed.**
 
 ## Changes installed on new HA (separate experimental dashboard only)
 
@@ -82,10 +82,15 @@ the literal browser repaint. No images were generated.
 - User-facing Home Assistant labels, YAML configuration samples and integration
   code comments are in English.
 
+## User visual confirmation
+
+- The user opened the test dashboard and explicitly confirmed that card **D. Activity Images Library (live sensor)** correctly displays the icon for **Green Waste Collection**.
+- The live Home Assistant template subscription also updated automatically when the image mapping changed, as documented above.
+- **Not yet directly observed:** actual visual repaint inside a continuously open browser when the image mapping changes; do not conflate that with successful server-side WebSocket updates.
+
 ## Still pending
 
-- **User-visible confirmation** that card D displays its PNG in a normal
-  browser and can visually update without a manual reload.
+- Final browser-level no-reload repaint check if needed before a production rollout.
 - Real AI provider + Lucida endpoint tests, complete migration of old
   artwork, and Home Tasks wrapper (later stages).
 - This is an experimental staged implementation; four draft PRs remain unmerged.
@@ -106,5 +111,4 @@ the literal browser repaint. No images were generated.
 
 `http://192.168.2.180/calendar-pro-test/ikony`
 
-Look for **D. Activity Images Library (live sensor)**. Confirm
-`Green Waste Collection` has its green-waste PNG.
+**Confirmed by the user:** **D. Activity Images Library (live sensor)** displays the expected PNG for `Green Waste Collection`.
