@@ -4,7 +4,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 6 (development branch):** the standalone library and native AI Task wrapper run on new HA `192.168.2.180`. **202 PNG/WebP assets and 64 legacy mappings** were migrated. The real CLIProxyAPI/Gemini provider was connected; a single `Playing the Cello` PNG with transparent background was successfully generated. **Unmodified upstream Home Tasks 2.5.0** then called `ai_task.activity_images`, reused that image with no further provider request, and saved an identical PNG to its own test task. The user confirmed the image also renders correctly in the original Home Tasks test dashboard. Automatic generation remains disabled. See `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`.
+**Release candidate v0.1.0 (not yet published):** the standalone library and native AI Task wrapper run on new HA `192.168.2.180`. **202 PNG/WebP assets and 64 legacy mappings** were migrated. The real CLIProxyAPI/Gemini provider was connected; a single `Playing the Cello` PNG with transparent background was successfully generated. **Unmodified upstream Home Tasks 2.5.0** then called `ai_task.activity_images`, reused that image with no further provider request, and saved an identical PNG to its own test task. The user confirmed the image also renders correctly in the original Home Tasks test dashboard. Automatic generation remains disabled. See `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`.
 
 ## Capabilities
 
@@ -19,10 +19,10 @@ Standalone activity-icon generator for [Home Assistant](https://www.home-assista
 - Watch up to 10 selected `calendar.*` entities, scan upcoming events (30 days by default, up to 60), and safely resolve at most 64 distinct titles with 15-minute polling plus calendar state-change refreshes.
 - Publish `sensor.activity_images_library` with the `images` map and pre-escaped `calendar_rules` attribute for Auto-Entities + Calendar Card Pro; refresh after each newly generated PNG.
 - Automatically generating missing calendar illustrations is **off by default** to prevent surprise provider usage. Enable it in the integration's options after reviewing the existing library.
-- Expose an optional `ai_task.activity_images` wrapper for unmodified upstream Home Tasks. The wrapper extracts the task title from the official upstream request, builds the full original prompt, and returns the processed PNG through the official AI Task entity interface. This is not yet deployed.
+- Expose an optional `ai_task.activity_images` wrapper for unmodified upstream Home Tasks. The wrapper extracts the task title from the official upstream request, builds the full original prompt, and returns the processed PNG through the official AI Task entity interface. The wrapper was deployed and verified with unmodified Home Tasks 2.5.0 on the test Home Assistant.
 - Existing files survive cache eviction. No changes to Home Tasks or other Home Assistant integrations.
 
-## Installation (development only)
+## Manual installation (release pending)
 
 Copy the `custom_components/activity_images` directory to `/config/custom_components/activity_images`, restart Home Assistant, and add **Activity Images** in **Settings → Devices & services**. An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
 
@@ -61,7 +61,7 @@ data:
 
 The action immediately returns cached `images`, `image_metadata`, the newly `queued` titles, and `queue_size`. A request may include **1–64 activity titles**, each up to 255 characters. Query `activity_images.queue_status` for pending and failed titles. The actions are registered once at integration startup; without a configured generator they return a clear error. Queued work runs independently of an open dashboard. On terminal failure a title is stored in `failed` and is **not** retried automatically on future scans. Use `activity_images.clear_errors` to permit a fresh attempt. `activity_images.cancel_queued` cancels waiting titles; `activity_images.forget_image` removes cached mappings without deleting PNG/WebP files. The generator does **not** yet automatically discover Home Tasks tasks. Selected calendar events are scanned independently of any dashboard.
 
-## Calendar library (development)
+## Calendar library
 
 Select calendars in **Settings → Devices & services → Activity Images → Configure**.
 The new `sensor.activity_images_library` provides the cached URLs in the `images`
@@ -95,7 +95,7 @@ titles, matched images and the most recent scan error (if any).
 A 15-minute calendar refresh interval is for detecting event changes and is
 **not a generation cooldown**.
 
-## Home Tasks wrapper (Stage 5, development only)
+## Home Tasks wrapper
 
 The integration exposes `ai_task.activity_images` alongside
 `sensor.activity_images_library`. It requires an actual **different**
@@ -144,7 +144,7 @@ Limitations:
 a new transparent PNG through Activity Images, and the original upstream
 Home Tasks 2.5.0 called the wrapper and reused this cached PNG without
 another paid provider request. A separate test dashboard is available at
-`/home-tasks-image-test/validation`; browser confirmation is pending.
+`/home-tasks-image-test/validation`; the user confirmed the original card renders the generated image.
 Keep automatic generation disabled until final release acceptance.
 
 ## Safety and migration
@@ -159,7 +159,7 @@ The optional Lucida URL is configured locally; no server address or API credenti
 2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
 3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** live sensor and test dashboard D verified (see `docs/STAGE4_FRONTEND_RESULT.md`), with visible icon confirmed by the user.
 4. **Stage 5:** `ai_task.activity_images` wrapper, deployed on new HA and live-tested with unchanged upstream Home Tasks 2.5.0 (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md` and live test report).
-5. **Stage 6:** migrated 202 images and 64 mappings, validated real Gemini generation and upstream Home Tasks wrapper/cached image reuse (see `docs/STAGE6_MIGRATION_RESULT.md` and `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`). Browser confirmation and stable release/HACS acceptance remain pending.
+5. **Stage 6:** migrated 202 images and 64 mappings, validated real Gemini generation and upstream Home Tasks wrapper/cached image reuse (see `docs/STAGE6_MIGRATION_RESULT.md` and `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`). Browser confirmation passed; Marketplace/HACS validation and the first release remain pending.
 
 ## Attribution
 
