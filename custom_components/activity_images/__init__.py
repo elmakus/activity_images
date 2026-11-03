@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
+from .calendar_adapter import ActivityCalendarAdapter
 from .const import DOMAIN
 from .engine import ActivityImageGenerator
 from .image_cache import ActivityImageCache, async_get_cache
@@ -38,6 +39,7 @@ class ActivityImagesRuntime:
     generator: ActivityImageGenerator
     queue: ActivityImageQueue
     cache: ActivityImageCache
+    calendar: ActivityCalendarAdapter
 
 
 def _get_runtime(hass: HomeAssistant) -> ActivityImagesRuntime:
@@ -68,6 +70,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     async def status(call: ServiceCall) -> dict:
         return _get_runtime(hass).queue.status()
 
+    async def refresh_calendars(call: ServiceCall) -> dict:
+        return await _get_runtime(hass).calendar.async_refresh()
+
     async def cancel(call: ServiceCall) -> dict:
         return {
             "cancelled": await _get_runtime(hass).queue.async_cancel(call.data["titles"])
@@ -81,11 +86,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         image_url = call.data.get("image_url")
         if not title and not image_url:
             raise HomeAssistantError("Specify a title or image_url to forget")
-        return {
-            "removed": await _get_runtime(hass).cache.async_forget(
-                title=title, url=image_url,
-            )
-        }
+        runtime = _get_runtime(hass)
+        removed = await runtime.cache.async_forget(title=title, url=image_url)
+        await runtime.calendar.async_reconcile()
+        return {"removed": removed}
 
     hass.services.async_register(
         DOMAIN, "generate_image", generate,
@@ -117,6 +121,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
+        DOMAIN, "refresh_calendars", refresh_calendars,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
         DOMAIN, "forget_image", forget,
         schema=vol.Schema({
             vol.Optional("title"): _TITLE,
@@ -139,11 +147,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     generator = ActivityImageGenerator(hass, cache, settings)
     queue = ActivityImageQueue(hass, generator)
     await queue.async_setup()
-    runtime = ActivityImagesRuntime(generator=generator, queue=queue, cache=cache)
+    calendar = ActivityCalendarAdapter(hass, cache, queue, settings)
+    runtime = ActivityImagesRuntime(
+        generator=generator, queue=queue, cache=cache, calendar=calendar,
+    )
     entry.runtime_data = runtime
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
+    generator.image_saved_callback = calendar.image_saved
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+        await calendar.async_start()
+    except Exception:
+        generator.image_saved_callback = None
+        await calendar.async_shutdown()
+        await queue.async_shutdown()
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        raise
     entry.async_on_unload(entry.add_update_listener(_reload_entry))
-    _LOGGER.info("Activity Images standalone generator configured")
+    _LOGGER.info("Activity Images standalone generator and calendar library initialized")
     return True
 
 
@@ -151,6 +172,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Stop the queue while retaining the configured action registrations."""
     runtime: ActivityImagesRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if runtime is not None:
+        if not await hass.config_entries.async_unload_platforms(entry, ["sensor"]):
+            return False
+        runtime.generator.image_saved_callback = None
+        await runtime.calendar.async_shutdown()
         await runtime.queue.async_shutdown()
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return True

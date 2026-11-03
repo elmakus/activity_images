@@ -65,6 +65,18 @@ class MockHA:
         self.medias = {}
         self.config = SimpleNamespace(path=self.path)
         self.services = FakeServices(self)
+        self.config_entries = SimpleNamespace(
+            async_forward_entry_setups=self._forward_platforms,
+            async_unload_platforms=self._unload_platforms,
+        )
+        self.forwarded = []
+
+    async def _forward_platforms(self, entry, platforms):
+        self.forwarded.append(("load", tuple(platforms)))
+
+    async def _unload_platforms(self, entry, platforms):
+        self.forwarded.append(("unload", tuple(platforms)))
+        return True
 
     def path(self, *parts):
         return str(self.base.joinpath(*parts))
@@ -767,6 +779,22 @@ def _load_integration_entrypoint():
         _package("homeassistant.helpers.config_validation")
     core = sys.modules["homeassistant.core"]
     core.ServiceCall = SimpleNamespace
+    core.callback = lambda func: func
+    if "homeassistant.helpers.event" not in sys.modules:
+        _package("homeassistant.helpers.event")
+    sys.modules["homeassistant.helpers.event"].async_track_state_change_event = (
+        lambda hass, ids, listener: lambda: None
+    )
+    sys.modules["homeassistant.helpers.event"].async_track_time_interval = (
+        lambda hass, listener, interval: lambda: None
+    )
+    if "homeassistant.util" not in sys.modules:
+        _package("homeassistant.util")
+    if "homeassistant.util.dt" not in sys.modules:
+        _package("homeassistant.util.dt")
+    from datetime import datetime, timezone
+    sys.modules["homeassistant.util.dt"].now = lambda: datetime.now(timezone.utc)
+    sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
     core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
     sys.modules["homeassistant.config_entries"].ConfigEntry = object
 
@@ -806,9 +834,10 @@ class MockConfigEntry:
 async def test_actions_register_once_in_setup_before_config_entry(ha, configured):
     integration = _load_integration_entrypoint()
     assert await integration.async_setup(ha, {})
-    assert len(ha.services.registered) == 6
+    assert len(ha.services.registered) == 7
     for name in ("generate_image", "resolve_images", "queue_status",
-                 "cancel_queued", "clear_errors", "forget_image"):
+                 "cancel_queued", "clear_errors", "forget_image",
+                 "refresh_calendars"):
         assert ha.services.has_service("activity_images", name)
     with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError,
                        match="not configured"):
@@ -818,7 +847,7 @@ async def test_actions_register_once_in_setup_before_config_entry(ha, configured
     assert await integration.async_setup_entry(ha, entry)
     assert entry.runtime_data is not None
     assert entry.runtime_data.cache is not None
-    assert len(ha.services.registered) == 6
+    assert len(ha.services.registered) == 7
     first = await ha.services.async_call(
         "activity_images", "generate_image", {"title": "Green Waste Collection"}
     )
@@ -854,7 +883,7 @@ async def test_actions_register_once_in_setup_before_config_entry(ha, configured
     assert (ha.base / "www" / first["image_url"].split("?", 1)[0].removeprefix("/local/")).is_file()
 
     assert await integration.async_unload_entry(ha, entry)
-    assert len(ha.services.registered) == 6
+    assert len(ha.services.registered) == 7
     assert entry.entry_id not in ha.data["activity_images"]
     with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError,
                        match="not configured"):
@@ -920,5 +949,254 @@ async def test_unload_and_reconfigure_keep_services_and_cached_images(ha):
     )
     assert second["reused"] is True
     assert len(ha.services.calls) == 1
-    assert len(ha.services.registered) == 6
+    assert len(ha.services.registered) == 7
     await integration.async_unload_entry(ha, entry)
+
+
+def _calendar_test_setup(ha, configured, monkeypatch, events, *,
+                         enabled=False, calendars=("calendar.school",)):
+    integration = _load_integration_entrypoint()
+    from custom_components.activity_images.calendar_adapter import ActivityCalendarAdapter
+
+    cache, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+
+    async def fake_calendar_service(call):
+        return events
+
+    ha.services.async_register("calendar", "get_events", fake_calendar_service)
+    settings = {
+        const_module.CONF_CALENDARS: list(calendars),
+        const_module.CONF_LOOKAHEAD_DAYS: 30,
+        const_module.CONF_AUTO_GENERATE: enabled,
+    }
+    adapter = ActivityCalendarAdapter(ha, cache, queue, settings)
+    return adapter, queue, integration
+
+
+def test_calendar_rules_escaped_for_js_regex():
+    _load_integration_entrypoint()
+    import re
+    from custom_components.activity_images.calendar_adapter import escape_event_title
+    samples = [
+        "Dentist (Hanna) + checkup?",
+        "Escape [square] {braces} .*",
+        r"Windows\home & kids | family",
+        "Green Waste Collection",
+        "Pfadi – Musikschule",
+    ]
+    for title in samples:
+        escaped = escape_event_title(title)
+        assert re.fullmatch(escaped, title)
+        assert re.fullmatch(escaped, "Not " + title) is None
+    assert escape_event_title("Green Waste Collection") == "Green Waste Collection"
+
+
+@pytest.mark.asyncio
+async def test_calendar_adapter_reads_opt_in_events_and_reuses_cache(ha, configured, monkeypatch):
+    cache, _engine = configured
+    img = ha.base / "www/activity_images/known.png"
+    img.parent.mkdir(parents=True)
+    Image.new("RGBA", (40, 30)).save(img)
+    await cache.async_remember(
+        "Green Waste Collection", "/local/activity_images/known.png"
+    )
+    data = {
+        "calendar.school": {"events": [
+            {"summary": "Green Waste Collection", "start": "2026-11-10"},
+            {"summary": "Green Waste Collection", "start": "2026-11-17"},
+            {"summary": "Dentist (Hanna) + checkup?", "start": "2026-11-11"},
+            {"summary": "", "start": "2026-11-11"},
+            {"summary": "Cancelled", "status": "cancelled"},
+        ]},
+        "calendar.work": {"events": [
+            {"summary": "Green Waste Collection", "start": "2026-11-19"},
+            {"summary": "Lunch", "start": "2026-11-20"},
+        ]},
+    }
+    adapter, queue, _integration = _calendar_test_setup(
+        ha, configured, monkeypatch, data,
+        calendars=("calendar.school", "calendar.work"),
+    )
+    seen = []
+    adapter.add_listener(lambda: seen.append(dict(adapter.images)))
+    result = await adapter.async_refresh()
+    assert result["tracked_titles"] == 4  # Counts calendar/title pairs, not unique titles.
+    assert result["images"] == 1
+    assert result["automatic_generation"] is False
+    assert queue.status()["pending"] == []
+    assert adapter.images == {
+        "Green Waste Collection": "/local/activity_images/known.png"
+    }
+    assert len(seen) == 1
+    rules = adapter.rules
+    assert len(rules) == 4  # One image & fallback on each selected calendar.
+    assert len([r for r in rules if r.get("label_type") == "image"]) == 2
+    assert all(r["entity"].startswith("calendar.") for r in rules)
+    assert all(r.get("blocklist") != "(?!)" for r in rules)
+    assert adapter.last_scan
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_calendar_adapter_generation_opt_in_and_no_duplicate_queue(ha, configured, monkeypatch):
+    events = {"calendar.school": {"events": [
+        {"summary": "Jazz Class"},
+        {"summary": "Jazz Class"},
+        {"summary": "Swimming Lessons"},
+        {"summary": "School"},
+    ]}}
+    adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, events, enabled=True)
+    await adapter.async_refresh()
+    assert queue.status()["pending"] == ["Jazz Class", "Swimming Lessons", "School"]
+    await adapter.async_refresh()
+    assert queue.status()["pending"] == ["Jazz Class", "Swimming Lessons", "School"]
+    assert queue.status()["next_run_at"] is None
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_calendar_adapter_image_saved_refreshes_map_without_polling(ha, configured, monkeypatch):
+    events = {"calendar.school": {"events": [{"summary": "Doctor (Hanna) + Checkup?"}]}}
+    adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, events)
+    calls = 0
+    original_call = ha.services.async_call
+
+    async def track_call(*args, **kwargs):
+        nonlocal calls
+        if args[:2] == ("calendar", "get_events"):
+            calls += 1
+        return await original_call(*args, **kwargs)
+
+    monkeypatch.setattr(ha.services, "async_call", track_call)
+    await adapter.async_refresh()
+    assert calls == 1
+    assert adapter.images == {}
+    captured = []
+    adapter.add_listener(lambda: captured.append(dict(adapter.images)))
+    img = ha.base / "www/activity_images/new.png"
+    img.parent.mkdir(parents=True)
+    Image.new("RGBA", (60, 40)).save(img)
+    url = "/local/activity_images/new.png?v=23"
+    await configured[0].async_remember("Doctor (Hanna) + Checkup?", url)
+    adapter.image_saved("Doctor (Hanna) + Checkup?", url)
+    await asyncio.wait_for(adapter._reconcile_task, 3)
+    assert calls == 1  # Refreshing the library never re-queries calendar provider.
+    assert adapter.images == {"Doctor (Hanna) + Checkup?": url}
+    image_rule = [r for r in adapter.rules if r.get("label_type") == "image"][0]
+    assert image_rule["allowlist"] == r"^Doctor \(Hanna\) \+ Checkup\?$"
+    assert image_rule["label"] == url
+    assert captured[-1] == adapter.images
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_calendar_refresh_failure_preserves_last_known_icons(ha, configured, monkeypatch):
+    events = {"calendar.school": {"events": [{"summary": "First icon"}]}}
+    adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, events)
+    await adapter.async_refresh()
+    old_titles = dict(adapter.calendar_titles)
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("Temporary calendar failure")
+
+    monkeypatch.setattr(ha.services, "async_call", unavailable)
+    result = await adapter.async_refresh()
+    assert result["error"] == "RuntimeError: Temporary calendar failure"
+    assert adapter.calendar_titles == old_titles
+    assert adapter.rules[0]["entity"] == "calendar.school"
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_calendar_title_limit_and_shutdown_unsubscribe(ha, configured, monkeypatch):
+    events = {"calendar.school": {"events": [
+        {"summary": f"Event {i}"} for i in range(150)
+    ]}}
+    adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, events, enabled=True)
+    await adapter.async_refresh()
+    assert len(adapter.calendar_titles["calendar.school"]) == 64
+    assert len(queue.status()["pending"]) == 64
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_calendar_start_tracks_state_and_periodic_scan(ha, configured, monkeypatch):
+    events = {"calendar.school": {"events": [{"summary": "An event"}]}}
+    adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, events)
+    import custom_components.activity_images.calendar_adapter as adapter_module
+
+    tracked = []
+    unsubscribed = []
+    callbacks = []
+
+    def fake_track_state(hass, ids, callback):
+        tracked.append(("state", tuple(ids)))
+        callbacks.append(callback)
+        return lambda: unsubscribed.append("state")
+
+    def fake_track_time(hass, callback, interval):
+        tracked.append(("time", interval.total_seconds()))
+        callbacks.append(callback)
+        return lambda: unsubscribed.append("time")
+
+    monkeypatch.setattr(adapter_module, "async_track_state_change_event", fake_track_state)
+    monkeypatch.setattr(adapter_module, "async_track_time_interval", fake_track_time)
+    await adapter.async_start()
+    assert ("state", ("calendar.school",)) in tracked
+    assert ("time", 15 * 60) in tracked
+    assert adapter.calendar_titles["calendar.school"] == ["An event"]
+    callbacks[0](None)
+    await asyncio.wait_for(adapter._scan_task, 3)
+    await adapter.async_shutdown()
+    assert set(unsubscribed) == {"state", "time"}
+
+
+@pytest.mark.asyncio
+async def test_calendar_service_response_must_be_mapping(ha, configured, monkeypatch):
+    adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, [])
+    result = await adapter.async_refresh()
+    assert "did not return a calendar mapping" in result["error"]
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_real_engine_callback_updates_adapter_after_generation(ha, configured, monkeypatch):
+    cache, engine = configured
+    events = {"calendar.school": {"events": [{"summary": "New activity"}]}}
+    adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, events)
+    await adapter.async_refresh()
+    engine.image_saved_callback = adapter.image_saved
+    result = await engine.async_generate("New activity")
+    assert result["reused"] is False
+    await asyncio.wait_for(adapter._reconcile_task, 3)
+    assert adapter.images["New activity"] == result["image_url"]
+    assert len(ha.services.calls) == 1
+    engine.image_saved_callback = None
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_integration_calendar_service_and_platform_lifecycle(ha, monkeypatch):
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    entry.options = {
+        const_module.CONF_CALENDARS: ["calendar.school"],
+        const_module.CONF_AUTO_GENERATE: False,
+        const_module.CONF_LOOKAHEAD_DAYS: 30,
+    }
+    async def get_events(call):
+        return {"calendar.school": {"events": [{"summary": "New event"}]}}
+
+    ha.services.async_register("calendar", "get_events", get_events)
+    assert await integration.async_setup_entry(ha, entry)
+    assert ("load", ("sensor",)) in ha.forwarded
+    assert entry.runtime_data.calendar.calendar_titles["calendar.school"] == ["New event"]
+    assert len(ha.services.registered) == 8  # Seven activity actions + calendar service.
+    result = await ha.services.async_call("activity_images", "refresh_calendars", {})
+    assert result["tracked_titles"] == 1
+    assert await integration.async_unload_entry(ha, entry)
+    assert ("unload", ("sensor",)) in ha.forwarded
+    assert entry.entry_id not in ha.data["activity_images"]

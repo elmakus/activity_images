@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure Activity Images",
+        "description": "Select one AI Task image provider, optional style reference and Lucida background removal. Calendars are opt-in; automatic calendar image generation is disabled by default.",
+        "data": {
+          "ai_task_entity_id": "AI Task entity",
+          "reference_media_content_id": "Reference image (media-source://)",
+          "lucida_url": "Lucida background-removal URL",
+          "calendar_entity_ids": "Calendars to watch (optional)",
+          "calendar_lookahead_days": "Upcoming calendar days (1–60)",
+          "generate_missing_calendar_images": "Automatically generate icons for calendar events"
+        }
+      }
+    },
+    "error": {
+      "invalid_settings": "Invalid settings: check media-source reference and Lucida URL."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Activity Images settings",
+        "data": {
+          "ai_task_entity_id": "AI Task entity",
+          "reference_media_content_id": "Reference image (media-source://)",
+          "lucida_url": "Lucida background-removal URL",
+          "calendar_entity_ids": "Calendars to watch (optional)",
+          "calendar_lookahead_days": "Upcoming calendar days (1–60)",
+          "generate_missing_calendar_images": "Automatically generate icons for calendar events"
+        }
+      }
+    },
+    "error": {
+      "invalid_settings": "Invalid settings: check media-source reference and Lucida URL."
+    }
+  }
+}

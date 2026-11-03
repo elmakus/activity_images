@@ -19,6 +19,7 @@ from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from custom_components.activity_images import (  # noqa: E402
     async_setup, async_setup_entry, async_unload_entry,
 )
+from custom_components.activity_images.sensor import ActivityImagesLibrarySensor  # noqa: E402
 
 
 class TestEntry:
@@ -68,7 +69,33 @@ async def run():
             assert media == "media-source://ai_task/image/test.png"
             return SimpleNamespace(path=source, url="/api/ai_task/image/test.png")
 
+        async def mock_get_events(call):
+            assert call.data["entity_id"] == ["calendar.demo"]
+            return {"calendar.demo": {"events": [
+                {"summary": "Green Waste Collection", "start": "2026-11-03T09:00:00"}
+            ]}}
+
+        hass.services.async_register(
+            "calendar", "get_events", mock_get_events,
+            supports_response=SupportsResponse.ONLY,
+        )
         entry = TestEntry()
+        entry.data = {
+            "ai_task_entity_id": "ai_task.mock",
+            "calendar_entity_ids": ["calendar.demo"],
+            "calendar_lookahead_days": 30,
+            "generate_missing_calendar_images": False,
+        }
+        async def fake_forward(*_args, **_kwargs):
+            return None
+
+        async def fake_unload(*_args, **_kwargs):
+            return True
+
+        hass.config_entries = SimpleNamespace(
+            async_forward_entry_setups=fake_forward,
+            async_unload_platforms=fake_unload,
+        )
         with patch(
             "custom_components.activity_images.generated_image.async_resolve_media",
             side_effect=mock_resolve,
@@ -80,6 +107,12 @@ async def run():
                 blocking=True, return_response=True,
             )
             assert first["reused"] is False
+            assert entry.runtime_data.calendar.calendars == ("calendar.demo",)
+            await asyncio.sleep(0.02)
+            sensor = ActivityImagesLibrarySensor(entry.entry_id, entry.runtime_data.calendar)
+            assert sensor.native_value == 1
+            assert sensor.extra_state_attributes["images"]["Green Waste Collection"] == first["image_url"]
+            assert sensor.extra_state_attributes["calendar_rules"][0]["label_type"] == "image"
             second = await hass.services.async_call(
                 "activity_images", "generate_image",
                 {"title": "Green Waste Collection"},
@@ -105,6 +138,6 @@ async def run():
             else:
                 raise AssertionError("Service should reject calls after unload")
 
-        print("ACTUAL_HA_2026_10_4_SMOKE_PASS", len(provider_calls), first["image_url"])
+        print("ACTUAL_HA_2026_10_4_CALENDAR_SMOKE_PASS", len(provider_calls), first["image_url"])
 
 asyncio.run(run())
