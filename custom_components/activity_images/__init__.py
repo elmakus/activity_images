@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import re
+from pathlib import Path
 
 import voluptuous as vol
 
@@ -24,6 +26,7 @@ from .image_queue import ActivityImageQueue
 _LOGGER = logging.getLogger(__name__)
 
 MAX_TITLES_PER_REQUEST = 64
+_LOCAL_PNG = re.compile(r"^/local/activity_images/([A-Za-z0-9_.-]+\.png)(?:\?v=[A-Za-z0-9_.-]+)?$")
 _TITLE = vol.All(cv.string, vol.Length(min=1, max=255))
 _TITLES = vol.All(
     cv.ensure_list,
@@ -81,6 +84,22 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     async def clear(call: ServiceCall) -> dict:
         return {"cleared": await _get_runtime(hass).queue.async_clear_errors()}
 
+    async def link_existing(call: ServiceCall) -> dict:
+        """Remember a verified local PNG, without regenerating it."""
+        title = call.data["title"]
+        url = call.data["image_url"]
+        match = _LOCAL_PNG.fullmatch(url)
+        if match is None or match.group(1).startswith("."):
+            raise HomeAssistantError("Only /local/activity_images/<filename>.png can be linked")
+        filename = match.group(1)
+        path = Path(hass.config.path("www", "activity_images", filename))
+        if not await hass.async_add_executor_job(path.is_file):
+            raise HomeAssistantError("Local PNG does not exist")
+        runtime = _get_runtime(hass)
+        await runtime.cache.async_remember(title, url)
+        await runtime.calendar.async_reconcile()
+        return {"title": title, "image_url": url, "linked": True}
+
     async def forget(call: ServiceCall) -> dict:
         title = call.data.get("title")
         image_url = call.data.get("image_url")
@@ -118,6 +137,12 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     )
     hass.services.async_register(
         DOMAIN, "clear_errors", clear,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN, "link_existing_image", link_existing,
+        schema=vol.Schema({vol.Required("title"): _TITLE,
+                           vol.Required("image_url"): cv.string}),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
