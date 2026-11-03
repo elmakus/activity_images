@@ -29,27 +29,40 @@
 - GitHub Actions run unit tests, HACS validation and Hassfest validation
   on the release-preparation branch.
 
+## Status after merging implementation PRs (2026-11-03)
+
+- PRs #1–#6 are merged into `main`; the main-branch Python checks passed
+  after each implementation merge.
+- PR #7 (release packaging) is still open and must pass validation before
+  being merged.
+- Latest checks on PR #7: Python checks **PASS**, Hassfest **PASS**,
+  HACS action **FAIL** only because GitHub repository description and topics
+  are missing. HACS reported 2 failed checks out of 10; the missing
+  integration categories are a non-blocking warning.
+- The public GitHub repository currently has no description or topics.
+  The connected GitHub action set cannot edit these repository metadata
+  fields. Set them using the repository's GitHub **About** editor:
+  - Description: `Home Assistant activity image library for calendars and Home Tasks, powered by AI Task.`
+  - Topics: `home-assistant`, `hacs`, `custom-integration`, `activity-images`
+- The CI workflow must be re-run after the metadata update and its complete
+  HACS/Hassfest checks must pass without ignoring validation errors.
+
 ## Remaining release blockers
 
-1. **HACS and Hassfest jobs must pass.** Any errors must be fixed before
-   merging or publishing a release; skipping checks is not acceptance.
-2. GitHub repository metadata needs a **short description** and
-   relevant **topics**; the repository currently has neither. The
-   owner must fill these via GitHub repository Settings/About if the
-   connected GitHub integration does not provide administrative writes.
-3. All stacked draft PRs (Stages 1–6 plus this packaging PR) need
-   review and orderly merge. This is deliberately not done here.
-4. Publish the *first* GitHub release only after checks pass and
-   reviewing the actual repository's default branch. Recommended first
-   tag: `v0.1.0`, matching the integration manifest version.
-5. On the new HA, the currently installed working copy was deployed
-   manually, so **do not install HACS on top of it** until the merged
-   release and a complete backup are available. Do not let HACS
-   replace it with the older `main` contents.
-6. A fresh *uncached* task generated directly from Home Tasks was not
-   paid-tested; the full paid provider path and full original Home
-   Tasks image path were tested separately. This is a known coverage
-   distinction, not a claim of failure.
+1. Add the missing GitHub **description** and **topics** and obtain a full
+   passing HACS validation on PR #7. Hassfest and Python checks already pass.
+2. Review and merge **PR #7 only** after the required checks pass. All six
+   implementation PRs are already merged; do not redo or duplicate them.
+3. Publish the first GitHub **release** `v0.1.0` after verifying the final
+   default-branch build and `manifest.json` version. A release is distinct
+   from a bare Git tag.
+4. Do **not** install Marketplace/HACS over the existing manually deployed
+   working HA integration until a complete backup and an upgrade plan are
+   ready. The release is not yet published.
+5. A fresh *uncached* task generated directly from Home Tasks was not
+   paid-tested. The paid provider path and unchanged Home Tasks image
+   path were independently validated; this is a coverage note, not a
+   known failure.
 
 ## Rollback and controls
 
