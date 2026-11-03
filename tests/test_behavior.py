@@ -834,7 +834,7 @@ class MockConfigEntry:
 async def test_actions_register_once_in_setup_before_config_entry(ha, configured):
     integration = _load_integration_entrypoint()
     assert await integration.async_setup(ha, {})
-    assert len(ha.services.registered) == 7
+    assert len(ha.services.registered) == 8
     for name in ("generate_image", "resolve_images", "queue_status",
                  "cancel_queued", "clear_errors", "forget_image",
                  "refresh_calendars"):
@@ -847,7 +847,7 @@ async def test_actions_register_once_in_setup_before_config_entry(ha, configured
     assert await integration.async_setup_entry(ha, entry)
     assert entry.runtime_data is not None
     assert entry.runtime_data.cache is not None
-    assert len(ha.services.registered) == 7
+    assert len(ha.services.registered) == 8
     first = await ha.services.async_call(
         "activity_images", "generate_image", {"title": "Green Waste Collection"}
     )
@@ -883,7 +883,7 @@ async def test_actions_register_once_in_setup_before_config_entry(ha, configured
     assert (ha.base / "www" / first["image_url"].split("?", 1)[0].removeprefix("/local/")).is_file()
 
     assert await integration.async_unload_entry(ha, entry)
-    assert len(ha.services.registered) == 7
+    assert len(ha.services.registered) == 8
     assert entry.entry_id not in ha.data["activity_images"]
     with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError,
                        match="not configured"):
@@ -949,7 +949,7 @@ async def test_unload_and_reconfigure_keep_services_and_cached_images(ha):
     )
     assert second["reused"] is True
     assert len(ha.services.calls) == 1
-    assert len(ha.services.registered) == 7
+    assert len(ha.services.registered) == 8
     await integration.async_unload_entry(ha, entry)
 
 
@@ -1194,9 +1194,54 @@ async def test_integration_calendar_service_and_platform_lifecycle(ha, monkeypat
     assert await integration.async_setup_entry(ha, entry)
     assert ("load", ("sensor",)) in ha.forwarded
     assert entry.runtime_data.calendar.calendar_titles["calendar.school"] == ["New event"]
-    assert len(ha.services.registered) == 8  # Seven activity actions + calendar service.
+    assert len(ha.services.registered) == 9  # Eight activity actions + calendar service.
     result = await ha.services.async_call("activity_images", "refresh_calendars", {})
     assert result["tracked_titles"] == 1
     assert await integration.async_unload_entry(ha, entry)
     assert ("unload", ("sensor",)) in ha.forwarded
     assert entry.entry_id not in ha.data["activity_images"]
+
+@pytest.mark.asyncio
+async def test_existing_png_can_be_linked_without_provider(ha, monkeypatch):
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    entry.data = {}
+    entry.options = {
+        const_module.CONF_CALENDARS: ["calendar.school"],
+        const_module.CONF_AUTO_GENERATE: False,
+    }
+
+    async def get_events(call):
+        return {"calendar.school": {"events": [{"summary": "Green Waste Collection"}]}}
+
+    ha.services.async_register("calendar", "get_events", get_events)
+    await integration.async_setup_entry(ha, entry)
+    assert entry.runtime_data.generator.settings.get(const_module.CONF_AI_ENTITY) is None
+    assert entry.runtime_data.calendar.images == {}
+
+    file = ha.base / "www" / "activity_images" / "existing.png"
+    file.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", (32, 32), (25, 20, 10, 255)).save(file)
+    response = await ha.services.async_call(
+        "activity_images", "link_existing_image",
+        {"title": "Green Waste Collection", "image_url": "/local/activity_images/existing.png"},
+    )
+    assert response["linked"] is True
+    assert entry.runtime_data.calendar.images == {
+        "Green Waste Collection": "/local/activity_images/existing.png"
+    }
+    assert len(ha.services.calls) == 0
+    assert file.exists()
+    with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError):
+        await ha.services.async_call(
+            "activity_images", "link_existing_image",
+            {"title": "Bad path", "image_url": "/local/activity_images/../../secret.png"},
+        )
+    with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError):
+        await ha.services.async_call(
+            "activity_images", "link_existing_image",
+            {"title": "Missing", "image_url": "/local/activity_images/no-such-file.png"},
+        )
+    assert file.exists()
+    await integration.async_unload_entry(ha, entry)

@@ -2,7 +2,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 3 (development branch):** independent image engine, native actions, selected-calendar watcher and sensor — no runtime imports from `home_tasks`. Verified with **isolated Home Assistant Core 2026.10.4 and a fake AI Task provider**, not installed on the user's HA. The AI Task wrapper, live Calendar Card Pro connection, real AI provider, and image migration are still planned.
+**Stage 4 (development branch):** the independent image library is installed in test mode on the new HA `192.168.2.180`; a separate Auto-Entities card D is configured. Creating the config entry and confirming live frontend refresh remain to be done. No real AI requests have been made. The AI Task wrapper, full migration, and production release remain planned.
 
 ## Capabilities
 
@@ -21,7 +21,7 @@ Standalone activity-icon generator for [Home Assistant](https://www.home-assista
 
 ## Installation (development only)
 
-Copy the `custom_components/activity_images` directory to `/config/custom_components/activity_images`, restart Home Assistant, and add **Activity Images** in **Settings → Devices & services**. Choose an existing `ai_task.*` provider. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
+Copy the `custom_components/activity_images` directory to `/config/custom_components/activity_images`, restart Home Assistant, and add **Activity Images** in **Settings → Devices & services**. An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`.
 
@@ -47,6 +47,15 @@ data:
 response_variable: artwork
 ```
 
+Use `activity_images.link_existing_image` to assign a PNG already under `/config/www/activity_images` to an event **without an AI provider**. The action validates the URL and file, updates the cache, and refreshes the calendar sensor. It never deletes a file. Example:
+
+```yaml
+action: activity_images.link_existing_image
+data:
+  title: Green Waste Collection
+  image_url: /local/activity_images/stage4_green_waste.png
+```
+
 The action immediately returns cached `images`, `image_metadata`, the newly `queued` titles, and `queue_size`. A request may include **1–64 activity titles**, each up to 255 characters. Query `activity_images.queue_status` for pending and failed titles. The actions are registered once at integration startup; without a configured generator they return a clear error. Queued work runs independently of an open dashboard. On terminal failure a title is stored in `failed` and is **not** retried automatically on future scans. Use `activity_images.clear_errors` to permit a fresh attempt. `activity_images.cancel_queued` cancels waiting titles; `activity_images.forget_image` removes cached mappings without deleting PNG/WebP files. The generator does **not** yet automatically discover Home Tasks tasks. Selected calendar events are scanned independently of any dashboard.
 
 ## Calendar library (development)
@@ -56,7 +65,7 @@ The new `sensor.activity_images_library` provides the cached URLs in the `images
 attribute and an already escaped, bounded list of Calendar Card Pro entries in
 `calendar_rules`. The sensor's state is the number of matching cached images.
 
-The planned Card Pro integration (to verify end-to-end in Stage 4) is:
+The Stage-4 experimental Card Pro configuration (rendered in a native HA template test, pending live sensor confirmation) is:
 
 ```yaml
 type: custom:auto-entities
@@ -75,8 +84,7 @@ card:
 Auto-Entities and Calendar Card Pro are independent frontend cards, not part of
 this integration. The example assumes the sensor kept its default entity ID.
 Calendar title matching is constructed and regex-escaped inside the integration,
-not inside the frontend template. This is **not yet a validated live dashboard
-configuration**.
+not inside the frontend template. This is configured in test dashboard D, but the integration must be added through the HA UI before the actual sensor is available; live browser auto-refresh remains unverified.
 
 To scan selected calendars immediately, call `activity_images.refresh_calendars`
 from **Developer Tools → Actions**. The action returns the number of tracked
@@ -94,7 +102,7 @@ The optional Lucida URL is configured locally; no server address or API credenti
 
 1. **Stages 0–1:** source audit; preserve original graphical pipeline, remove room/cooldown and bound retries (see `docs/STAGE1_ENGINE_RESULT.md`).
 2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
-3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`); **Stage 4:** complete Auto-Entities / Calendar Card Pro end-to-end test on a separate dashboard.
+3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** code and test dashboard D installed (see `docs/STAGE4_FRONTEND_RESULT.md`); config-entry setup and live browser redraw still pending.
 4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks.
 5. **Stage 6:** one-time image import, full tests and release.
 

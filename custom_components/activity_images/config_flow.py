@@ -15,10 +15,15 @@ from .const import (
 
 def schema(settings: dict | None = None) -> vol.Schema:
     settings = settings or {}
+    # A provider is optional for library-only use and calendar previews.
+    # An empty EntitySelector is invalid on current Home Assistant releases.
+    provider = settings.get(CONF_AI_ENTITY)
+    provider_key = (
+        vol.Optional(CONF_AI_ENTITY, default=provider)
+        if provider else vol.Optional(CONF_AI_ENTITY)
+    )
     return vol.Schema({
-        vol.Required(
-            CONF_AI_ENTITY, default=settings.get(CONF_AI_ENTITY, "")
-        ): selector.EntitySelector(selector.EntitySelectorConfig(domain="ai_task")),
+        provider_key: selector.EntitySelector(selector.EntitySelectorConfig(domain="ai_task")),
         vol.Optional(
             CONF_REFERENCE_MEDIA_ID,
             default=settings.get(CONF_REFERENCE_MEDIA_ID, ""),
@@ -45,6 +50,9 @@ def _valid(data: dict) -> bool:
     if not isinstance(calendars, list) or len(calendars) > MAX_CALENDARS:
         return False
     if len(calendars) != len(set(calendars)):
+        return False
+    # Prevent automatic paid generation when no valid image provider is set.
+    if data.get(CONF_AUTO_GENERATE) and not data.get(CONF_AI_ENTITY):
         return False
     if not all(isinstance(item, str) and item.startswith("calendar.") for item in calendars):
         return False

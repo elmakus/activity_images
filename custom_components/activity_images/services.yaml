@@ -25,6 +25,21 @@ resolve_images:
       name: Generate missing in background
       selector:
         boolean:
+link_existing_image:
+  name: Link existing local image
+  description: Assign a PNG already present in /config/www/activity_images to an activity title without generating a new one.
+  fields:
+    title:
+      name: Activity title
+      required: true
+      selector:
+        text:
+    image_url:
+      name: Local PNG URL
+      description: A URL starting with /local/activity_images/ and ending in .png
+      required: true
+      selector:
+        text:
 refresh_calendars:
   name: Refresh calendar images
   description: Read upcoming events from selected calendars and refresh the image-library sensor.
