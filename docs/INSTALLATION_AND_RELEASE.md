@@ -1,11 +1,11 @@
 # Installation, updates and recovery
 
-> **Development status (2026-11-03):** Stage 6 data migration and native AI
-> Task platform registration and the live Gemini provider are verified on
-> the new HA. Unmodified Home Tasks 2.5.0 successfully reused the existing
-> image through the native wrapper. Visual browser confirmation and HACS
-> release acceptance remain outstanding.
-> Do not treat the current repository `main` as a stable release.
+> **Release preparation (2026-11-03):** Stage 6 code is merged into `main`.
+> The new HA successfully migrated its images, called the real Gemini provider,
+> and displayed the resulting image through unmodified Home Tasks 2.5.0.
+> Visual browser confirmation passed. Publication of `v0.1.0` remains blocked
+> by HACS repository metadata validation and completion of the packaging PR.
+> Do not treat the current `main` as a published release.
 
 ## Requirements
 
@@ -53,25 +53,28 @@ For upstream Home Tasks, choose `ai_task.activity_images` as the image
 provider, leave Home Tasks `prompt_prefix` empty, and test a single task
 with automatic generation disabled.
 
-## HACS (after real-provider acceptance and first official release)
+## Marketplace / HACS (after first official release)
 
-The repository structure is compatible with a HACS custom **Integration**.
-Metadata `hacs.json` is included in the Stage 6 development branch, and
-the core integration lives in `custom_components/activity_images`.
+The repository layout is compatible with the Home Assistant Marketplace
+(built into Core 2026.11, replacing the older HACS custom integration).
+`hacs.json` is in the repository root; the integration lives in
+`custom_components/activity_images`.
 
-After the code is merged and a GitHub release is published:
+After PR #7 is merged, validation passes, and GitHub release `v0.1.0`
+is published:
 
-1. Open **HACS → ⋮ → Custom repositories**.
-2. Add `https://github.com/elmakus/activity_images` as **Integration**.
-3. Install or update the released version, then restart Home Assistant.
-4. Confirm the sensor/cache and wrapper still work before allowing auto
-   generation.
+1. Open **Settings → Marketplace** on Home Assistant 2026.11 or later.
+2. Add the repository as a custom **Integration**. The [My Home Assistant
+   repository link](https://my.home-assistant.io/redirect/marketplace_repository/?owner=elmakus&repository=activity_images&category=integration)
+   can open it and offer to add it if it is not yet in the catalog.
+3. Install the published release (not an unreviewed development branch).
+4. Confirm `sensor.activity_images_library`, the image cache and
+   `ai_task.activity_images` still work before enabling auto-generation.
 
-**Important:** The existing new HA has a manually deployed development
-copy. **Do not let HACS replace it with the older `main` branch now.**
-Do not install and update both a manual development copy and an automated
-HACS copy concurrently. Plan a single switch to release-managed updates
-after verified backups.
+**Important:** The target HA currently has a manually deployed and working
+version. Do not install over that copy until a complete backup, the release
+and the switch procedure are ready. Never manage the same installation
+simultaneously by manual file copies and Marketplace updates.
 
 For a stable first release, run the full `pytest`, `ruff` and
 Home Assistant configuration checks. HACS documentation recommends both
