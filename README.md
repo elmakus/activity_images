@@ -2,7 +2,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 5 (development branch):** the independent image library runs in test mode on new HA `192.168.2.180`, and the user confirmed card D displays the correct image. The new `ai_task.activity_images` wrapper is implemented and verified in isolation, **but is not installed on the live HA yet**. A real image provider, Home Tasks integration test, full migration and production release remain outstanding. No real AI requests have been made.
+**Stage 6 (development branch):** the standalone library and native AI Task wrapper run on new HA `192.168.2.180`. **202 PNG/WebP assets and 64 legacy mappings** were migrated. The real CLIProxyAPI/Gemini provider was connected; a single `Playing the Cello` PNG with transparent background was successfully generated. **Unmodified upstream Home Tasks 2.5.0** then called `ai_task.activity_images`, reused that image with no further provider request, and saved an identical PNG to its own test task. A separate test dashboard is available; its browser rendering awaits user confirmation. Automatic generation remains disabled. See `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`.
 
 ## Capabilities
 
@@ -95,7 +95,7 @@ A 15-minute calendar refresh interval is for detecting event changes and is
 
 ## Home Tasks wrapper (Stage 5, development only)
 
-The new integration exposes `ai_task.activity_images` alongside
+The integration exposes `ai_task.activity_images` alongside
 `sensor.activity_images_library`. It requires an actual **different**
 `ai_task.*` image provider selected in Activity Images options. Until
 that provider exists, the wrapper entity is unavailable; the calendar
@@ -115,7 +115,7 @@ columns:
     auto_generate_image: false
 ```
 
-The wrapper matches the upstream Home Tasks request format:
+The installed wrapper matches the upstream Home Tasks request format:
 `task_name: home_tasks_<hash>` and
 `instructions: <title> + "\\n\\nThe image must have a square 1:1 aspect ratio."`.
 It reads the human title from `instructions` (never from the hash), ignores
@@ -138,10 +138,12 @@ Limitations:
 - The wrapper intentionally rejects custom Home Tasks attachments.
   Configure the global reference image in Activity Images instead.
 
-**Tests so far use a fake AI provider.** The wrapper has not been
-installed on live HA `.180` and has not yet been tested together
-with installed original Home Tasks and a real image-capable provider.
-Do not enable automatic task generation before those checks.
+**Live integration validation passed:** the real Gemini provider generated
+a new transparent PNG through Activity Images, and the original upstream
+Home Tasks 2.5.0 called the wrapper and reused this cached PNG without
+another paid provider request. A separate test dashboard is available at
+`/home-tasks-image-test/validation`; browser confirmation is pending.
+Keep automatic generation disabled until final release acceptance.
 
 ## Safety and migration
 
@@ -154,8 +156,8 @@ The optional Lucida URL is configured locally; no server address or API credenti
 1. **Stages 0–1:** source audit; preserve original graphical pipeline, remove room/cooldown and bound retries (see `docs/STAGE1_ENGINE_RESULT.md`).
 2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
 3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** live sensor and test dashboard D verified (see `docs/STAGE4_FRONTEND_RESULT.md`), with visible icon confirmed by the user.
-4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks; implementation and isolated tests complete (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md`), real provider/Home Tasks validation pending.
-5. **Stage 6:** one-time image import, full tests and release.
+4. **Stage 5:** `ai_task.activity_images` wrapper, deployed on new HA and live-tested with unchanged upstream Home Tasks 2.5.0 (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md` and live test report).
+5. **Stage 6:** migrated 202 images and 64 mappings, validated real Gemini generation and upstream Home Tasks wrapper/cached image reuse (see `docs/STAGE6_MIGRATION_RESULT.md` and `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`). Browser confirmation and stable release/HACS acceptance remain pending.
 
 ## Attribution
 
