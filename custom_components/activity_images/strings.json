@@ -7,15 +7,12 @@
         "data": {
           "ai_task_entity_id": "AI Task entity",
           "reference_media_content_id": "Reference image (media-source://)",
-          "prompt_prefix": "Custom prompt prefix",
-          "lucida_url": "Lucida background-removal URL",
-          "min_interval_minutes": "Minimum queued interval (minutes)",
-          "max_interval_minutes": "Maximum queued interval (minutes)"
+          "lucida_url": "Lucida background-removal URL"
         }
       }
     },
     "error": {
-      "invalid_settings": "Invalid settings: check URLs and interval bounds."
+      "invalid_settings": "Invalid settings: check media-source reference and Lucida URL."
     }
   },
   "options": {
@@ -25,15 +22,12 @@
         "data": {
           "ai_task_entity_id": "AI Task entity",
           "reference_media_content_id": "Reference image (media-source://)",
-          "prompt_prefix": "Custom prompt prefix",
-          "lucida_url": "Lucida background-removal URL",
-          "min_interval_minutes": "Minimum queued interval (minutes)",
-          "max_interval_minutes": "Maximum queued interval (minutes)"
+          "lucida_url": "Lucida background-removal URL"
         }
       }
     },
     "error": {
-      "invalid_settings": "Invalid settings: check URLs and interval bounds."
+      "invalid_settings": "Invalid settings: check media-source reference and Lucida URL."
     }
   }
 }

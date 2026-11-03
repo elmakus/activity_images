@@ -119,11 +119,9 @@ def ha(tmp_path):
 async def configured(ha):
     cache = cache_module.ActivityImageCache(ha)
     await cache.async_setup()
-    engine = engine_module.ActivityImageGenerator(ha, cache, {
-        const_module.CONF_AI_ENTITY: "ai_task.mock",
-        const_module.CONF_MIN_INTERVAL: 0,
-        const_module.CONF_MAX_INTERVAL: 0,
-    })
+    engine = engine_module.ActivityImageGenerator(
+        ha, cache, {const_module.CONF_AI_ENTITY: "ai_task.mock"}
+    )
     return cache, engine
 
 
@@ -213,12 +211,14 @@ async def test_force_regeneration(ha, configured):
 
 
 @pytest.mark.asyncio
-async def test_reference_and_room_prompt(ha, configured):
+async def test_reference_and_shared_activity_prompt(ha, configured):
     cache, engine = configured
     engine.settings[const_module.CONF_REFERENCE_MEDIA_ID] = "media-source://media_source/local/reference.png"
     result = await engine.async_generate("Pokój Hani")
     payload = ha.services.calls[-1][2]
-    assert "isometric" in payload["instructions"].lower()
+    assert "isometric" not in payload["instructions"].lower()
+    assert "glossy" in payload["instructions"].lower()
+    assert "Design first for immediate recognition at 25 px." in payload["instructions"]
     assert payload["attachments"][0]["media_content_id"].startswith("media-source://")
     assert result["image_url"].startswith("/local/")
 
@@ -289,27 +289,35 @@ async def test_queue_provider_error_persists(ha, configured):
     await queue.async_enqueue(["Niepowodzenie"])
     await asyncio.wait_for(queue._worker, 5)
     assert len(queue.status()["failed"]) == 1
-    # The private fork keeps failed activity jobs for later cooldown retry.
-    # A failed entry must survive restart instead of being discarded.
+    # Terminal errors are recorded, not retried again after a cooldown/restart.
+    assert queue.status()["pending"] == []
+    assert len(ha.services.calls) == 1
     await queue.async_shutdown()
     restored = queue_module.ActivityImageQueue(ha, engine)
     restored._kick = lambda: None
     await restored.async_setup()
-    assert restored.status()["pending"] == ["Niepowodzenie"]
+    assert restored.status()["pending"] == []
     assert len(restored.status()["failed"]) == 1
+    assert await restored.async_enqueue(["Niepowodzenie"]) == []
     assert await restored.async_clear_errors() == 1
+    assert await restored.async_enqueue(["Niepowodzenie"]) == ["Niepowodzenie"]
     await restored.async_shutdown()
 
 
 @pytest.mark.asyncio
-async def test_queue_shutdown_keeps_pending_job(ha, configured):
+async def test_queue_shutdown_keeps_pending_job(ha, configured, monkeypatch):
     _, engine = configured
+    started = asyncio.Event()
+
+    async def wait_for_provider(*_args, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ha.services, "async_call", wait_for_provider)
     queue = queue_module.ActivityImageQueue(ha, engine)
-    queue._next_run = 9999999999
     await queue.async_setup()
-    queue._next_run = 9999999999
     await queue.async_enqueue(["Poczekaj"])
-    await asyncio.sleep(0.025)
+    await asyncio.wait_for(started.wait(), 2)
     assert queue.status()["current"] == "Poczekaj"
     await queue.async_shutdown()
     restored = queue_module.ActivityImageQueue(ha, engine)
@@ -375,7 +383,7 @@ async def test_cancel_running_does_not_cancel_active_job(ha, configured, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_corrupt_cooldown_recovers(ha, configured, monkeypatch):
+async def test_legacy_cooldown_is_ignored(ha, configured, monkeypatch):
     _, engine = configured
     ha.saved["activity_images_jobs"] = {"next_run": "not-a-number", "pending": []}
     queue = queue_module.ActivityImageQueue(ha, engine)
@@ -409,13 +417,15 @@ async def test_media_response_without_file_is_rejected(ha, configured):
         await engine.async_generate("Malformed URL")
 
 
-def test_prompts_from_fork_are_kept():
+def test_unabridged_normal_activity_prompt_and_no_room_variant():
     isolated = prompts_module.build_activity_image_instructions("Posprzątaj zabawki")
     room = prompts_module.build_activity_image_instructions("Pokój Hani")
     assert "chroma-key" in isolated
     assert "chroma-key" in room
-    assert "isometric" in room
+    assert "isometric" not in room
     assert "isometric" not in isolated
+    assert isolated.split("Posprzątaj zabawki", 1)[-1] == room.split("Pokój Hani", 1)[-1]
+    assert "do not draw or simulate transparency" in isolated.lower()
 
 
 @pytest.mark.asyncio
@@ -528,26 +538,25 @@ async def test_selective_resolve_matches_original_calendar_contract(ha, configur
 
 
 @pytest.mark.asyncio
-async def test_failed_job_remains_pending_and_schedules_retry(ha, configured):
+async def test_failed_job_is_not_implicitly_retried(ha, configured):
     _, engine = configured
     ha.services.fail = True
     queue = queue_module.ActivityImageQueue(ha, engine)
     await queue.async_setup()
     await queue.async_enqueue(["Pozniej"])
     await asyncio.wait_for(queue._worker, 5)
-    assert queue.status()["pending"] == ["Pozniej"]
-    assert queue.status()["next_run_at"] > 0
-    assert queue._retry_task is not None
+    assert queue.status()["pending"] == []
+    assert queue.status()["next_run_at"] is None
+    assert len(queue.status()["failed"]) == 1
+    assert await queue.async_enqueue(["Pozniej"]) == []
     ha.services.fail = False
-    # Simulate the cooldown elapsed, without delaying the suite for a minute.
-    queue._retry_task.cancel()
-    try:
-        await queue._retry_task
-    except asyncio.CancelledError:
-        pass
-    queue._retry_task = None
-    queue._next_run = 0
-    await queue._run()
+    assert await queue.async_clear_errors() == 1
+    assert await queue.async_enqueue(["Pozniej"]) == ["Pozniej"]
+    # Let the new job run: a manual clear makes one fresh cycle possible.
+    if queue._worker and not queue._worker.done():
+        await asyncio.wait_for(queue._worker, 5)
+    else:
+        await queue._run()
     assert queue.status()["pending"] == []
     assert queue.status()["failed"] == {}
     await queue.async_shutdown()
@@ -669,3 +678,61 @@ async def test_cancelling_failed_retry_clears_failure_marker(ha, configured, mon
     assert await queue.async_cancel(["Powtorka"]) == 1
     assert not queue.status()["failed"]
     assert not queue.status()["pending"]
+@pytest.mark.asyncio
+async def test_engine_429_retries_provider_three_total_calls_only(ha, configured, monkeypatch):
+    """End-to-end fake AI provider: cache and processing happen once after retries."""
+    from custom_components.activity_images import retry as retry_module
+
+    async def instant_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(retry_module.asyncio, "sleep", instant_sleep)
+    cache, engine = configured
+    original_call = ha.services.async_call
+    requests = 0
+
+    class Http429(Exception):
+        status = 429
+        headers = {"Retry-After": "1"}
+
+    async def flaky_call(*args, **kwargs):
+        nonlocal requests
+        requests += 1
+        if requests <= 2:
+            raise Http429("Rate limited")
+        return await original_call(*args, **kwargs)
+
+    monkeypatch.setattr(ha.services, "async_call", flaky_call)
+    out = await engine.async_generate("Test retry generator")
+    assert requests == 3
+    assert out["reused"] is False
+    assert (ha.base / "www" / out["image_url"].split("?", 1)[0].removeprefix("/local/")).exists()
+    await engine.async_generate("Test retry generator")
+    assert requests == 3
+    assert await cache.async_find("Test retry generator") == out["image_url"]
+
+
+@pytest.mark.asyncio
+async def test_engine_401_does_not_retry_or_cache(ha, configured, monkeypatch):
+    from custom_components.activity_images import retry as retry_module
+
+    async def instant_sleep(_seconds):
+        raise AssertionError("No delay or retry expected for 401")
+
+    monkeypatch.setattr(retry_module.asyncio, "sleep", instant_sleep)
+    cache, engine = configured
+    requests = 0
+
+    class Http401(Exception):
+        status = 401
+
+    async def permanent(*args, **kwargs):
+        nonlocal requests
+        requests += 1
+        raise Http401("Invalid provider token")
+
+    monkeypatch.setattr(ha.services, "async_call", permanent)
+    with pytest.raises(Http401):
+        await engine.async_generate("Test permanent error")
+    assert requests == 1
+    assert await cache.async_find("Test permanent error") is None

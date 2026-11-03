@@ -9,12 +9,12 @@ import time
 from homeassistant.core import HomeAssistant
 
 from .const import (
-    CONF_AI_ENTITY, CONF_LUCIDA_URL, CONF_PROMPT_PREFIX,
-    CONF_REFERENCE_MEDIA_ID,
+    CONF_AI_ENTITY, CONF_LUCIDA_URL, CONF_REFERENCE_MEDIA_ID,
 )
 from .generated_image import async_save_generated_image
 from .image_cache import ActivityImageCache, normalize_title
 from .prompts import build_activity_image_instructions
+from .retry import async_retry_transient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,9 +52,7 @@ class ActivityImageGenerator:
             suffix = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
             payload = {
                 "task_name": f"activity_image_{suffix}",
-                "instructions": build_activity_image_instructions(
-                    title, self.settings.get(CONF_PROMPT_PREFIX) or ""
-                ),
+                "instructions": build_activity_image_instructions(title),
                 "entity_id": entity_id,
             }
             reference = self.settings.get(CONF_REFERENCE_MEDIA_ID)
@@ -63,10 +61,15 @@ class ActivityImageGenerator:
                     "media_content_id": reference,
                     "media_content_type": "image/png",
                 }]
-            response = await self.hass.services.async_call(
-                "ai_task", "generate_image", payload,
-                blocking=True, return_response=True,
-            ) or {}
+            async def request_image():
+                return await self.hass.services.async_call(
+                    "ai_task", "generate_image", payload,
+                    blocking=True, return_response=True,
+                )
+
+            # Retry only the provider request. Never regenerate for a cache hit,
+            # and never repeat PNG processing or a successful paid provider call.
+            response = await async_retry_transient(request_image) or {}
             image = response.get("image") or {}
             source = response.get("media_source_id") or response.get("url")
             if not source and isinstance(image, dict):

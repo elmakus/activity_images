@@ -7,9 +7,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
-    DOMAIN, CONF_AI_ENTITY, CONF_REFERENCE_MEDIA_ID, CONF_PROMPT_PREFIX,
-    CONF_LUCIDA_URL, CONF_MIN_INTERVAL, CONF_MAX_INTERVAL,
-    DEFAULT_MIN_INTERVAL, DEFAULT_MAX_INTERVAL,
+    DOMAIN, CONF_AI_ENTITY, CONF_REFERENCE_MEDIA_ID, CONF_LUCIDA_URL,
 )
 
 
@@ -24,24 +22,14 @@ def schema(settings: dict | None = None) -> vol.Schema:
             default=settings.get(CONF_REFERENCE_MEDIA_ID, ""),
         ): selector.TextSelector(),
         vol.Optional(
-            CONF_PROMPT_PREFIX, default=settings.get(CONF_PROMPT_PREFIX, "")
-        ): selector.TextSelector(),
-        vol.Optional(
             CONF_LUCIDA_URL, default=settings.get(CONF_LUCIDA_URL, "")
         ): selector.TextSelector(),
-        vol.Required(
-            CONF_MIN_INTERVAL, default=settings.get(CONF_MIN_INTERVAL, DEFAULT_MIN_INTERVAL)
-        ): vol.All(vol.Coerce(int), vol.Range(min=0, max=1440)),
-        vol.Required(
-            CONF_MAX_INTERVAL, default=settings.get(CONF_MAX_INTERVAL, DEFAULT_MAX_INTERVAL)
-        ): vol.All(vol.Coerce(int), vol.Range(min=0, max=1440)),
     })
 
 
 def _valid(data: dict) -> bool:
     return (
-        data[CONF_MIN_INTERVAL] <= data[CONF_MAX_INTERVAL]
-        and (
+        (
             not data.get(CONF_LUCIDA_URL)
             or data[CONF_LUCIDA_URL].startswith(("http://", "https://"))
         )

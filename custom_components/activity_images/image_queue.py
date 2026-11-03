@@ -1,16 +1,14 @@
-"""Persisted, deduplicated AI generation queue, with provider cooldown."""
+"""Persistent deduplicated generation queue, without indefinite retry loops."""
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
-import random
-import time
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, CONF_MIN_INTERVAL, CONF_MAX_INTERVAL
+from .const import DOMAIN
 from .engine import ActivityImageGenerator
 from .image_cache import normalize_title
 
@@ -24,10 +22,8 @@ class ActivityImageQueue:
         self._store = Store(hass, 1, f"{DOMAIN}_jobs")
         self._pending: list[str] = []
         self._failed: dict[str, str] = {}
-        self._next_run: float = 0.0
         self._current: str | None = None
         self._worker: asyncio.Task | None = None
-        self._retry_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -42,10 +38,15 @@ class ActivityImageQueue:
             k: v for k, v in failed.items()
             if isinstance(k, str) and isinstance(v, str)
         } if isinstance(failed, dict) else {}
-        try:
-            self._next_run = max(0.0, float(data.get("next_run") or 0))
-        except (ValueError, TypeError):
-            self._next_run = 0.0
+        # Old queue data may include a pending failed job and a cooldown timestamp.
+        # Do not resume any old failed job: no implicit retries after restart.
+        previous_pending = len(self._pending)
+        self._pending = [
+            title for title in self._pending
+            if normalize_title(title) not in self._failed
+        ]
+        if len(self._pending) != previous_pending:
+            await self._save()
         if self._pending:
             self._kick()
 
@@ -53,7 +54,6 @@ class ActivityImageQueue:
         await self._store.async_save({
             "pending": self._pending,
             "failed": self._failed,
-            "next_run": self._next_run,
         })
 
     async def async_enqueue(self, titles: list[str]) -> list[str]:
@@ -68,7 +68,10 @@ class ActivityImageQueue:
                     continue
                 title = value.strip()
                 key = normalize_title(title)
-                if not title or len(title) > 255 or not key or key in known:
+                if (
+                    not title or len(title) > 255 or not key
+                    or key in known or key in self._failed
+                ):
                     continue
                 if await self.engine.cache.async_find(title):
                     continue
@@ -107,7 +110,7 @@ class ActivityImageQueue:
             "image_metadata": await self.engine.cache.async_image_metadata(images),
             "queued": accepted,
             "queue_size": len(self._pending),
-            "next_run_at": self._next_run or None,
+            "next_run_at": None,
         }
 
     async def async_cancel(self, titles: list[str]) -> int:
@@ -139,13 +142,11 @@ class ActivityImageQueue:
             "pending": list(self._pending),
             "current": self._current,
             "failed": dict(self._failed),
-            "next_run_at": self._next_run or None,
+            "next_run_at": None,
         }
 
     def _kick(self) -> None:
         if self._closed or not self._pending:
-            return
-        if self._retry_task and not self._retry_task.done() and self._worker is not None and self._worker.done():
             return
         if self._worker and not self._worker.done():
             return
@@ -160,49 +161,24 @@ class ActivityImageQueue:
         if failure is not None:
             _LOGGER.error("Activity image queue worker stopped: %s", failure)
             return
-        if self._pending and (self._retry_task is None or self._retry_task.done()):
+        if self._pending:
             self._kick()
-
-    async def _retry_after(self, delay: float) -> None:
-        """Keep a failed activity queued, as the original source worker did.
-
-        Retrying waits for provider cooldown; a zero-cooldown configuration
-        still applies a one-minute floor after a provider failure.
-        """
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            raise
-        finally:
-            self._retry_task = None
-        if not self._closed:
-            self._kick()
-
-    def _schedule_retry(self, delay: float) -> None:
-        if self._closed:
-            return
-        if self._retry_task and not self._retry_task.done():
-            return
-        self._retry_task = self.hass.async_create_task(self._retry_after(delay))
 
     async def _run(self) -> None:
-        """A single worker; failures are recorded and do not cause busy retries."""
+        """Try each distinct title once (the provider layer itself retries ≤2 times).
+
+        A terminal failure is recorded and removed from the pending queue.
+        Periodic calendar scans must not requeue failed titles until cleared.
+        """
         while not self._closed:
             async with self._lock:
                 if not self._pending:
                     return
                 title = self._pending[0]
                 self._current = title
-            result = None
             failed = False
             try:
-                if not await self.engine.cache.async_find(title):
-                    wait = max(0.0, self._next_run - time.time())
-                    if wait:
-                        await asyncio.sleep(wait)
-                    if self._closed:
-                        return
-                result = await self.engine.async_generate(title)
+                await self.engine.async_generate(title)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -214,21 +190,12 @@ class ActivityImageQueue:
             finally:
                 if not self._closed:
                     async with self._lock:
-                        if not failed and self._pending and self._pending[0] == title:
+                        if self._pending and self._pending[0] == title:
                             self._pending.pop(0)
+                        if not failed:
                             self._failed.pop(normalize_title(title), None)
                         self._current = None
-                        if failed or (result and not result["reused"]):
-                            minimum = max(0, int(self.engine.settings.get(CONF_MIN_INTERVAL, 20)))
-                            maximum = max(minimum, int(self.engine.settings.get(CONF_MAX_INTERVAL, 35)))
-                            delay = random.uniform(minimum, maximum) * 60
-                            if failed:
-                                delay = max(delay, 60.0)
-                            self._next_run = time.time() + delay
                         await self._save()
-            if failed:
-                self._schedule_retry(max(1.0, self._next_run - time.time()))
-                return
 
     async def async_shutdown(self) -> None:
         self._closed = True
@@ -236,8 +203,4 @@ class ActivityImageQueue:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
-        if self._retry_task and not self._retry_task.done():
-            self._retry_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._retry_task
         await self._save()
