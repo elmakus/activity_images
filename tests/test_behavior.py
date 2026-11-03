@@ -806,6 +806,7 @@ def _load_integration_entrypoint():
     validation.string = str
     validation.boolean = vol.Boolean()
     validation.ensure_list = lambda value: value if isinstance(value, list) else [value]
+    validation.config_entry_only_config_schema = lambda domain: lambda config: config
     spec = importlib.util.spec_from_file_location(
         "custom_components.activity_images._entrypoint_test", ROOT / "__init__.py"
     )

@@ -84,13 +84,13 @@ Configuration:
 - No changes to the user's main dashboards, Calendar Card Pro test
   dashboard or Lumina theme.
 
-**Browser visual confirmation still pending.** The backend and image
-resource tests passed; the user has the URL for visual confirmation.
+**Browser visual confirmation passed on 2026-11-03.** The user opened the
+test dashboard and confirmed that the Playing the Cello task shows the
+correct generated cello image. This closes the original Home Tasks card
+rendering acceptance.
 
 ## What remains before stable release
 
-- Get explicit user confirmation that the new original Home Tasks test
-  card displays the image, and that the desired tile layout is usable.
 - A fresh uncached title requested *from within Home Tasks* has not been
   tested with the real paid provider; the provider was validated separately
   in Test A, and the upstream wrapper was validated through cache in Test B.

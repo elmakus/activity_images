@@ -25,6 +25,8 @@ from .image_queue import ActivityImageQueue
 
 _LOGGER = logging.getLogger(__name__)
 
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 MAX_TITLES_PER_REQUEST = 64
 _LOCAL_PNG = re.compile(r"^/local/activity_images/([A-Za-z0-9_.-]+\.png)(?:\?v=[A-Za-z0-9_.-]+)?$")
 _TITLE = vol.All(cv.string, vol.Length(min=1, max=255))
