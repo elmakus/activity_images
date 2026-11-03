@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import hashlib
 import logging
 import time
@@ -25,6 +26,7 @@ class ActivityImageGenerator:
         self.cache = cache
         self.settings = settings
         self._lock = asyncio.Lock()
+        self.image_saved_callback: Callable[[str, str], None] | None = None
 
     async def async_generate_activity_image(self, title: str) -> str:
         """Preserve the original manual action's always-regenerate contract."""
@@ -82,6 +84,11 @@ class ActivityImageGenerator:
             )
             image_url = f"{saved.image_url}?v={time.time_ns()}"
             await self.cache.async_remember(title, image_url)
+            if self.image_saved_callback is not None:
+                try:
+                    self.image_saved_callback(title, image_url)
+                except Exception:
+                    _LOGGER.exception("Unable to notify library about saved image")
             _LOGGER.debug("Generated activity illustration for %s", title)
             return {
                 "title": title, "image_url": image_url, "reused": False,

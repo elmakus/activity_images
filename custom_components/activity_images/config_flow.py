@@ -8,6 +8,8 @@ from homeassistant.helpers import selector
 
 from .const import (
     DOMAIN, CONF_AI_ENTITY, CONF_REFERENCE_MEDIA_ID, CONF_LUCIDA_URL,
+    CONF_CALENDARS, CONF_LOOKAHEAD_DAYS, CONF_AUTO_GENERATE,
+    DEFAULT_LOOKAHEAD_DAYS, MAX_CALENDARS,
 )
 
 
@@ -24,10 +26,28 @@ def schema(settings: dict | None = None) -> vol.Schema:
         vol.Optional(
             CONF_LUCIDA_URL, default=settings.get(CONF_LUCIDA_URL, "")
         ): selector.TextSelector(),
+        vol.Optional(
+            CONF_CALENDARS, default=settings.get(CONF_CALENDARS, [])
+        ): selector.EntitySelector(selector.EntitySelectorConfig(domain="calendar", multiple=True)),
+        vol.Required(
+            CONF_LOOKAHEAD_DAYS,
+            default=settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS),
+        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+        vol.Required(
+            CONF_AUTO_GENERATE,
+            default=settings.get(CONF_AUTO_GENERATE, False),
+        ): selector.BooleanSelector(),
     })
 
 
 def _valid(data: dict) -> bool:
+    calendars = data.get(CONF_CALENDARS, [])
+    if not isinstance(calendars, list) or len(calendars) > MAX_CALENDARS:
+        return False
+    if len(calendars) != len(set(calendars)):
+        return False
+    if not all(isinstance(item, str) and item.startswith("calendar.") for item in calendars):
+        return False
     return (
         (
             not data.get(CONF_LUCIDA_URL)

@@ -25,6 +25,9 @@ resolve_images:
       name: Generate missing in background
       selector:
         boolean:
+refresh_calendars:
+  name: Refresh calendar images
+  description: Read upcoming events from selected calendars and refresh the image-library sensor.
 queue_status:
   name: Get queue status
   description: Return pending activities, current activity and failed titles. Failed titles are not retried automatically.
