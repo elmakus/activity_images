@@ -2,7 +2,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 4 (development branch):** the independent image library is installed in test mode on the new HA `192.168.2.180`; a separate Auto-Entities card D is configured. Creating the config entry and confirming live frontend refresh remain to be done. No real AI requests have been made. The AI Task wrapper, full migration, and production release remain planned.
+**Stage 5 (development branch):** the independent image library runs in test mode on new HA `192.168.2.180`, and the user confirmed card D displays the correct image. The new `ai_task.activity_images` wrapper is implemented and verified in isolation, **but is not installed on the live HA yet**. A real image provider, Home Tasks integration test, full migration and production release remain outstanding. No real AI requests have been made.
 
 ## Capabilities
 
@@ -17,6 +17,7 @@ Standalone activity-icon generator for [Home Assistant](https://www.home-assista
 - Watch up to 10 selected `calendar.*` entities, scan upcoming events (30 days by default, up to 60), and safely resolve at most 64 distinct titles with 15-minute polling plus calendar state-change refreshes.
 - Publish `sensor.activity_images_library` with the `images` map and pre-escaped `calendar_rules` attribute for Auto-Entities + Calendar Card Pro; refresh after each newly generated PNG.
 - Automatically generating missing calendar illustrations is **off by default** to prevent surprise provider usage. Enable it in the integration's options after reviewing the existing library.
+- Expose an optional `ai_task.activity_images` wrapper for unmodified upstream Home Tasks. The wrapper extracts the task title from the official upstream request, builds the full original prompt, and returns the processed PNG through the official AI Task entity interface. This is not yet deployed.
 - Existing files survive cache eviction. No changes to Home Tasks or other Home Assistant integrations.
 
 ## Installation (development only)
@@ -65,7 +66,7 @@ The new `sensor.activity_images_library` provides the cached URLs in the `images
 attribute and an already escaped, bounded list of Calendar Card Pro entries in
 `calendar_rules`. The sensor's state is the number of matching cached images.
 
-The Stage-4 experimental Card Pro configuration (rendered in a native HA template test, pending live sensor confirmation) is:
+The stage-4 Card Pro configuration, now displaying a real sensor-backed image on the user's test HA, is:
 
 ```yaml
 type: custom:auto-entities
@@ -84,13 +85,63 @@ card:
 Auto-Entities and Calendar Card Pro are independent frontend cards, not part of
 this integration. The example assumes the sensor kept its default entity ID.
 Calendar title matching is constructed and regex-escaped inside the integration,
-not inside the frontend template. This is configured in test dashboard D, but the integration must be added through the HA UI before the actual sensor is available; live browser auto-refresh remains unverified.
+not inside the frontend template. This is configured in test dashboard D. The user created the integration entry and confirmed the icon renders correctly in the browser. An independent live HA WebSocket subscription also updated automatically when the image mapping changed. Browser repaint without a page reload was not directly observed.
 
 To scan selected calendars immediately, call `activity_images.refresh_calendars`
 from **Developer Tools → Actions**. The action returns the number of tracked
 titles, matched images and the most recent scan error (if any).
 A 15-minute calendar refresh interval is for detecting event changes and is
 **not a generation cooldown**.
+
+## Home Tasks wrapper (Stage 5, development only)
+
+The new integration exposes `ai_task.activity_images` alongside
+`sensor.activity_images_library`. It requires an actual **different**
+`ai_task.*` image provider selected in Activity Images options. Until
+that provider exists, the wrapper entity is unavailable; the calendar
+library continues working without AI.
+
+In **unmodified** Home Tasks, choose the wrapper as the image generator
+and leave the Home Tasks prompt prefix **empty**:
+
+```yaml
+type: custom:home-tasks-card
+image_generation:
+  entity_id: ai_task.activity_images
+  prompt_prefix: ""
+columns:
+  - list_id: your-list-id
+    show_images: true
+    auto_generate_image: false
+```
+
+The wrapper matches the upstream Home Tasks request format:
+`task_name: home_tasks_<hash>` and
+`instructions: <title> + "\\n\\nThe image must have a square 1:1 aspect ratio."`.
+It reads the human title from `instructions` (never from the hash), ignores
+Home Tasks' extra aspect instruction, and delegates to the shared engine
+so the **complete original 3D prompt, optional style reference, Lucida,
+Pillow processing and fuzzy cache** remain consistent.
+
+Limitations:
+- Upstream Home Tasks checks its own image library before invoking
+  `ai_task.generate_image`. The wrapper cannot change that lookup.
+- A non-empty upstream `prompt_prefix` cannot reliably be separated
+  from the title: keep it empty.
+- Upstream does not pass a `force` flag to the AI Task service. Its
+  manual "regenerate" action may therefore reuse the Activity Images
+  cache. For a guaranteed fresh image use
+  `activity_images.generate_image` with `force: true` first.
+- Home Assistant's AI Task media source and upstream Home Tasks may
+  store their own copies of the returned PNG; this is expected at
+  this stage.
+- The wrapper intentionally rejects custom Home Tasks attachments.
+  Configure the global reference image in Activity Images instead.
+
+**Tests so far use a fake AI provider.** The wrapper has not been
+installed on live HA `.180` and has not yet been tested together
+with installed original Home Tasks and a real image-capable provider.
+Do not enable automatic task generation before those checks.
 
 ## Safety and migration
 
@@ -102,8 +153,8 @@ The optional Lucida URL is configured locally; no server address or API credenti
 
 1. **Stages 0–1:** source audit; preserve original graphical pipeline, remove room/cooldown and bound retries (see `docs/STAGE1_ENGINE_RESULT.md`).
 2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
-3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** code and test dashboard D installed (see `docs/STAGE4_FRONTEND_RESULT.md`); config-entry setup and live browser redraw still pending.
-4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks.
+3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** live sensor and test dashboard D verified (see `docs/STAGE4_FRONTEND_RESULT.md`), with visible icon confirmed by the user.
+4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks; implementation and isolated tests complete (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md`), real provider/Home Tasks validation pending.
 5. **Stage 6:** one-time image import, full tests and release.
 
 ## Attribution
