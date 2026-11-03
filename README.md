@@ -2,7 +2,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 6 (development branch):** the native image library and `ai_task.activity_images` wrapper are installed on new HA `192.168.2.180`. The user confirmed that Calendar Card Pro card D displays its image. **202 PNG/WebP files and 64 valid image mappings were migrated** from the read-only old HA; all mappings survived a restart. The wrapper is currently `unavailable` until a real image provider is configured. The original Lucida endpoint passed an isolated test. A paid provider, upstream Home Tasks end-to-end integration test and stable release remain outstanding. See `docs/STAGE6_MIGRATION_RESULT.md`.
+**Stage 6 (development branch):** the standalone library and native AI Task wrapper run on new HA `192.168.2.180`. **202 PNG/WebP assets and 64 legacy mappings** were migrated. The real CLIProxyAPI/Gemini provider was connected; a single `Playing the Cello` PNG with transparent background was successfully generated. **Unmodified upstream Home Tasks 2.5.0** then called `ai_task.activity_images`, reused that image with no further provider request, and saved an identical PNG to its own test task. A separate test dashboard is available; its browser rendering awaits user confirmation. Automatic generation remains disabled. See `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`.
 
 ## Capabilities
 
@@ -138,10 +138,12 @@ Limitations:
 - The wrapper intentionally rejects custom Home Tasks attachments.
   Configure the global reference image in Activity Images instead.
 
-**Tests so far use a fake AI provider.** The wrapper has not been
-installed on live HA `.180` and has not yet been tested together
-with installed original Home Tasks and a real image-capable provider.
-Do not enable automatic task generation before those checks.
+**Live integration validation passed:** the real Gemini provider generated
+a new transparent PNG through Activity Images, and the original upstream
+Home Tasks 2.5.0 called the wrapper and reused this cached PNG without
+another paid provider request. A separate test dashboard is available at
+`/home-tasks-image-test/validation`; browser confirmation is pending.
+Keep automatic generation disabled until final release acceptance.
 
 ## Safety and migration
 
@@ -154,8 +156,8 @@ The optional Lucida URL is configured locally; no server address or API credenti
 1. **Stages 0–1:** source audit; preserve original graphical pipeline, remove room/cooldown and bound retries (see `docs/STAGE1_ENGINE_RESULT.md`).
 2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
 3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** live sensor and test dashboard D verified (see `docs/STAGE4_FRONTEND_RESULT.md`), with visible icon confirmed by the user.
-4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks; deployed on new HA and registered with GENERATE_IMAGE, unavailable without a real provider (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md`).
-5. **Stage 6:** migrated 202 images and 64 cache mappings to new HA, preserved style reference, validated Lucida and restart (see `docs/STAGE6_MIGRATION_RESULT.md`). Real-provider and upstream Home Tasks acceptance tests plus final release remain pending.
+4. **Stage 5:** `ai_task.activity_images` wrapper, deployed on new HA and live-tested with unchanged upstream Home Tasks 2.5.0 (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md` and live test report).
+5. **Stage 6:** migrated 202 images and 64 mappings, validated real Gemini generation and upstream Home Tasks wrapper/cached image reuse (see `docs/STAGE6_MIGRATION_RESULT.md` and `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`). Browser confirmation and stable release/HACS acceptance remain pending.
 
 ## Attribution
 

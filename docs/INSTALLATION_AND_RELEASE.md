@@ -1,8 +1,10 @@
 # Installation, updates and recovery
 
 > **Development status (2026-11-03):** Stage 6 data migration and native AI
-> Task platform registration are verified on the new HA, but a real
-> image-provider and upstream Home Tasks test are **still outstanding**.
+> Task platform registration and the live Gemini provider are verified on
+> the new HA. Unmodified Home Tasks 2.5.0 successfully reused the existing
+> image through the native wrapper. Visual browser confirmation and HACS
+> release acceptance remain outstanding.
 > Do not treat the current repository `main` as a stable release.
 
 ## Requirements

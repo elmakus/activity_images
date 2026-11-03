@@ -1,6 +1,6 @@
 # Stage 6 — Image migration and live HA verification (2026-11-03)
 
-Status: **migration complete; native AI Task wrapper deployed but real image-provider integration pending.** Do **not** publish a production release yet.
+Status on initial migration: **migration complete; wrapper deployed**. Live provider and original Home Tasks follow-up have since passed as documented in **`STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`**. Do **not** publish a production release until final UI and HACS acceptance.
 
 ## Sources and nonnegotiable constraints
 
