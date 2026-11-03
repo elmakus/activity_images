@@ -1,8 +1,10 @@
 # Activity Images
 
+![Activity Images icon](custom_components/activity_images/brand/icon.png)
+
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 6 (development branch):** the standalone library and native AI Task wrapper run on new HA `192.168.2.180`. **202 PNG/WebP assets and 64 legacy mappings** were migrated. The real CLIProxyAPI/Gemini provider was connected; a single `Playing the Cello` PNG with transparent background was successfully generated. **Unmodified upstream Home Tasks 2.5.0** then called `ai_task.activity_images`, reused that image with no further provider request, and saved an identical PNG to its own test task. A separate test dashboard is available; its browser rendering awaits user confirmation. Automatic generation remains disabled. See `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`.
+**Stage 6 (development branch):** the standalone library and native AI Task wrapper run on new HA `192.168.2.180`. **202 PNG/WebP assets and 64 legacy mappings** were migrated. The real CLIProxyAPI/Gemini provider was connected; a single `Playing the Cello` PNG with transparent background was successfully generated. **Unmodified upstream Home Tasks 2.5.0** then called `ai_task.activity_images`, reused that image with no further provider request, and saved an identical PNG to its own test task. The user confirmed the image also renders correctly in the original Home Tasks test dashboard. Automatic generation remains disabled. See `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`.
 
 ## Capabilities
 
