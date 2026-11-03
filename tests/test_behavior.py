@@ -82,8 +82,23 @@ class FakeServices:
         self.calls = []
         self.fail = False
         self.response = None
+        self.registered = {}
+
+    def async_register(self, domain, service, func, *, schema=None, supports_response=None):
+        self.registered[(domain, service)] = (func, schema, supports_response)
+
+    def has_service(self, domain, service):
+        return (domain, service) in self.registered
+
+    def async_remove(self, domain, service):
+        self.registered.pop((domain, service), None)
 
     async def async_call(self, domain, service, data, **kwargs):
+        if (domain, service) in self.registered:
+            func, schema, _supports_response = self.registered[(domain, service)]
+            if schema is not None:
+                data = schema(data)
+            return await func(SimpleNamespace(hass=self.hass, data=data))
         self.calls.append((domain, service, data, kwargs))
         if self.fail:
             raise RuntimeError("Provider unavailable")
@@ -736,3 +751,174 @@ async def test_engine_401_does_not_retry_or_cache(ha, configured, monkeypatch):
         await engine.async_generate("Test permanent error")
     assert requests == 1
     assert await cache.async_find("Test permanent error") is None
+
+
+# Isolated integration-entrypoint tests: exercise the actual public HA service
+# registrations with a fake HA service registry, without touching the user's HA.
+def _load_integration_entrypoint():
+    import importlib.util
+    import voluptuous as vol
+
+    if "homeassistant.config_entries" not in sys.modules:
+        _package("homeassistant.config_entries")
+    if "homeassistant.exceptions" not in sys.modules:
+        _package("homeassistant.exceptions")
+    if "homeassistant.helpers.config_validation" not in sys.modules:
+        _package("homeassistant.helpers.config_validation")
+    core = sys.modules["homeassistant.core"]
+    core.ServiceCall = SimpleNamespace
+    core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
+    sys.modules["homeassistant.config_entries"].ConfigEntry = object
+
+    class HomeAssistantError(Exception):
+        pass
+
+    sys.modules["homeassistant.exceptions"].HomeAssistantError = HomeAssistantError
+    validation = sys.modules["homeassistant.helpers.config_validation"]
+    validation.string = str
+    validation.boolean = vol.Boolean()
+    validation.ensure_list = lambda value: value if isinstance(value, list) else [value]
+    spec = importlib.util.spec_from_file_location(
+        "custom_components.activity_images._entrypoint_test", ROOT / "__init__.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class MockConfigEntry:
+    def __init__(self):
+        self.entry_id = "single_config_entry"
+        self.data = {const_module.CONF_AI_ENTITY: "ai_task.mock"}
+        self.options = {}
+        self.runtime_data = None
+        self.callbacks = []
+
+    def add_update_listener(self, listener):
+        return lambda: None
+
+    def async_on_unload(self, callback):
+        self.callbacks.append(callback)
+
+
+@pytest.mark.asyncio
+async def test_actions_register_once_in_setup_before_config_entry(ha, configured):
+    integration = _load_integration_entrypoint()
+    assert await integration.async_setup(ha, {})
+    assert len(ha.services.registered) == 6
+    for name in ("generate_image", "resolve_images", "queue_status",
+                 "cancel_queued", "clear_errors", "forget_image"):
+        assert ha.services.has_service("activity_images", name)
+    with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError,
+                       match="not configured"):
+        await ha.services.async_call("activity_images", "queue_status", {})
+
+    entry = MockConfigEntry()
+    assert await integration.async_setup_entry(ha, entry)
+    assert entry.runtime_data is not None
+    assert entry.runtime_data.cache is not None
+    assert len(ha.services.registered) == 6
+    first = await ha.services.async_call(
+        "activity_images", "generate_image", {"title": "Green Waste Collection"}
+    )
+    assert first["reused"] is False
+    assert first["qa_url"].endswith("_qa.webp")
+    again = await ha.services.async_call(
+        "activity_images", "generate_image", {"title": "Green Waste Collection"}
+    )
+    assert again["reused"] is True
+    assert len(ha.services.calls) == 1
+
+    lookup = await ha.services.async_call(
+        "activity_images", "resolve_images",
+        {"titles": ["Green Waste Collection", "Different Event"]}
+    )
+    assert lookup["images"] == {"Green Waste Collection": first["image_url"]}
+    assert lookup["queued"] == []
+    assert lookup["image_metadata"]["Green Waste Collection"]["height"] == 512
+    assert lookup["queue_size"] == 0
+
+    status = await ha.services.async_call("activity_images", "queue_status", {})
+    assert status["pending"] == []
+    assert status["failed"] == {}
+
+    with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError,
+                       match="Specify a title"):
+        await ha.services.async_call("activity_images", "forget_image", {})
+    removed = await ha.services.async_call(
+        "activity_images", "forget_image", {"title": "Green Waste Collection"}
+    )
+    assert removed == {"removed": 1}
+    assert await entry.runtime_data.cache.async_find("Green Waste Collection") is None
+    assert (ha.base / "www" / first["image_url"].split("?", 1)[0].removeprefix("/local/")).is_file()
+
+    assert await integration.async_unload_entry(ha, entry)
+    assert len(ha.services.registered) == 6
+    assert entry.entry_id not in ha.data["activity_images"]
+    with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError,
+                       match="not configured"):
+        await ha.services.async_call("activity_images", "queue_status", {})
+
+
+@pytest.mark.asyncio
+async def test_actions_queue_and_validate_request_limits(ha, monkeypatch):
+    import voluptuous as vol
+
+    integration = _load_integration_entrypoint()
+    assert await integration.async_setup(ha, {})
+    # Disable automatic worker kickoff to inspect queued data deterministically.
+    monkeypatch.setattr(queue_module.ActivityImageQueue, "_kick", lambda self: None)
+    entry = MockConfigEntry()
+    await integration.async_setup_entry(ha, entry)
+    queue = entry.runtime_data.queue
+    result = await ha.services.async_call(
+        "activity_images", "resolve_images",
+        {"titles": ["Jazz", "Jazz", "Turnen"], "enqueue_missing": True}
+    )
+    assert result["queued"] == ["Jazz", "Turnen"]
+    assert result["queue_size"] == 2
+
+    cancel = await ha.services.async_call(
+        "activity_images", "cancel_queued", {"titles": ["Jazz"]}
+    )
+    assert cancel == {"cancelled": 1}
+    assert queue.status()["pending"] == ["Turnen"]
+    queue._failed["turnen"] = "Mock failure"
+    assert await ha.services.async_call("activity_images", "clear_errors", {}) == {"cleared": 1}
+    assert queue.status()["failed"] == {}
+
+    with pytest.raises(vol.MultipleInvalid):
+        await ha.services.async_call(
+            "activity_images", "resolve_images",
+            {"titles": [f"Activity {i}" for i in range(65)]}
+        )
+    with pytest.raises(vol.MultipleInvalid):
+        await ha.services.async_call(
+            "activity_images", "generate_image", {"title": "x" * 256}
+        )
+    await integration.async_unload_entry(ha, entry)
+
+
+@pytest.mark.asyncio
+async def test_unload_and_reconfigure_keep_services_and_cached_images(ha):
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    await integration.async_setup_entry(ha, entry)
+    first = await ha.services.async_call(
+        "activity_images", "generate_image", {"title": "Jazz Class"}
+    )
+    assert first["reused"] is False
+    await integration.async_unload_entry(ha, entry)
+    assert ha.services.has_service("activity_images", "resolve_images")
+    entry.options = {const_module.CONF_REFERENCE_MEDIA_ID: "media-source://media_source/local/style.png"}
+    await integration.async_setup_entry(ha, entry)
+    assert entry.runtime_data.generator.settings[const_module.CONF_REFERENCE_MEDIA_ID].endswith("style.png")
+    second = await ha.services.async_call(
+        "activity_images", "generate_image", {"title": "Jazz Class"}
+    )
+    assert second["reused"] is True
+    assert len(ha.services.calls) == 1
+    assert len(ha.services.registered) == 6
+    await integration.async_unload_entry(ha, entry)

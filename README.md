@@ -2,7 +2,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 1 (development branch):** independent image engine — no runtime imports from `home_tasks`. This build has **not been installed or end-to-end tested with a real AI provider on the user's Home Assistant**. The calendar sensor, calendar watcher, and AI Task wrapper are still planned.
+**Stage 2 (development branch):** independent image engine and Home Assistant actions — no runtime imports from `home_tasks`. The actions have been exercised on an **isolated real Home Assistant Core 2026.10.4 runtime** with a fake AI Task provider, not on the user's HA. The calendar sensor, calendar watcher, and AI Task wrapper are still planned.
 
 ## Capabilities
 
@@ -27,7 +27,7 @@ The built-in services are usable in **Developer Tools → Actions**. For a synch
 ```yaml
 action: activity_images.generate_image
 data:
-  title: "Odkurzanie pokoju"
+  title: "Vacuum the room"
   force: false
 response_variable: picture
 ```
@@ -38,13 +38,13 @@ The returned `picture.image_url` is a public Home Assistant path. To resolve or 
 action: activity_images.resolve_images
 data:
   titles:
-    - "Odkurzanie"
-    - "Pokój dziecięcy"
+    - "Vacuuming"
+    - "Children's room"
   enqueue_missing: true
 response_variable: artwork
 ```
 
-The action immediately returns cached `images` and the `queued` title list. Query `activity_images.queue_status` for progress; queued work runs independently of an open dashboard. On terminal failure a title is stored in `failed` and is **not** retried automatically on future scans. Use `activity_images.clear_errors` to permit a fresh attempt. The generator does **not** yet automatically discover tasks or calendar events.
+The action immediately returns cached `images`, `image_metadata`, the newly `queued` titles, and `queue_size`. A request may include **1–64 activity titles**, each up to 255 characters. Query `activity_images.queue_status` for pending and failed titles. The actions are registered once at integration startup; without a configured generator they return a clear error. Queued work runs independently of an open dashboard. On terminal failure a title is stored in `failed` and is **not** retried automatically on future scans. Use `activity_images.clear_errors` to permit a fresh attempt. `activity_images.cancel_queued` cancels waiting titles; `activity_images.forget_image` removes cached mappings without deleting PNG/WebP files. The generator does **not** yet automatically discover tasks or calendar events.
 
 ## Safety and migration
 
@@ -55,7 +55,7 @@ The optional Lucida URL is configured locally; no server address or API credenti
 ## Roadmap
 
 1. **Stages 0–1:** source audit; preserve original graphical pipeline, remove room/cooldown and bound retries (see `docs/STAGE1_ENGINE_RESULT.md`).
-2. **Stage 2:** independent title resolution and provider integration.
+2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
 3. **Stages 3–4:** calendar watcher and sensor, using Auto-Entities with unmodified Calendar Card Pro.
 4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks.
 5. **Stage 6:** one-time image import, full tests and release.

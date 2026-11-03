@@ -27,7 +27,7 @@ resolve_images:
         boolean:
 queue_status:
   name: Get queue status
-  description: Return pending activities, current activity, failures and cooldown time.
+  description: Return pending activities, current activity and failed titles. Failed titles are not retried automatically.
 cancel_queued:
   name: Cancel queued activities
   fields:
