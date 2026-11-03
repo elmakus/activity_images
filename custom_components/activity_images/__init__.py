@@ -180,7 +180,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
     generator.image_saved_callback = calendar.image_saved
     try:
-        await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
+        await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "ai_task"])
         await calendar.async_start()
     except Exception:
         generator.image_saved_callback = None
@@ -197,7 +197,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Stop the queue while retaining the configured action registrations."""
     runtime: ActivityImagesRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if runtime is not None:
-        if not await hass.config_entries.async_unload_platforms(entry, ["sensor"]):
+        if not await hass.config_entries.async_unload_platforms(entry, ["sensor", "ai_task"]):
             return False
         runtime.generator.image_saved_callback = None
         await runtime.calendar.async_shutdown()

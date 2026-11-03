@@ -1192,13 +1192,13 @@ async def test_integration_calendar_service_and_platform_lifecycle(ha, monkeypat
 
     ha.services.async_register("calendar", "get_events", get_events)
     assert await integration.async_setup_entry(ha, entry)
-    assert ("load", ("sensor",)) in ha.forwarded
+    assert ("load", ("sensor", "ai_task")) in ha.forwarded
     assert entry.runtime_data.calendar.calendar_titles["calendar.school"] == ["New event"]
     assert len(ha.services.registered) == 9  # Eight activity actions + calendar service.
     result = await ha.services.async_call("activity_images", "refresh_calendars", {})
     assert result["tracked_titles"] == 1
     assert await integration.async_unload_entry(ha, entry)
-    assert ("unload", ("sensor",)) in ha.forwarded
+    assert ("unload", ("sensor", "ai_task")) in ha.forwarded
     assert entry.entry_id not in ha.data["activity_images"]
 
 @pytest.mark.asyncio
@@ -1245,3 +1245,217 @@ async def test_existing_png_can_be_linked_without_provider(ha, monkeypatch):
         )
     assert file.exists()
     await integration.async_unload_entry(ha, entry)
+
+
+# Stage 5: AI Task wrapper unit tests (official output contract, fake provider).
+def _load_ai_wrapper():
+    import dataclasses
+    import importlib.util
+    import types
+
+    _load_integration_entrypoint()
+    if "homeassistant.helpers.entity_platform" not in sys.modules:
+        _package("homeassistant.helpers.entity_platform")
+    sys.modules["homeassistant.helpers.entity_platform"].AddConfigEntryEntitiesCallback = object
+
+    fake_ai = types.ModuleType("homeassistant.components.ai_task")
+
+    class AITaskEntity:
+        _attr_entity_id = None
+
+        @property
+        def entity_id(self):
+            return self._attr_entity_id
+
+    @dataclasses.dataclass
+    class GenImageTask:
+        name: str
+        instructions: str
+        attachments: list | None = None
+
+    @dataclasses.dataclass
+    class GenImageTaskResult:
+        image_data: bytes
+        conversation_id: str
+        mime_type: str
+        width: int
+        height: int
+        revised_prompt: str | None = None
+
+    fake_ai.AITaskEntity = AITaskEntity
+    fake_ai.AITaskEntityFeature = SimpleNamespace(GENERATE_IMAGE=4)
+    fake_ai.GenImageTask = GenImageTask
+    fake_ai.GenImageTaskResult = GenImageTaskResult
+    sys.modules["homeassistant.components.ai_task"] = fake_ai
+    sys.modules["homeassistant.components"].ai_task = fake_ai
+
+    spec = importlib.util.spec_from_file_location(
+        "custom_components.activity_images._ai_wrapper_test",
+        ROOT / "ai_task.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module, fake_ai
+
+
+def test_upstream_home_tasks_protocol_keeps_readable_title_only():
+    wrapper, ai = _load_ai_wrapper()
+    extract = wrapper.extract_home_tasks_title
+    raw = "Green Waste Collection\n\nThe image must have a square 1:1 aspect ratio."
+    assert extract("home_tasks_a98f", raw) == "Green Waste Collection"
+    assert extract("home_tasks_a98f", "Kids' Swimming\n\nThe image must have a square 1:1 aspect ratio.") == "Kids' Swimming"
+    for task_name, instructions in (
+        ("activity_image_123", raw),
+        ("home_tasks_123", "An event without a standard suffix"),
+        ("home_tasks_123", "\n\nThe image must have a square 1:1 aspect ratio."),
+        ("home_tasks_123", "One\nTwo\n\nThe image must have a square 1:1 aspect ratio."),
+        ("home_tasks_123", "T" * 256 + "\n\nThe image must have a square 1:1 aspect ratio."),
+    ):
+        with pytest.raises(wrapper.HomeAssistantError):
+            extract(task_name, instructions)
+
+
+@pytest.mark.asyncio
+async def test_wrapper_returns_processed_png_and_reuses_original_cache(ha):
+    import io
+
+    wrapper_module, ai = _load_ai_wrapper()
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    await integration.async_setup_entry(ha, entry)
+
+    entity = wrapper_module.ActivityImagesAITaskEntity(entry)
+    entity.hass = ha
+    entity._attr_entity_id = "ai_task.activity_images"
+    assert entity.available
+    assert entity._attr_supported_features == 4
+    assert entity._attr_unique_id == f"{entry.entry_id}_ai_task"
+
+    task = ai.GenImageTask(
+        name="home_tasks_38d5f3ce",
+        instructions="Green Waste Collection\n\nThe image must have a square 1:1 aspect ratio.",
+    )
+    chat = SimpleNamespace(conversation_id="test-conversation-123")
+    first = await entity._async_generate_image(task, chat)
+    assert first.mime_type == "image/png"
+    assert first.conversation_id == chat.conversation_id
+    assert first.height == 512
+    assert 0 < first.width <= 1024
+    assert first.image_data[:8] == b"\x89PNG\r\n\x1a\n"
+    assert "tactile" in first.revised_prompt.lower()
+    assert "Green Waste Collection" in first.revised_prompt
+    assert "The image must have a square 1:1 aspect ratio." not in first.revised_prompt
+    with Image.open(io.BytesIO(first.image_data)) as image:
+        assert image.format == "PNG"
+        assert image.size == (first.width, first.height)
+
+    assert len(ha.services.calls) == 1
+    request = ha.services.calls[0][2]
+    assert request["entity_id"] == "ai_task.mock"
+    assert request["instructions"] == first.revised_prompt
+    second = await entity._async_generate_image(task, chat)
+    assert second.image_data == first.image_data
+    assert len(ha.services.calls) == 1
+    assert await integration.async_unload_entry(ha, entry)
+
+
+@pytest.mark.asyncio
+async def test_wrapper_unavailable_without_provider_and_recursion_guard(ha):
+    wrapper_module, ai = _load_ai_wrapper()
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    entry.data[const_module.CONF_AI_ENTITY] = ""
+    await integration.async_setup_entry(ha, entry)
+    entity = wrapper_module.ActivityImagesAITaskEntity(entry)
+    entity.hass = ha
+    entity._attr_entity_id = "ai_task.activity_images"
+    task = ai.GenImageTask(
+        name="home_tasks_a",
+        instructions="Swimming\n\nThe image must have a square 1:1 aspect ratio.",
+    )
+    chat = SimpleNamespace(conversation_id="test")
+    assert not entity.available
+    with pytest.raises(wrapper_module.HomeAssistantError, match="real AI Task"):
+        await entity._async_generate_image(task, chat)
+    entry.runtime_data.generator.settings[const_module.CONF_AI_ENTITY] = "ai_task.activity_images"
+    entry.options[const_module.CONF_AI_ENTITY] = "ai_task.activity_images"
+    assert not entity.available
+    with pytest.raises(wrapper_module.HomeAssistantError, match="cannot use itself"):
+        await entity._async_generate_image(task, chat)
+    assert len(ha.services.calls) == 0
+    await integration.async_unload_entry(ha, entry)
+
+
+@pytest.mark.asyncio
+async def test_wrapper_rejects_extra_attachments(ha):
+    wrapper_module, ai = _load_ai_wrapper()
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    await integration.async_setup_entry(ha, entry)
+    entity = wrapper_module.ActivityImagesAITaskEntity(entry)
+    entity.hass = ha
+    entity._attr_entity_id = "ai_task.activity_images"
+    task = ai.GenImageTask(
+        name="home_tasks_ef",
+        instructions="School\n\nThe image must have a square 1:1 aspect ratio.",
+        attachments=[SimpleNamespace(path="/tmp/random.jpg")],
+    )
+    with pytest.raises(wrapper_module.HomeAssistantError, match="does not accept"):
+        await entity._async_generate_image(task, SimpleNamespace(conversation_id="test"))
+    assert len(ha.services.calls) == 0
+    await integration.async_unload_entry(ha, entry)
+
+
+
+@pytest.mark.asyncio
+async def test_ai_wrapper_rejects_nonlocal_or_malformed_png_paths(ha, monkeypatch):
+    wrapper_module, ai = _load_ai_wrapper()
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    await integration.async_setup_entry(ha, entry)
+    entity = wrapper_module.ActivityImagesAITaskEntity(entry)
+    entity.hass = ha
+    entity._attr_entity_id = "ai_task.activity_images"
+    task = ai.GenImageTask(
+        name="home_tasks_a1",
+        instructions="Event\n\nThe image must have a square 1:1 aspect ratio.",
+    )
+    async def bad_result(url):
+        return {"image_url": url}
+
+    for url in (
+        "https://somewhere.example/unsafe.png",
+        "/local/activity_images/../../secrets.png",
+        "/local/activity_images/.hidden.png",
+        "/local/activity_images/not-a-png.jpg",
+        "file:///etc/passwd",
+        "/local/activity_images/test.png#fragment",
+    ):
+        async def fake_generate(_title, *, force=False, result=url):
+            return await bad_result(result)
+        monkeypatch.setattr(entry.runtime_data.generator, "async_generate", fake_generate)
+        with pytest.raises(wrapper_module.HomeAssistantError, match="invalid PNG URL|nonlocal image URL|Invalid image filename"):
+            await entity._async_generate_image(
+                task, SimpleNamespace(conversation_id="reject")
+            )
+    assert len(ha.services.calls) == 0
+    await integration.async_unload_entry(ha, entry)
+
+
+@pytest.mark.asyncio
+async def test_ai_task_platform_exports_exactly_one_stable_entity(ha):
+    wrapper_module, ai = _load_ai_wrapper()
+    entry = MockConfigEntry()
+    found = []
+    await wrapper_module.async_setup_entry(
+        ha, entry, lambda entities: found.extend(entities)
+    )
+    assert len(found) == 1
+    assert found[0]._attr_unique_id == f"{entry.entry_id}_ai_task"
+    assert found[0]._attr_name == "Activity Images"
+    assert found[0]._attr_supported_features == ai.AITaskEntityFeature.GENERATE_IMAGE

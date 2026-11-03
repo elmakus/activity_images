@@ -10,10 +10,8 @@
   "config_flow": true,
   "iot_class": "local_push",
   "integration_type": "service",
-  "after_dependencies": [
-    "ai_task"
-  ],
   "dependencies": [
+    "ai_task",
     "media_source"
   ]
 }
