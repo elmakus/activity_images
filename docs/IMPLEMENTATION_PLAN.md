@@ -8,7 +8,7 @@ Jedna niezależna integracja Home Assistant `activity_images`, używana:
 1. bezpośrednio przez kalendarze, inne aktywności i dashboardy (oryginalny cache + kolejka),
 2. jako **AI Task wrapper** przez oryginalny, niezmodyfikowany Home Tasks.
 
-Oficjalny Calendar Card Pro pozostaje bez zmian; istniejący Config Template Card czyta dynamiczną encję HA. Motyw **Lumina** pozostaje bez jakiejkolwiek zmiany.
+Oficjalny Calendar Card Pro pozostaje bez zmian. Do dynamicznego przekazania encji testujemy **Auto-Entities 2.x** (aktywnie rozwijany fork Lint-Free-Technology), a dotychczasowy działający Config Template Card zachowujemy jako wariant awaryjny do czasu testów. Motyw **Lumina** pozostaje bez jakiejkolwiek zmiany.
 
 ### Zasady niepodlegające negocjacji
 
@@ -81,10 +81,10 @@ Oficjalny Calendar Card Pro pozostaje bez zmian; istniejący Config Template Car
 **Miejsce testu**: oddzielny dashboard `/calendar-pro-test/ikony` na HA `.180`.
 
 - Zastąpić demonstracyjny `input_text.activity_images_demo_map` sensorem z etapu 3.
-- Config Template Card dynamicznie zamienia mapę na oficjalne `entities` z `allowlist`, `label` PNG, `label_type: image` i domyślną regułą dla nieznanych tytułów. Poprawnie escape'ować RegExp, by tytuły z nawiasami/symbolami nie psuły filtrów.
+- **Najpierw przetestować aktywnie rozwijany Auto-Entities 2.x** (`Lint-Free-Technology/lovelace-auto-entities`, v2.8.3 z 2026-10-20): `filter.template` (Jinja2) ma dynamicznie tworzyć oficjalne `entities` z `allowlist`, `label` PNG, `label_type: image` oraz regułą dla nieznanych tytułów. Poprawnie escape'ować RegExp, by tytuły z nawiasami/symbolami nie psuły filtrów.
 - Test bez odświeżania: nieznany tytuł → brak PNG → wpis w kolejce → gotowy PNG → automatyczny update karty.
 - Test wielu wydarzeń, tego samego tytułu, alternatywnych kalendarzy, zmiany tytułu i powtarzających się wydarzeń. Ocena czy karta nie przeskakuje/nie traci scrolla po aktualizacji.
-- Jeśli stary Config Template Card (v1.3.6/2021) wykaże problem, szukamy rozwiązania bez forka, zanim uznamy integrację za gotową.
+- Zachować działający Config Template Card (v1.3.6/2021) jako rozwiązanie awaryjne; nie usuwać go, zanim Auto-Entities przejdzie testy. Jeśli Auto-Entities będzie niestabilny, wrócić do sprawdzonej karty i szukać alternatywy bez forka.
 
 **Kryterium**: w oficjalnym Calendar Card Pro nowa ikona pojawia się samoczynnie, bez ręcznej konfiguracji, restartu HA, odświeżenia przeglądarki czy modyfikacji kodu karty.
 
