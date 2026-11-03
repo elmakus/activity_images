@@ -2,7 +2,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stage 5 (development branch):** the independent image library runs in test mode on new HA `192.168.2.180`, and the user confirmed card D displays the correct image. The new `ai_task.activity_images` wrapper is implemented and verified in isolation, **but is not installed on the live HA yet**. A real image provider, Home Tasks integration test, full migration and production release remain outstanding. No real AI requests have been made.
+**Stage 6 (development branch):** the native image library and `ai_task.activity_images` wrapper are installed on new HA `192.168.2.180`. The user confirmed that Calendar Card Pro card D displays its image. **202 PNG/WebP files and 64 valid image mappings were migrated** from the read-only old HA; all mappings survived a restart. The wrapper is currently `unavailable` until a real image provider is configured. The original Lucida endpoint passed an isolated test. A paid provider, upstream Home Tasks end-to-end integration test and stable release remain outstanding. See `docs/STAGE6_MIGRATION_RESULT.md`.
 
 ## Capabilities
 
@@ -95,7 +95,7 @@ A 15-minute calendar refresh interval is for detecting event changes and is
 
 ## Home Tasks wrapper (Stage 5, development only)
 
-The new integration exposes `ai_task.activity_images` alongside
+The integration exposes `ai_task.activity_images` alongside
 `sensor.activity_images_library`. It requires an actual **different**
 `ai_task.*` image provider selected in Activity Images options. Until
 that provider exists, the wrapper entity is unavailable; the calendar
@@ -115,7 +115,7 @@ columns:
     auto_generate_image: false
 ```
 
-The wrapper matches the upstream Home Tasks request format:
+The installed wrapper matches the upstream Home Tasks request format:
 `task_name: home_tasks_<hash>` and
 `instructions: <title> + "\\n\\nThe image must have a square 1:1 aspect ratio."`.
 It reads the human title from `instructions` (never from the hash), ignores
@@ -154,8 +154,8 @@ The optional Lucida URL is configured locally; no server address or API credenti
 1. **Stages 0–1:** source audit; preserve original graphical pipeline, remove room/cooldown and bound retries (see `docs/STAGE1_ENGINE_RESULT.md`).
 2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
 3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** live sensor and test dashboard D verified (see `docs/STAGE4_FRONTEND_RESULT.md`), with visible icon confirmed by the user.
-4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks; implementation and isolated tests complete (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md`), real provider/Home Tasks validation pending.
-5. **Stage 6:** one-time image import, full tests and release.
+4. **Stage 5:** `ai_task.activity_images` wrapper for unmodified upstream Home Tasks; deployed on new HA and registered with GENERATE_IMAGE, unavailable without a real provider (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md`).
+5. **Stage 6:** migrated 202 images and 64 cache mappings to new HA, preserved style reference, validated Lucida and restart (see `docs/STAGE6_MIGRATION_RESULT.md`). Real-provider and upstream Home Tasks acceptance tests plus final release remain pending.
 
 ## Attribution
 
