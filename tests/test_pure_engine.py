@@ -16,14 +16,16 @@ def load(name):
     return module
 
 
-def test_chore_and_room_prompts_differ():
+def test_every_activity_uses_original_full_prompt_not_room_variant():
     prompts = load("ai_prompts")
     chore = prompts.build_activity_image_instructions("Odkurzanie")
     room = prompts.build_activity_image_instructions("Pokój dziecięcy")
     assert "tactile" in chore.lower()
     assert "isometric" not in chore.lower()
-    assert "isometric" in room.lower()
+    assert "isometric" not in room.lower()
     assert "Pokój dziecięcy" in room
+    assert chore.endswith(prompts.PROMPT_STYLE_SUFFIX)
+    assert room.endswith(prompts.PROMPT_STYLE_SUFFIX)
 
 
 def test_transparent_canvas_normalization():
