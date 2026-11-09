@@ -13,10 +13,13 @@ from .const import (
     CONF_LOOKAHEAD_DAYS,
     CONF_LUCIDA_URL,
     CONF_REFERENCE_MEDIA_ID,
+    CONF_PROMPT_TEMPLATE,
     DEFAULT_LOOKAHEAD_DAYS,
     DOMAIN,
     MAX_CALENDARS,
 )
+from .prompts import DEFAULT_PROMPT_TEMPLATE
+from .settings_schema import validate_settings
 
 
 def schema(settings: dict | None = None) -> vol.Schema:
@@ -38,6 +41,9 @@ def schema(settings: dict | None = None) -> vol.Schema:
             CONF_LUCIDA_URL, default=settings.get(CONF_LUCIDA_URL, "")
         ): selector.TextSelector(),
         vol.Optional(
+            CONF_PROMPT_TEMPLATE, default=settings.get(CONF_PROMPT_TEMPLATE, DEFAULT_PROMPT_TEMPLATE),
+        ): selector.TextSelector(selector.TextSelectorConfig(multiline=True)),
+        vol.Optional(
             CONF_CALENDARS, default=settings.get(CONF_CALENDARS, [])
         ): selector.EntitySelector(selector.EntitySelectorConfig(domain="calendar", multiple=True)),
         vol.Required(
@@ -52,26 +58,11 @@ def schema(settings: dict | None = None) -> vol.Schema:
 
 
 def _valid(data: dict) -> bool:
-    calendars = data.get(CONF_CALENDARS, [])
-    if not isinstance(calendars, list) or len(calendars) > MAX_CALENDARS:
+    try:
+        validate_settings(data)
+    except ValueError:
         return False
-    if len(calendars) != len(set(calendars)):
-        return False
-    # Prevent automatic paid generation when no valid image provider is set.
-    if data.get(CONF_AUTO_GENERATE) and not data.get(CONF_AI_ENTITY):
-        return False
-    if not all(isinstance(item, str) and item.startswith("calendar.") for item in calendars):
-        return False
-    return (
-        (
-            not data.get(CONF_LUCIDA_URL)
-            or data[CONF_LUCIDA_URL].startswith(("http://", "https://"))
-        )
-        and (
-            not data.get(CONF_REFERENCE_MEDIA_ID)
-            or data[CONF_REFERENCE_MEDIA_ID].startswith("media-source://")
-        )
-    )
+    return True
 
 
 class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
