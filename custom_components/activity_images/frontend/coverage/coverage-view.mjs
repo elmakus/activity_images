@@ -68,7 +68,7 @@ export class ActivityImagesCoverage extends HTMLElement {
     this._sort = "title";
     this._offset = 0;
     this._version = 0;
-    this._busy = false;
+    this._refreshToken = null;
     this._loaded = false;
     this._items = [];
     this._total = 0;
@@ -79,6 +79,7 @@ export class ActivityImagesCoverage extends HTMLElement {
     this.onAssign = null;
     this.onGenerate = null;
     this.previewImage = null;
+    this.clearPreviews = null;
   }
   set hass(value) {
     this._hass = value;
@@ -91,6 +92,9 @@ export class ActivityImagesCoverage extends HTMLElement {
   disconnectedCallback() {
     this._version++;
     this._loaded = false;
+    clearTimeout(this._debounce);
+    this._refreshToken = null;
+    this.clearPreviews?.();
     if (this._dialog?.open) this._dialog.close();
   }
   invalidate() { this._version++; }
@@ -217,7 +221,7 @@ export class ActivityImagesCoverage extends HTMLElement {
       this._scanLine.textContent = "";
       return;
     }
-    const parts = [`Scan: ${scan.calendars} calendars · ${scan.tracked_titles} tracked titles · ${scan.images} images`];
+    const parts = [`Scan: ${Array.isArray(scan.calendars) ? scan.calendars.length : scan.calendars} calendars · ${scan.tracked_titles} tracked titles · ${scan.images} images`];
     if (scan.last_scan) parts.push(`last scan ${scan.last_scan}`);
     parts.push(`automatic generation ${scan.automatic_generation ? "on" : "off"}`);
     this._scanLine.textContent = parts.join(" · ");
@@ -227,6 +231,8 @@ export class ActivityImagesCoverage extends HTMLElement {
   }
 
   _paintItems() {
+    // Drop panel-held preview object URLs/fetches before removing their nodes.
+    this.clearPreviews?.();
     this._list.replaceChildren();
     for (const item of this._items) {
       const card = element("article", undefined, "card");
@@ -345,9 +351,11 @@ export class ActivityImagesCoverage extends HTMLElement {
   }
 
   async _refresh() {
-    if (!this.isConnected || !this._hass || this._busy) return;
-    const version = this._version;
-    this._busy = true;
+    if (!this.isConnected || !this._hass || this._refreshToken) return;
+    const token = {};
+    this._refreshToken = token;
+    // Invalidate any earlier read so it cannot paint over this refresh.
+    const version = ++this._version;
     this._status.textContent = "Refreshing coverage…";
     try {
       // Resolve-only refresh: recomputes coverage without AI or queue writes.
@@ -371,12 +379,17 @@ export class ActivityImagesCoverage extends HTMLElement {
         element("span", "Cannot refresh coverage: " + statusMessage(error) + " ", "error"),
         action("Try again", () => this._refresh()));
     } finally {
-      if (version === this._version) this._busy = false;
+      // Only the owning refresh may release the lock, even when a newer
+      // read discarded this result.
+      if (this._refreshToken === token) this._refreshToken = null;
     }
   }
 
   _ignoreDialog(item) {
     const remove = item.ignored;
+    // Capture the ignore revision the user saw; the submitted payload must
+    // carry it back unchanged so the backend can reject stale edits.
+    const revision = this._ignoreRevision;
     this._version++;
     if (!this._dialog.open) this._returnFocus = this.shadowRoot.activeElement;
     this._dialog.replaceChildren();
@@ -399,7 +412,7 @@ export class ActivityImagesCoverage extends HTMLElement {
       error.textContent = "";
       try {
         // The exact raw string is sent unchanged: no trimming or normalization.
-        const result = await this._call("ignore", {raw_summary: item.raw_summary});
+        const result = await this._call("ignore", {raw_summary: item.raw_summary, ignored: !remove, revision});
         if (!this.isConnected) return;
         this._ignoreRevision = result.revision ?? this._ignoreRevision;
         this._dialog.close();

@@ -271,3 +271,147 @@ test("Manual Generate requires explicit paid confirmation and surfaces unknown o
   waiting.resolve({id: "job-1"});
   await tick();
 });
+
+// Strict ignore-contract tests: the backend requires the complete payload
+// {raw_summary, ignored, revision}; raw text must travel unchanged.
+function ignoreDialog(element) {
+  const dialog = element.shadowRoot.querySelector("dialog");
+  assert.ok(dialog && dialog.open);
+  return dialog;
+}
+
+test("Ignore add sends exact raw string, true flag and captured revision", async (t) => {
+  const raw = "Basen 9:15 ";
+  const {element, commands} = await coverageFixture(t, (r) => {
+    if (r.type.endsWith("/coverage")) return coverage([item({raw_summary: raw, title: "Basen 9:15", ignored: false})], {ignore_revision: 7});
+    if (r.type.endsWith("/ignore")) {
+      assert.equal(r.raw_summary, raw);
+      assert.equal(r.ignored, true);
+      assert.equal(r.revision, 7);
+      return {revision: 8, ignored: true};
+    }
+    return undefined;
+  });
+  findButton(cards(element)[0], "Ignore exact title").click();
+  findButton(ignoreDialog(element), "Ignore exact title").click();
+  await tick();
+  await tick();
+  assert.equal(commands("ignore").length, 1);
+  const sent = commands("ignore")[0];
+  assert.equal(sent.raw_summary, raw);
+  assert.equal(sent.ignored, true);
+  assert.equal(sent.revision, 7);
+  assert.deepEqual(Object.keys(sent).sort(), ["ignored", "raw_summary", "revision", "type"]);
+  assert.equal(commands("coverage").length, 2);
+  assert.equal(commands("generate").length, 0);
+});
+
+test("Ignore remove sends exact raw string, false flag and captured revision", async (t) => {
+  const raw = "Old title ";
+  let ignores = 0;
+  const {element, commands} = await coverageFixture(t, (r) => {
+    if (r.type.endsWith("/coverage")) {
+      if (ignores) return coverage([item({raw_summary: raw, title: "Old title", ignored: false, scheduled: false})], {ignore_revision: 13});
+      return coverage([item({raw_summary: raw, title: "Old title", ignored: true, scheduled: false})], {ignore_revision: 12});
+    }
+    if (r.type.endsWith("/ignore")) {
+      ignores++;
+      assert.equal(r.raw_summary, raw);
+      assert.equal(r.ignored, false);
+      assert.equal(r.revision, 12);
+      return {revision: 13, ignored: false};
+    }
+    return undefined;
+  });
+  findButton(cards(element)[0], "Remove ignore").click();
+  findButton(ignoreDialog(element), "Remove ignore").click();
+  await tick();
+  await tick();
+  assert.equal(commands("ignore").length, 1);
+  const sent = commands("ignore")[0];
+  assert.equal(sent.raw_summary, raw);
+  assert.notEqual(sent.raw_summary, sent.raw_summary.trim());
+  assert.equal(sent.ignored, false);
+  assert.equal(sent.revision, 12);
+  assert.deepEqual(Object.keys(sent).sort(), ["ignored", "raw_summary", "revision", "type"]);
+  assert.equal(commands("coverage").length, 2);
+  assert.equal(commands("generate").length, 0);
+});
+
+test("Ignore conflict reloads once without silently retrying the ignore", async (t) => {
+  const raw = "Café ";
+  const {element, commands} = await coverageFixture(t, (r) => {
+    if (r.type.endsWith("/coverage")) return coverage([item({raw_summary: raw, title: "Café", ignored: false})], {ignore_revision: 7});
+    if (r.type.endsWith("/ignore")) return Promise.reject({code: "ignore_conflict", message: "Ignore revision changed"});
+    return undefined;
+  });
+  findButton(cards(element)[0], "Ignore exact title").click();
+  findButton(ignoreDialog(element), "Ignore exact title").click();
+  await tick();
+  await tick();
+  assert.equal(commands("ignore").length, 1);
+  assert.equal(commands("coverage").length, 2);
+  assert.match(element.shadowRoot.textContent, /Reloaded latest coverage/);
+  assert.equal(commands("generate").length, 0);
+});
+
+test("Ignore failure keeps the dialog open without retry or reload", async (t) => {
+  const {element, commands} = await coverageFixture(t, (r) => {
+    if (r.type.endsWith("/coverage")) return coverage([item({raw_summary: "Swim", title: "Swim", ignored: false})]);
+    if (r.type.endsWith("/ignore")) return Promise.reject({message: "Network down"});
+    return undefined;
+  });
+  findButton(cards(element)[0], "Ignore exact title").click();
+  const dialog = ignoreDialog(element);
+  findButton(dialog, "Ignore exact title").click();
+  await tick();
+  await tick();
+  assert.equal(commands("ignore").length, 1);
+  assert.equal(commands("coverage").length, 1);
+  assert.ok(dialog.open);
+  assert.match(dialog.textContent, /Network down/);
+  assert.equal(commands("generate").length, 0);
+});
+
+test("Refresh recovers after a filter change lands mid-refresh", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let refreshes = 0;
+  const {element, commands} = await coverageFixture(t, (r) => {
+    if (r.type.endsWith("/refresh")) {
+      refreshes++;
+      if (refreshes === 1) return gate;
+      return coverage([missing()]);
+    }
+    return undefined;
+  });
+  findButton(element.shadowRoot, "Refresh coverage").click();
+  assert.equal(commands("refresh").length, 1);
+  findButton(element.shadowRoot, "Missing (1)").click();
+  await tick();
+  release(coverage([missing()]));
+  await tick();
+  await tick();
+  findButton(element.shadowRoot, "Refresh coverage").click();
+  await tick();
+  assert.equal(commands("refresh").length, 2);
+  assert.equal(commands("generate").length, 0);
+});
+
+test("Repaint and disconnect clear coverage previews", async (t) => {
+  const {element} = await coverageFixture(t);
+  let clears = 0;
+  element.clearPreviews = () => { clears++; };
+  findButton(element.shadowRoot, "Missing (1)").click();
+  await tick();
+  assert.ok(clears >= 1);
+  element.remove();
+  assert.ok(clears >= 2);
+});
+
+test("Scan calendar count handles the contracted array shape", async (t) => {
+  const {element} = await coverageFixture(t, () => coverage([missing()], {
+    scan: {calendars: ["calendar.a", "calendar.b"], tracked_titles: 1, images: 0, last_scan: null, error: null, automatic_generation: false, complete: true, stale: false},
+  }));
+  assert.match(element.shadowRoot.textContent, /2 calendars/);
+});

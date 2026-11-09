@@ -267,6 +267,7 @@
         view.onAssign = (item) => this._coverageAssign(item);
         view.onGenerate = (item) => this._coverageGenerate(item);
         view.previewImage = (target, path, alt) => this._image(target, path, alt, "coverage");
+        view.clearPreviews = () => this._clearImages("coverage");
         this._coverageView = view;
         this._coverage.replaceChildren(view);
       } catch (error) {
