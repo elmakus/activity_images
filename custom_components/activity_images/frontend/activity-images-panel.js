@@ -392,7 +392,7 @@
       this._dialog.setAttribute("aria-busy", String(this._busy));
     }
     async _mutate(command, data, done) {
-      if (this._busy || (["generate", "retry", "delete", "delete_retry"].includes(command) && this._uncertain)) return;
+      if (this._busy || (["generate", "retry", "delete", "delete_retry", "delete_abandon"].includes(command) && this._uncertain)) return;
       const lifecycle = this._lifecycle;
       this._busy = true;
       this._dialogError.textContent = "";
@@ -563,6 +563,7 @@
         list.append(row);
       }
       this._dialog.append(list, el("p", plan.external_warning || "External references cannot be verified. Unlinked does not mean unused. Dashboards may retain these image URLs. Home Tasks copies will not be modified."));
+      this._dialog.append(el("p", "The activity check covers selected calendars within the configured lookahead only. Later events and external uses cannot be verified."));
       if (plan.calendar_warning) this._dialog.append(el("p", plan.calendar_warning, "error"));
       const requests = plan.replacement_requests;
       this._dialog.append(el("p", `${requests} new AI generation request${requests === 1 ? "" : "s"} ${operationId ? "remain" : "may be required"}. Existing retry limits allow up to ${plan.max_provider_attempts} provider attempts in total. Provider charges may apply to failed or timed-out attempts.`));
@@ -598,6 +599,15 @@
       this._actions(remove);
       if (plan.blocked_reason) this._dialogError.textContent = plan.blocked_reason;
       if (this._uncertain) this._dialogError.textContent = "Refresh job status before another deletion request.";
+    }
+    _abandonDeleteDialog(operation) {
+      this._modal("Keep originals and stop deletion?");
+      this._dialog.append(el("p", "Stop only failed or interrupted image deletions that have not committed replacements. Their original files, associations and saved candidates remain. This releases their image and title reservations so you can review a fresh plan."));
+      this._dialog.append(el("p", "Completed deletions cannot be undone. Committed cleanup is not stopped. This action sends no AI request and does not enable automatic generation."));
+      for (const item of operation.items) this._dialog.append(el("p", `${item.filename} · ${item.state}`));
+      const keep = button("Keep originals", () => this._mutate("delete_abandon", { operation_id: operation.id, confirm: true }, () => this._dialog.close()));
+      keep.dataset.paid = "true";
+      this._actions(keep);
     }
     _jobPreview(job) {
       const path = job.result_unavailable ? null : job.thumbnail_url || job.image_url;
@@ -686,6 +696,7 @@
         for (const item of operation.items) card.append(el("p", `${item.filename} · ${item.state}${item.error ? ` — ${item.error}` : ""}`, item.error ? "error" : ""));
         if (operation.error) card.append(el("p", operation.error, "error"));
         if (["failed", "interrupted", "cleanup_failed", "partial"].includes(operation.state)) card.append(button("Review deletion retry…", () => this._deleteDialog([], operation.id)));
+        if (operation.can_abandon) card.append(button("Keep originals…", () => this._abandonDeleteDialog(operation)));
         this._queue.append(card);
       }
       const represented = new Set(jobs.filter((job) => ACTIVE.has(job.state) || job.state === "failed").flatMap((job) => [job.title, job.key || job.title]));

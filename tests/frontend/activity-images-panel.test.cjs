@@ -804,3 +804,24 @@ test('decode errors revoke their blob immediately, including after removal from 
   assert.equal(panel._jobPreviews.size, 0);
   assert.equal(revoked.filter((value) => value === url).length, 1);
 });
+
+test('keeping originals is explicit, sends no AI authorization and never offers to abandon committed cleanup', async (t) => {
+  const operation = { id: 'op', state: 'failed', can_abandon: true, items: [{ id: 'one', filename: 'one.png', state: 'failed', error: 'Calendar demand changed' }] };
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { operations: [operation] }) : undefined);
+  await tick();
+  findButton(panel._queue, 'Keep originals…').click();
+  assert.equal(commands('delete_abandon').length, 0);
+  assert.match(panel._dialog.textContent, /original files, associations and saved candidates remain/);
+  assert.match(panel._dialog.textContent, /Committed cleanup is not stopped/);
+  assert.match(panel._dialog.textContent, /sends no AI request/);
+  findButton(panel._dialog, 'Keep originals').click();
+  await tick();
+  assert.equal(commands('delete_abandon').length, 1);
+  assert.equal(commands('delete_abandon')[0].operation_id, 'op');
+  assert.equal(commands('delete_abandon')[0].confirm, true);
+  assert.equal(commands('generate').length, 0);
+  operation.can_abandon = false;
+  operation.state = 'cleanup_failed';
+  panel._renderJobs();
+  assert.ok(![...panel._queue.querySelectorAll('button')].some((b) => b.textContent === 'Keep originals…'));
+});
