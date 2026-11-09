@@ -171,12 +171,16 @@ async def async_register_manager(hass) -> None:
         registered.add("static")
     if "http" not in registered:
         hass.http.register_view(LibraryImageView())
+        from .settings_media import ReferencePreviewView
+        hass.http.register_view(ReferencePreviewView())
         registered.add("http")
     if "ws" not in registered:
         for command, fields in _SCHEMAS.items():
             websocket_api.async_register_command(hass, _handler(command, fields))
         from .settings_api import async_register_settings
         async_register_settings(hass)
+        from .settings_diagnostics_api import async_register_settings_diagnostics
+        async_register_settings_diagnostics(hass)
         registered.add("ws")
     await panel_custom.async_register_panel(
         hass, frontend_url_path=PANEL_ROUTE, webcomponent_name="activity-images-panel",
