@@ -172,6 +172,44 @@ async def test_corrupt_derivative_is_included_symlink_variant_blocks(ha, configu
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("master_kind", ["corrupt", "symlink", "oversized", "hardlink"])
+async def test_derivative_only_group_never_leaves_existing_master_behind(ha, configured, master_kind):
+    cache, _ = configured
+    picture(ha, "old_qa.webp")
+    picture(ha, "old_thumb.webp")
+    folder = ha.base / "www/activity_images"
+    master = folder / "old.png"
+    outside = ha.base / "retained.png"
+    outside.write_bytes(b"corrupt master fixture")
+    if master_kind == "symlink":
+        master.symlink_to(outside)
+    elif master_kind == "hardlink":
+        master.hardlink_to(outside)
+    elif master_kind == "oversized":
+        with master.open("wb") as stream:
+            stream.truncate(21 * 1024 * 1024)
+    else:
+        master.write_bytes(b"corrupt master fixture")
+    await cache.async_remember("Historical", "/local/activity_images/old.png")
+    deletions = manager(ha, configured)
+    plan = await deletions.async_plan([deletions.library.image_id("old_qa.webp")])
+    assert plan["items"][0]["files"] == ["old.png", "old_qa.webp", "old_thumb.webp"]
+    if master_kind == "corrupt":
+        assert not plan["items"][0]["blocked_reason"]
+        await deletions.async_delete(plan["token"], False, True)
+        await settled(deletions)
+        assert deletions.operations()[0]["state"] == "done"
+        assert not any((folder / name).exists() for name in plan["items"][0]["files"])
+        assert cache.exact("Historical") is None
+    else:
+        assert plan["items"][0]["blocked_reason"]
+        with pytest.raises(MappingConflict):
+            await deletions.async_delete(plan["token"], False, True)
+        assert master.exists() and cache.exact("Historical") == "/local/activity_images/old.png"
+    assert outside.read_bytes() == b"corrupt master fixture" and ha.services.calls == []
+
+
+@pytest.mark.asyncio
 async def test_all_replacements_durable_before_old_is_committed(ha, configured, monkeypatch):
     cache, engine = configured
     old = picture(ha, "old.png")

@@ -57,7 +57,7 @@ def group_files(root: Path, files: list[str], filename: str) -> list[str]:
             expected.update({filename[:-4] + "_thumb.webp", filename[:-4] + "_qa.webp"})
         elif filename.endswith(("_qa.webp", "_thumb.webp")):
             stem = filename.rsplit("_", 1)[0]
-            expected.update({stem + "_thumb.webp", stem + "_qa.webp"})
+            expected.update({stem + ".png", stem + "_thumb.webp", stem + "_qa.webp"})
         present = []
         for name in sorted(expected):
             validate_filename(name)
