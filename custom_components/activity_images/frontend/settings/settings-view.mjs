@@ -25,6 +25,11 @@ const STYLE = [
   "dd { margin:0; overflow-wrap:anywhere; }",
   ".reference-preview { display:flex; justify-content:center; min-height:40px; margin-top:14px; }",
   ".reference-preview img { max-width:100%; max-height:360px; object-fit:contain; }",
+  "dialog { color:var(--primary-text-color); background:var(--card-background-color);",
+  "  border:1px solid var(--divider-color); border-radius:var(--ha-card-border-radius, 16px);",
+  "  padding:24px; width:min(560px,calc(100vw - 24px)); }",
+  "dialog::backdrop { background:var(--dialog-backdrop-color, var(--primary-background-color)); opacity:.8; }",
+  "dialog ul { padding-left:24px; overflow-wrap:anywhere; }",
   "ha-selector { display:block; }",
   "@media(max-width:600px) { dl { grid-template-columns:1fr; gap:6px; } }",
 ].join("\n");
@@ -63,6 +68,7 @@ export class ActivityImagesSettings extends HTMLElement {
     }
     this._busy = false;
     this._saving = false;
+    this._confirm = null;
     this._dispose?.();
     this._dispose = null;
     this._syncDirty();
@@ -132,7 +138,10 @@ export class ActivityImagesSettings extends HTMLElement {
       this._values[key] = value;
       this._syncDirty();
     };
-    if (this._tab === "general") this._dispose = renderGeneral(this._content, this._values, update, this._hass) || null;
+    if (this._tab === "general") {
+      this._calendarHooks = {};
+      this._dispose = renderGeneral(this._content, this._values, update, this._hass, this._calendarHooks) || null;
+    }
     else if (this._tab === "prompt") renderPrompt(this._content, this._values, update);
     else if (this._tab === "reference") this._dispose = renderReference(this._content, this._values, update, this._hass);
     else if (this._diagnosticError) renderDiagnosticError(this._content, this._diagnosticError, () => this._refreshDiagnostics());
@@ -141,7 +150,7 @@ export class ActivityImagesSettings extends HTMLElement {
     this._syncDirty();
   }
   _syncDirty() {
-    if (this._saveButton) this._saveButton.disabled = this._busy || this._uncertain || JSON.stringify(this._values) === this._initial;
+    if (this._saveButton) this._saveButton.disabled = this._busy || this._uncertain || !!this._confirm || JSON.stringify(this._values) === this._initial;
     if (this._resetButton) {
       this._resetButton.disabled = this._busy;
       this._resetButton.textContent = this._uncertain ? "Discard edits and reload" : "Discard edits";
@@ -153,18 +162,89 @@ export class ActivityImagesSettings extends HTMLElement {
     this._load();
   }
   async _save() {
-    if (this._busy || this._uncertain || JSON.stringify(this._values) === this._initial) return;
+    if (this._busy || this._uncertain || this._confirm || JSON.stringify(this._values) === this._initial) return;
+    // Snapshot at decision time: edits made while the confirmation is open
+    // or during the save stay in the draft and never join this submission.
+    const submitted = JSON.parse(JSON.stringify(this._values));
+    if (this._newlyAutoEnabled(submitted).length) {
+      this._confirmAuto(submitted, this._revision);
+      return;
+    }
+    await this._doSave(submitted, this._revision, false);
+  }
+  _newlyAutoEnabled(values) {
+    let before = [];
+    try { before = JSON.parse(this._initial).auto_generate_calendar_entity_ids || []; }
+    catch { before = []; }
+    const known = new Set(Array.isArray(before) ? before : []);
+    const after = Array.isArray(values.auto_generate_calendar_entity_ids) ? values.auto_generate_calendar_entity_ids : [];
+    return after.filter((id) => !known.has(id));
+  }
+  _confirmAuto(submitted, revision) {
+    const ids = this._newlyAutoEnabled(submitted);
+    if (!ids.length || this._confirm) return;
+    const names = new Map((this._calendarHooks?.entities || []).map((entry) => [entry.entity_id, entry.name || entry.entity_id]));
+    const dialog = element("dialog");
+    const heading = element("h2", "Confirm automatic generation");
+    heading.id = "auto-confirm-title";
+    dialog.setAttribute("aria-labelledby", "auto-confirm-title");
+    const error = element("p", "", "error");
+    error.setAttribute("role", "alert");
+    const list = element("ul");
+    for (const id of ids) list.append(element("li", `${names.get(id) || id} (${id})`));
+    const checkLabel = element("label", "I authorize automatic paid image generation for these calendars.", "check");
+    const check = element("input");
+    check.type = "checkbox";
+    checkLabel.prepend(check);
+    dialog.append(heading,
+      element("p", "These calendars will be newly authorized for automatic missing-image generation:"),
+      list,
+      element("p", "May incur AI charges. Provider retries and failed or timed-out attempts may still incur charges. " +
+        "Turning automatic generation off later stops new calendar jobs; already accepted work remains in Queue & history and can still incur charges."),
+      checkLabel, error);
+    const row = element("div", undefined, "actions");
+    const confirmButton = action("Confirm and save", () => {
+      if (!check.checked) { error.textContent = "Check the authorization box to confirm this paid request."; return; }
+      dialog.close("confirmed");
+    });
+    const cancelButton = action("Cancel", () => dialog.close("cancelled"));
+    row.append(confirmButton, cancelButton);
+    dialog.append(row);
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); dialog.close("cancelled"); });
+    dialog.addEventListener("close", () => {
+      const approved = dialog.returnValue === "confirmed";
+      this._confirm = null;
+      dialog.remove();
+      if (this._returnFocus?.isConnected) this._returnFocus.focus();
+      else this._saveButton?.focus();
+      this._syncDirty();
+      // The approved snapshot is submitted unchanged: draft edits made
+      // while the dialog was open stay unsaved and need their own confirmation.
+      if (approved) this._doSave(submitted, revision, true);
+    });
+    this._confirm = {ids};
+    this._returnFocus = this.shadowRoot.activeElement;
+    this.shadowRoot.append(dialog);
+    // shortcut: dialog lacks native showModal in some test DOMs; fall back to open attribute.
+    if (typeof dialog.showModal === "function") { try { dialog.showModal(); } catch { dialog.setAttribute("open", ""); } }
+    else dialog.setAttribute("open", "");
+    this._syncDirty();
+    queueMicrotask(() => (dialog.querySelector("input, button") || dialog).focus());
+  }
+  async _doSave(submitted, revision, confirmAuto) {
     const version = this._version;
-    const submitted = JSON.stringify(this._values);
+    const payload = {revision, values: submitted};
+    // confirm_auto is sent only after explicit per-save confirmation of newly enabled calendars.
+    if (confirmAuto) payload.confirm_auto = true;
     this._busy = true;
     this._saving = true;
     this._notice("Saving settings…");
     this._syncDirty();
     try {
-      const response = await this._ws("save", {revision: this._revision, values: JSON.parse(submitted)});
+      const response = await this._ws("save", payload);
       if (version !== this._version) return;
       this._revision = response.revision;
-      this._initial = submitted;
+      this._initial = JSON.stringify(submitted);
       this._notice(response.changed ? "Settings saved." : "No changes.");
     } catch (error) {
       if (version !== this._version) return;

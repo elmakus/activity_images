@@ -6,7 +6,7 @@ import {element, action, statusMessage} from "./controls.mjs";
 const DISCOVER = "activity_images/calendar/discover";
 const MAX = 10;
 
-export function renderCalendars(root, values, update, hass) {
+export function renderCalendars(root, values, update, hass, hooks = {}) {
   let version = 0;
   let entities = null;
   const heading = element("h3", "Calendars");
@@ -43,6 +43,9 @@ export function renderCalendars(root, values, update, hass) {
       card.append(stateLine);
       if (entity.configured && !entity.available) {
         card.append(element("div", "Saved calendar, currently not reporting — kept visible.", "muted"));
+      }
+      if (typeof entity.warning === "string" && entity.warning) {
+        card.append(element("div", `Warning: ${entity.warning}`, "error"));
       }
       const monitorLabel = element("label", "Monitor", "check");
       const monitor = element("input");
@@ -115,6 +118,7 @@ export function renderCalendars(root, values, update, hass) {
         }
       }
       status.textContent = entities.length ? "" : "No calendars discovered. Saved entries are kept visible once configured.";
+      hooks.entities = entities;
       paint();
     } catch (error) {
       if (request !== version) return;

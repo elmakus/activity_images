@@ -1,7 +1,7 @@
 import {element, field} from "./controls.mjs";
 import {renderCalendars} from "./calendars-view.mjs";
 
-export function renderGeneral(root, values, update, hass) {
+export function renderGeneral(root, values, update, hass, hooks) {
   root.replaceChildren(element("h2", "General"));
   const provider = field("AI Task provider", values.ai_task_entity_id, (v) => update("ai_task_entity_id", v), {placeholder: "ai_task.provider"});
   const choices = element("datalist");
@@ -16,7 +16,7 @@ export function renderGeneral(root, values, update, hass) {
   root.append(element("p", "Choose a real provider, not the Activity Images wrapper. Generating images can incur charges.", "muted"));
   const calendars = element("section");
   root.append(calendars);
-  const disposeCalendars = renderCalendars(calendars, values, update, hass);
+  const disposeCalendars = renderCalendars(calendars, values, update, hass, hooks);
   const lookahead = field("Calendar lookahead (1–60 days)", values.calendar_lookahead_days,
     (v) => update("calendar_lookahead_days", v), {type: "number"});
   lookahead.input.min = "1";
