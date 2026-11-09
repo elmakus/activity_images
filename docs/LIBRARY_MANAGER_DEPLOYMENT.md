@@ -1,5 +1,7 @@
 # Library manager deployment and rollback
 
+This checklist describes the published **0.2.0** baseline. For the **0.3.0.dev0 review build**, also follow [deletion-specific preservation and rollback](LIBRARY_DELETION.md#rollback-and-recovery). An old mapping snapshot cannot restore permanently deleted image bytes. Do not roll back with unresolved committed cleanup.
+
 ## Approval boundary
 
 Version **0.2.0** promotes the validated `0.2.0.dev0` runtime without changing its Python, frontend, translations, or storage formats. Its only component-file change from development commit `5a798d0975402f25e0948144d1747aab7928734b` is `manifest.json`'s version. The operator approved the stable release process after accepting the gallery. That approval does not require another deployment or restart. Production replacement, reload/restart, and paid generation still require their own applicable approval. Never overwrite published tags or release contents.

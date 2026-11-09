@@ -2,6 +2,9 @@
 
 Version **0.2.0** is the stable library-manager release. See the
 [release notes](RELEASE_NOTES_v0.2.0.md) for changes and known limits.
+The current development branch prepares **0.3.0.dev0 for review**, not a published update.
+Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before any approved test installation.
+The manifest-only promotion described below applies only to the historical 0.2.0 release.
 Historical `STAGE*` reports describe earlier migration and validation work;
 they are not current installation instructions.
 
@@ -121,6 +124,10 @@ Marketplace-managed upgrades after the transition.
   `/config/.storage/activity_images_jobs`.
 - Last successful calendar snapshot:
   `/config/.storage/activity_images_calendar_snapshot`.
+- Deletion journal, reservations, and tombstones (0.3.0 review build):
+  additive fields in `/config/.storage/activity_images_image_cache`.
+- Private confirmed-cleanup quarantine (0.3.0 review build):
+  `/config/.storage/activity_images_deletions/`.
 - Optional reference media stays in its configured media location.
 
 Never edit HA `.storage` files while Home Assistant is running. Keep recovery
@@ -129,7 +136,10 @@ Unlinking or discarding a candidate never physically deletes an image.
 Existing `/local/activity_images/` URLs remain public for compatibility;
 the authenticated manager does not make those exports private.
 
-For rollback, follow [the rollback checklist](LIBRARY_MANAGER_DEPLOYMENT.md#rollback).
+For rollback, follow [the rollback checklist](LIBRARY_MANAGER_DEPLOYMENT.md#rollback)
+and [deletion-specific recovery](LIBRARY_DELETION.md#rollback-and-recovery).
+Resolve committed cleanup before reverting to 0.2.0, which does not understand deletion operations.
+A code downgrade cannot restore deleted image bytes.
 Do not blindly restore an old cache over newer user associations. Version
 0.1.0 does not understand all new manual-job metadata and reenables its old
 association cap, so downgrading requires a separate data-preservation review.
@@ -137,4 +147,6 @@ association cap, so downgrading requires a separate data-preservation review.
 To remove the integration, use **Settings → Devices & services** first,
 then uninstall its code through Marketplace when wanted. Keep image and
 storage recovery copies until all external references have been accounted
-for. Removal is not permission to delete public image files.
+for. Resolve already-confirmed deletion operations first and preserve private quarantine if present.
+Removing the integration does not undo completed deletion or restore missing image bytes.
+Removal is not permission to delete additional public image files.

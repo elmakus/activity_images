@@ -4,7 +4,9 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stable version: 0.2.0.** This release adds an administrator-only image library manager and startup reliability improvements for Home Assistant 2026.11+. Existing image files, associations, entity IDs, actions, prompt, title matching, and Home Tasks integration remain compatible. The completed original migration is not repeated. See [release notes](docs/RELEASE_NOTES_v0.2.0.md) and [validation results](docs/LIBRARY_MANAGER_VALIDATION.md).
+**Published stable version: 0.2.0.** This branch prepares **0.3.0.dev0 for review only**: focused library deletion, replacement, selection, and preview improvements. It is not a published update or approval to change production. See [upcoming release notes](docs/RELEASE_NOTES_v0.3.0.md), [permanent deletion and recovery](docs/LIBRARY_DELETION.md), and [new validation results](docs/LIBRARY_IMPROVEMENTS_VALIDATION.md).
+
+Existing entity IDs, actions, prompt, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
 
 ## Capabilities
 
@@ -20,9 +22,10 @@ Standalone activity-icon generator for [Home Assistant](https://www.home-assista
 - Publish `sensor.activity_images_library` with the `images` map and pre-escaped `calendar_rules` attribute for Auto-Entities + Calendar Card Pro; refresh after each newly generated PNG.
 - Automatically generating missing calendar illustrations is **off by default** to prevent surprise provider usage. Enable it in the integration's options after reviewing the existing library.
 - Expose an optional `ai_task.activity_images` wrapper for unmodified upstream Home Tasks. The wrapper extracts the task title from the official upstream request, builds the full original prompt, and returns the processed PNG through the official AI Task entity interface. The wrapper was deployed and verified with unmodified Home Tasks 2.5.0 on the test Home Assistant.
-- Administrator-only library panel with paginated gallery, search, aliases, PNG/thumbnail/QA previews, title assignment, and unlinking without file deletion
+- Administrator-only library panel with paginated gallery, search, aliases, full-composition previews, image-canvas boundaries, title assignment, and unlinking without file deletion
+- Explicit permanent deletion of one image or up to 64 selected images, with verified file lists, bounded replacement authorization, restartable cleanup, and failure-safe originals
 - Explicit paid candidate generation and regeneration, review before acceptance, persistent jobs, bounded retries, and manual retry after interruption
-- Existing files and useful associations are retained independently of library size. No changes to Home Tasks or other Home Assistant integrations.
+- Existing files and useful associations are retained independently of library size unless explicitly included in a confirmed permanent deletion. No changes to Home Tasks or other Home Assistant integrations.
 
 ## Installation
 
@@ -39,15 +42,16 @@ For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_D
 Open **Activity Images** in the Home Assistant sidebar as an administrator, or navigate to `/activity-images`. No dashboard changes, Lovelace resources, custom cards, or external server are required. The panel respects the active Home Assistant theme, including Lumina; it does not modify themes.
 
 - **Library:** browse all supported image files in the integration's directory, not just calendar matches. Recognized PNG masters, thumbnails, and QA variants appear once. Standalone files without associations also appear. Search matches titles, aliases, and filenames. Filters are **All images**, **Linked**, **Unlinked**, and **Generated**.
-- **Details:** inspect the master, available thumbnail/QA previews, dimensions, format, filename, associated titles, and reliable dates. Old assets have **unknown** origin unless explicit metadata exists; a hash is not evidence of generation or import. Modification time is not creation time. There is no guessed Imported filter.
+- **Details:** inspect the master, available thumbnail/QA previews, dimensions, format, filename, associated titles, and reliable dates. Gallery and detail previews preserve the entire image composition and outline the actual image canvas. Switch detail backgrounds between **Dark**, **Light**, and **Transparency checkerboard** without modifying image files. Old assets have **unknown** origin unless explicit metadata exists; a hash is not evidence of generation or import. Modification time is not creation time. There is no guessed Imported filter.
 - **Assign title:** reuse the selected image without contacting AI. Replacing another exact title association requires confirmation. Other aliases remain unchanged.
 - **Unlink:** remove one confirmed title association. Files and other titles remain. **Unlinked does not mean safe to delete**: dashboards, Home Tasks, or other integrations may still use the file.
 - **Generate new image / Regenerate:** enter a title or choose exactly one existing alias, then explicitly authorize the potentially paid request. The shared AI Task/reference/Lucida pipeline creates a new file and leaves the current mapping unchanged. Review the candidate, then **Accept for this title** or **Discard candidate**. Discard never deletes files. Acceptance rejects a stale request if another operation changed that title's mapping.
-- **Queue & history:** inspect running/pending jobs, failures, candidates and the last 100 terminal records. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted manual requests are not replayed after restart; pending legacy background work remains persistent.
+- **Delete permanently / Delete selected:** review the exact files, aliases, current calendar consumers, and external-reference warning before confirming. If replacements are necessary, **Delete & Regenerate** requires separate paid authorization and preserves each original until its replacements are durable. Batch items can finish independently. Failed/interrupted precommit operations support explicit retry or **Keep originals…**. See [deletion behavior, safety, and rollback](docs/LIBRARY_DELETION.md).
+- **Queue & history:** inspect running/pending jobs, failures, candidates, deletion operations, and the last 100 terminal generation records. Small authenticated previews show real available results without cropping; missing/deleted results have clear placeholders. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted manual requests are not replayed after restart; pending legacy background work remains persistent.
 
 The manager's **Clear recorded errors** only clears displayed errors; it retains a persisted retry barrier and does not authorize another paid attempt. The existing public `activity_images.clear_errors` action retains its original clear-and-requeue behavior for legacy background jobs. Existing automatic-generation options are not enabled or changed by the panel.
 
-The library supports at least **4,000 unique images**, not a deletion threshold. There is no LRU eviction of associations and no physical deletion action. Gallery pages contain at most 96 records (the panel uses 48), with lazy authenticated previews. The inventory checks image headers/structure without decoding the entire collection; previews and linking perform full decoding. Files over **20 MiB** or **25 million pixels**, unsupported formats, corrupt files, and symlinks are excluded or rejected. Supported standalone formats are PNG, WebP, JPEG, and GIF. Inventory refreshes on demand, after generated assets, or after its short cache expires. Offset pagination reflects the current collection, not an immutable snapshot.
+The library supports at least **4,000 unique images**, not a deletion threshold. There is no LRU eviction of associations or automatic garbage collection. Physical deletion requires its own explicit confirmation. Gallery pages contain at most 96 records (the panel uses 48), with lazy authenticated previews. The inventory checks image headers/structure without decoding the entire collection; previews and linking perform full decoding. Files over **20 MiB** or **25 million pixels**, unsupported formats, corrupt files, and symlinks are excluded or rejected. Supported standalone formats are PNG, WebP, JPEG, and GIF. Inventory refreshes on demand, after generated assets, or after its short cache expires. Offset pagination reflects the current collection, not an immutable snapshot.
 
 The unchanged Home Tasks AI Task interface receives PNG bytes. Reusing a linked WebP/JPEG/GIF converts that result to PNG in memory, without changing its library source file or contacting AI. Existing PNG bytes remain unchanged; animated formats use their first frame.
 
@@ -176,7 +180,7 @@ Automatic generation remains an explicit opt-in; publishing or installing a rele
 
 ## Safety and migration
 
-Home Tasks source, `.storage` state, and generated files remain untouched. Activity Images retains its existing `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` envelopes with additive metadata. A new `.storage/activity_images_calendar_snapshot` stores only bounded titles for selected calendars. Verified atomic saves detect native Store write failures instead of reporting an unpersisted association as saved. There is no new migration of the original image collection and no automatic file cleanup.
+Home Tasks source, `.storage` state, and generated files remain untouched. Activity Images retains its existing `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` envelopes with additive metadata. The existing `.storage/activity_images_calendar_snapshot` stores only bounded titles for selected calendars. Verified atomic saves detect native Store write failures instead of reporting an unpersisted association as saved. The 0.3.0 review build adds deletion journals, reservations, and tombstones to its cache Store, plus private `.storage/activity_images_deletions` quarantine. Only previously confirmed committed cleanup can resume after restart. There is no new migration of the original image collection and no automatic garbage collection.
 
 The optional Lucida URL is configured locally; no server address or API credential is embedded in this repository. Generated image URLs are not automatically written to external services. Review generated images and QA previews before relying on them for important displays.
 
@@ -191,7 +195,7 @@ The optional Lucida URL is configured locally; no server address or API credenti
 
 ## Removal
 
-Remove the Activity Images entry from **Settings → Devices & services**. Its panel, platform entities, timers, and queue worker unload. Existing image files are not deleted. Stop any automations that call its actions before uninstalling the custom component. Keep the library directory and its storage files if a future reinstall or rollback may need them; do not treat an unlinked image as unused elsewhere.
+Resolve existing confirmed deletion operations before removing the Activity Images entry through **Settings → Devices & services**. Its panel, platform entities, timers, and workers unload. Removal does not initiate additional deletion or undo completed deletion. Stop any automations that call its actions before uninstalling the custom component. Keep the library directory, storage envelopes, and any private quarantine if a future reinstall or recovery may need them. Follow [deletion-specific recovery](docs/LIBRARY_DELETION.md#rollback-and-recovery); do not treat an unlinked image as unused elsewhere.
 
 ## Attribution
 
