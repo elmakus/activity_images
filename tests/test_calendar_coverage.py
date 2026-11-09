@@ -461,3 +461,40 @@ async def test_legacy_trimmed_snapshot_never_invents_an_original_raw_summary(ha,
     assert adapter.raw_occurrences["calendar.school"][0]["raw_summary"] == "Basen 9:15 "
     assert queue._pending == [] and not ha.services.calls
     await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["expired", "unavailable", "identity", "truncated"])
+async def test_pending_calendar_job_needs_current_fresh_complete_demand(ha, configured, monkeypatch, change):
+    from datetime import UTC, datetime, timedelta
+
+    adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Verified demand"])
+    await adapter.async_refresh()
+    assert queue._pending == ["Verified demand"]
+    if change == "expired":
+        adapter.last_scan = (datetime.now(UTC) - timedelta(minutes=17)).isoformat()
+    elif change == "unavailable":
+        ha._states["calendar.school"].state = "unavailable"
+    elif change == "identity":
+        ha.registry["calendar.school"].id = "unrelated-replacement"
+    else:
+        adapter._demand_truncated = True
+    await queue._run()
+    assert not ha.services.calls and queue._jobs[-1]["state"] == "cancelled"
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ignore_both", [False, True])
+async def test_raw_ignored_sibling_cannot_authorize_but_unignored_normalized_sibling_can(ha, configured, monkeypatch, ignore_both):
+    adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Shared title", "Shared title "])
+    await adapter.async_setup()
+    await adapter.async_ignore("Shared title", True, 0)
+    if ignore_both:
+        await adapter.async_ignore("Shared title ", True, 1)
+    await adapter.async_refresh()
+    await queue._run()
+    assert len(ha.services.calls) == (0 if ignore_both else 1)
+    assert "Shared title" in adapter.ignored_titles
+    assert ("Shared title " in adapter.ignored_titles) is ignore_both
+    await adapter.async_shutdown()
