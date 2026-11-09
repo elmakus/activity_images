@@ -501,3 +501,139 @@ async def test_failed_accept_preserves_concurrent_other_alias_edit(ha, configure
     assert queue._job(job["id"])["state"] == "review"
     monkeypatch.setattr(queue._store, "async_save", original_save)
     await queue.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_forget_url_predicate_evaluated_after_queued_replacement(ha, configured):
+    cache, _ = configured
+    old, new = "/local/activity_images/old.png", "/local/activity_images/new.png"
+    await cache.async_remember("Selected", old)
+    await cache._write_lock.acquire()
+    replace = asyncio.create_task(cache.async_link("Selected", new, replace=True))
+    await asyncio.sleep(0)
+    forget = asyncio.create_task(cache.async_forget(url=old))
+    await asyncio.sleep(0)
+    cache._write_lock.release()
+    await replace
+    assert await forget == 0
+    assert cache.exact("Selected") == new
+    await cache._write_lock.acquire()
+    replace = asyncio.create_task(cache.async_link("Selected", old, replace=True))
+    await asyncio.sleep(0)
+    forget_url = asyncio.create_task(cache.async_forget_url(new))
+    await asyncio.sleep(0)
+    cache._write_lock.release()
+    await replace
+    await forget_url
+    assert cache.exact("Selected") == old
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fuzzy", [False, True])
+async def test_missing_file_cleanup_does_not_remove_replaced_mapping(ha, configured, monkeypatch, fuzzy):
+    cache, _ = configured
+    old, new = "/local/activity_images/missing.png", "/local/activity_images/new.png"
+    await cache.async_remember("Walking Outside", old)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def missing(url):
+        assert url == old
+        entered.set()
+        await release.wait()
+        return False
+    monkeypatch.setattr(cache, "_async_url_exists", missing)
+    lookup = asyncio.create_task(cache.async_find("Walking Outside!" if not fuzzy else "Walking Outsides", touch=False, similar=fuzzy))
+    await entered.wait()
+    await cache.async_link("Walking Outside", new, replace=True)
+    release.set()
+    assert await lookup is None
+    assert cache.exact("Walking Outside") == new
+
+
+@pytest.mark.asyncio
+async def test_inventory_rejects_sparse_byte_limit_and_pixel_budget_before_decode(ha, configured, monkeypatch):
+    from custom_components.activity_images.library import (
+        MAX_IMAGE_BYTES,
+        _read_owned,
+        _verify,
+    )
+    cache, _ = configured
+    picture(ha, "valid.png")
+    root = ha.base / "www/activity_images"
+    sparse = root / "sparse.png"
+    with sparse.open("wb") as stream:
+        stream.truncate(MAX_IMAGE_BYTES + 1)
+    with pytest.raises(ValueError, match="oversized"):
+        _read_owned(root, sparse.name)
+    oversized_pixels = root / "pixels.png"
+    Image.new("1", (5001, 5000)).save(oversized_pixels)
+    import PIL.PngImagePlugin
+    def forbidden_load(*args, **kwargs):
+        raise AssertionError("Pixel-budget rejection must happen before decoding")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(PIL.PngImagePlugin.PngImageFile, "load", forbidden_load)
+        with pytest.raises(ValueError, match="25 million"):
+            _verify(oversized_pixels.read_bytes())
+    library = ActivityImageLibrary(ha, cache)
+    result = await library.async_list(limit=1)
+    assert result["total"] == 1
+    assert result["items"][0]["filename"] == "valid.png"
+    assert result["stats"]["storage_bytes"] > MAX_IMAGE_BYTES
+
+
+@pytest.mark.asyncio
+async def test_manager_clear_persists_legacy_retry_barrier_but_public_clear_is_compatible(ha, configured, monkeypatch):
+    _, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    await queue.async_setup()
+    ha.services.fail = True
+    await queue.async_enqueue(["Legacy Failure"])
+    await finished(queue)
+    assert len(ha.services.calls) == 1
+    assert queue.status()["failed"]
+    await queue.async_clear_errors(preserve_retry_blocks=True)
+    assert queue.status()["failed"] == {}
+    assert queue.status()["retry_blocked"]
+    assert await queue.async_enqueue(["Legacy Failure"]) == []
+    await queue.async_shutdown()
+    resumed = queue_module.ActivityImageQueue(ha, engine)
+    await resumed.async_setup()
+    assert resumed.status()["failed"] == {}
+    assert await resumed.async_enqueue(["Legacy Failure"]) == []
+    assert len(ha.services.calls) == 1
+    ha.services.fail = False
+    assert (await resumed.async_retry(title="Legacy Failure"))["queued"] == ["Legacy Failure"]
+    await finished(resumed)
+    assert len(ha.services.calls) == 2
+    assert resumed.status()["retry_blocked"] == []
+    resumed._failed["public clear"] = "old error"
+    await resumed.async_clear_errors(preserve_retry_blocks=True)
+    await resumed.async_clear_errors()  # Existing public action deliberately removes the block.
+    monkeypatch.setattr(resumed, "_kick", lambda: None)
+    assert await resumed.async_enqueue(["Public Clear"]) == ["Public Clear"]
+    await resumed.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_active_excludes_idle_pending_and_includes_direct_generation(ha, configured, monkeypatch):
+    _, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    await queue.async_setup()
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_enqueue(["Waiting Only"])
+    assert queue.status()["pending"] == ["Waiting Only"]
+    assert queue.status()["active"] is False
+    entered, release = asyncio.Event(), asyncio.Event()
+    native = ha.services.async_call
+    async def blocked(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await native(*args, **kwargs)
+    monkeypatch.setattr(ha.services, "async_call", blocked)
+    generating = asyncio.create_task(engine.async_generate("Direct Public Generation", force=True))
+    await entered.wait()
+    assert queue.status()["active"] is True
+    assert queue.status()["current"] is None
+    release.set()
+    await generating
+    assert queue.status()["active"] is False
+    await queue.async_shutdown()

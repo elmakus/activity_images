@@ -14,6 +14,7 @@ from homeassistant.helpers.storage import Store
 from .const import DOMAIN
 from .engine import ActivityImageGenerator
 from .image_cache import normalize_title
+from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,10 +34,12 @@ class ActivityImageQueue:
         self._save_generation = 0
         self._jobs: list[dict] = []
         self._manual_blocked: set[str] = set()
+        self._retry_blocked: set[str] = set()
 
     async def async_setup(self) -> None:
         data = await self._store.async_load() or {}
         self._manual_blocked = set(data.get("manual_blocked", []))
+        self._retry_blocked = set(data.get("retry_blocked", []))
         raw = data.get("pending") or []
         self._pending = [
             title for title in raw if isinstance(title, str) and title.strip()
@@ -71,11 +74,12 @@ class ActivityImageQueue:
 
     async def _save(self) -> None:
         self._trim_history()
-        write = asyncio.create_task(self._store.async_save({
+        write = asyncio.create_task(async_save_verified(self.hass, self._store, {
             "pending": list(self._pending),
             "failed": deepcopy(self._failed),
             "jobs": deepcopy([job for job in self._jobs if job["kind"] == "manual" or job["state"] not in {"pending", "running"}]),
             "manual_blocked": sorted(self._manual_blocked),
+            "retry_blocked": sorted(self._retry_blocked),
         }))
         cancelled = False
         # Drain the retained write before cancellation can release the queue lock.
@@ -97,12 +101,14 @@ class ActivityImageQueue:
                 raise ValueError("Activity Images is unloading")
             generation = self._save_generation
             pending, failed, jobs, blocked = list(self._pending), dict(self._failed), list(self._jobs), set(self._manual_blocked)
+            retry_blocked = set(self._retry_blocked)
             job_values = deepcopy(jobs)
             try:
                 yield
             except BaseException as exc:
                 if not isinstance(exc, asyncio.CancelledError) or generation == self._save_generation:
                     self._pending, self._failed, self._jobs, self._manual_blocked = pending, failed, jobs, blocked
+                    self._retry_blocked = retry_blocked
                     for job, values in zip(jobs, job_values, strict=True):
                         job.clear()
                         job.update(values)
@@ -125,7 +131,7 @@ class ActivityImageQueue:
                 key = normalize_title(title)
                 if (
                     not title or len(title) > 255 or not key
-                    or key in known or key in self._failed or key in self._manual_blocked
+                    or key in known or key in self._failed or key in self._manual_blocked or key in self._retry_blocked
                 ):
                     continue
                 if await self.engine.cache.async_find(title):
@@ -188,9 +194,14 @@ class ActivityImageQueue:
                 await self._save()
         return removed
 
-    async def async_clear_errors(self) -> int:
+    async def async_clear_errors(self, *, preserve_retry_blocks: bool = False) -> int:
         async with self._mutation():
             removed = len(self._failed)
+            if preserve_retry_blocks:
+                self._retry_blocked.update(key for key in self._failed if key not in self._manual_blocked)
+            else:
+                # Preserve the existing public action's clear-and-requeue semantics.
+                self._retry_blocked.clear()
             self._failed.clear()
             for job in self._jobs:
                 job["error"] = None
@@ -204,7 +215,11 @@ class ActivityImageQueue:
             "failed": dict(self._failed),
             "next_run_at": None,
             "jobs": [self._public_job(job) for job in self._jobs if job["kind"] == "manual" or job["state"] not in {"pending", "running"}],
-            "active": len(self._pending),
+            "active": self.engine.is_generating or self._current is not None,
+            "retry_blocked": sorted({
+                next((job["title"] for job in reversed(self._jobs) if normalize_title(job["title"]) == key), key)
+                for key in self._retry_blocked
+            }),
         }
 
     def _manual(self, title: str) -> dict | None:
@@ -307,12 +322,22 @@ class ActivityImageQueue:
             if job["kind"] != "manual" or job["state"] not in {"failed", "interrupted"}:
                 raise ValueError("Only failed or interrupted manual jobs can be retried")
             return await self.async_candidate(job["title"])
-        if not title or normalize_title(title) not in self._failed or normalize_title(title) in self._manual_blocked:
-            raise ValueError("No failed legacy title to retry; manual jobs require job_id")
+        from .library import validate_title
+        title = validate_title(title or "")
+        key = normalize_title(title)
+        accepted = []
         async with self._mutation():
-            self._failed.pop(normalize_title(title))
+            if key in self._manual_blocked or (key not in self._failed and key not in self._retry_blocked):
+                raise ValueError("No failed legacy title to retry; manual jobs require job_id")
+            self._failed.pop(key, None)
+            self._retry_blocked.discard(key)
+            if not any(normalize_title(t) == key for t in self._pending) and not await self.engine.cache.async_find(title):
+                self._pending.append(title)
+                accepted.append(title)
             await self._save()
-        return {"queued": await self.async_enqueue([title])}
+        if accepted:
+            self._kick()
+        return {"queued": accepted}
 
     def _kick(self) -> None:
         if self._closed or not self._pending:

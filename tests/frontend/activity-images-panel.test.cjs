@@ -472,3 +472,25 @@ test('old awaited completion cannot refresh or unlock a newer lifecycle paid mut
   generation.resolve({ id: 'paid-job' });
   await tick();
 });
+
+test('cleared legacy retry barriers remain actionable and background history retries by title', async (t) => {
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([
+    { id: 'background-id', title: 'Background Failure', kind: 'background', state: 'failed', error: null },
+  ], { retry_blocked: ['Background Failure', 'Older Failure'] }) : undefined);
+  await tick();
+  assert.match(panel._queue.textContent, /Older Failure/);
+  const cards = [...panel._queue.querySelectorAll('article')];
+  const background = cards.find((card) => card.textContent.includes('Background Failure'));
+  findButton(background, 'Retry…').click();
+  panel._dialog.querySelector('input[type="checkbox"]').checked = true;
+  findButton(panel._dialog, 'Retry paid request').click();
+  await tick();
+  assert.equal(commands('retry').at(-1).title, 'Background Failure');
+  assert.equal(commands('retry').at(-1).job_id, undefined);
+  const older = [...panel._queue.querySelectorAll('article')].find((card) => card.textContent.includes('Older Failure'));
+  findButton(older, 'Retry…').click();
+  panel._dialog.querySelector('input[type="checkbox"]').checked = true;
+  findButton(panel._dialog, 'Retry paid request').click();
+  await tick();
+  assert.equal(commands('retry').at(-1).title, 'Older Failure');
+});

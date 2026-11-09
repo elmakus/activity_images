@@ -43,6 +43,7 @@ class MemoryStore:
     def __init__(self, hass, version, key, **kwargs):
         self.hass = hass
         self.key = key
+        self.path = hass.config.path(".storage", key)
 
     async def async_load(self):
         import copy
@@ -50,7 +51,11 @@ class MemoryStore:
 
     async def async_save(self, value):
         import copy
+        import json
         self.hass.saved[self.key] = copy.deepcopy(value)
+        path = Path(self.path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"data": value}), encoding="utf-8")
 
 
 async def fake_resolve_media(hass, source, _user):

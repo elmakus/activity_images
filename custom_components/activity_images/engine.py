@@ -32,6 +32,11 @@ class ActivityImageGenerator:
         self._lock = asyncio.Lock()
         self.image_saved_callback: Callable[[str, str], None] | None = None
 
+    @property
+    def is_generating(self) -> bool:
+        """Include direct public generation, not only queue-owned calls."""
+        return self._lock.locked()
+
     async def async_generate_activity_image(self, title: str) -> str:
         """Preserve the original manual action's always-regenerate contract."""
         result = await self.async_generate(title, force=True)

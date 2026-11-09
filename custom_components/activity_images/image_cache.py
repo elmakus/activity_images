@@ -19,6 +19,7 @@ from PIL import Image
 
 from .const import DOMAIN
 from .generated_image import normalize_existing_generated_image
+from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -347,7 +348,7 @@ class ActivityImageCache:
                 await self._async_touch_url(exact["image_url"])
             return exact["image_url"]
         if exact:
-            await self._async_forget_keys({key})
+            await self._async_forget_keys({key}, expected_url=exact["image_url"])
 
         if not similar:
             return None
@@ -380,7 +381,7 @@ class ActivityImageCache:
             return None
         image_url = self._entries[best_key]["image_url"]
         if not await self._async_url_exists(image_url):
-            await self._async_forget_keys({best_key})
+            await self._async_forget_keys({best_key}, expected_url=image_url)
             return None
 
         # A fuzzy lookup updates the canonical image's recency without creating
@@ -406,13 +407,7 @@ class ActivityImageCache:
         """Evict a deliberately rejected image from every cached title."""
         if not image_url:
             return
-        canonical = _canonical_url(image_url)
-        keys = {
-            key
-            for key, entry in self._entries.items()
-            if _canonical_url(entry.get("image_url", "")) == canonical
-        }
-        await self._async_forget_keys(keys)
+        await self.async_forget(url=image_url)
 
     def references_url(self, image_url: str | None) -> bool:
         """Return whether the persistent library intentionally retains a file."""
@@ -425,7 +420,9 @@ class ActivityImageCache:
         )
 
     @_transaction
-    async def _async_forget_keys(self, keys: set[str]) -> None:
+    async def _async_forget_keys(self, keys: set[str], *, expected_url: str | None = None) -> None:
+        if expected_url is not None:
+            keys = {key for key in keys if self._entries.get(key, {}).get("image_url") == expected_url}
         if not keys:
             return
         for key in keys:
@@ -474,6 +471,7 @@ class ActivityImageCache:
         images = await self.async_find_many(titles)
         return await self.async_image_metadata(images)
 
+    @_transaction
     async def async_forget(
         self, *, title: str | None = None, url: str | None = None
     ) -> int:
@@ -483,7 +481,11 @@ class ActivityImageCache:
             if (title and key == normalize_title(title))
             or (url and _canonical_url(entry["image_url"]) == _canonical_url(url))
         }
-        await self._async_forget_keys(keys)
+        if keys:
+            for key in keys:
+                self._entries.pop(key)
+            self._rebuild_token_index()
+            await self._async_save()
         return len(keys)
 
     def entries(self) -> dict[str, dict]:
@@ -535,7 +537,7 @@ class ActivityImageCache:
         await self._async_save()
 
     async def _async_save(self) -> None:
-        write = asyncio.create_task(self._store.async_save(
+        write = asyncio.create_task(async_save_verified(self.hass, self._store,
             {
                 "entries": deepcopy(self._entries),
                 "images": deepcopy(self._metadata),

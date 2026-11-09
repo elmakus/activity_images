@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import probatio
 from aiohttp.test_utils import TestClient, TestServer
@@ -26,7 +26,9 @@ from homeassistant.const import __version__  # noqa: E402
 from homeassistant.core import HomeAssistant  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from homeassistant.helpers import device_registry as dr  # noqa: E402
+from homeassistant.helpers import storage as ha_storage  # noqa: E402
 from homeassistant.helpers.data_entry_flow import _BaseFlowManagerView  # noqa: E402
+from homeassistant.util.file import WriteError  # noqa: E402
 from homeassistant.util.ssl import SSLProfile  # noqa: E402
 
 from custom_components.activity_images import (  # noqa: E402
@@ -67,6 +69,75 @@ async def prepare_http(hass):
                                      login_threshold=-1, is_ban_enabled=False,
                                      use_x_frame_options=True)
     await websocket_api.async_setup(hass, {})
+
+
+async def native_write_failures(runtime):
+    """Inject below real Store.async_save, which intentionally swallows WriteError."""
+    cache, queue = runtime.cache, runtime.queue
+    old, new = "/local/activity_images/standalone.png", "/local/activity_images/other.png"
+    await cache.async_remember("Durable Selected", old)
+    await cache.async_remember("Durable Alias", old)
+    cache_before = cache.entries()
+    cache_generation = cache._save_generation
+    native = ha_storage.write_utf8_file_atomic
+    failing_paths = set()
+    def fail_native(filename, *args, **kwargs):
+        if filename in failing_paths:
+            raise WriteError("Injected native disk failure")
+        return native(filename, *args, **kwargs)
+
+    async def must_fail(operation):
+        try:
+            await operation
+        except OSError as exc:
+            assert "persistence verification failed" in str(exc), exc
+        else:
+            raise AssertionError("Swallowed native WriteError was reported as success")
+
+    with patch.object(ha_storage, "write_utf8_file_atomic", fail_native):
+        failing_paths.add(cache._store.path)
+        await must_fail(cache.async_link("Durable Selected", new, replace=True))
+        await must_fail(cache.async_record_image(new, {"origin": "generated"}))
+        assert cache.entries() == cache_before
+        assert cache._save_generation == cache_generation
+        assert cache.image_metadata(new) == {}
+        failing_paths.clear()
+        # A failed enqueue must roll back before a worker is scheduled.
+        failing_paths.add(queue._store.path)
+        queue_generation = queue._save_generation
+        with patch.object(queue.engine, "async_generate", new_callable=AsyncMock) as provider:
+            await must_fail(queue.async_candidate("Undurable Enqueue"))
+            assert queue.status()["pending"] == []
+            assert queue._save_generation == queue_generation
+            provider.assert_not_called()
+            # Persist pending successfully, then fail the running-attempt boundary.
+            failing_paths.clear()
+            with patch.object(queue, "_kick", lambda: None):
+                job = await queue.async_candidate("Undurable Attempt")
+            failing_paths.add(queue._store.path)
+            await must_fail(queue._run())
+            assert queue._job(job["id"])["state"] == "interrupted"
+            provider.assert_not_called()
+        failing_paths.clear()
+        await queue._save()
+        candidate = queue._new_job("Durable Selected", "manual")
+        candidate.update(state="review", result_url=new)
+        queue._jobs.append(candidate)
+        await queue._save()
+        failing_paths.add(cache._store.path)
+        await must_fail(queue.async_accept(candidate["id"]))
+        assert cache.entries() == cache_before
+        assert queue._job(candidate["id"])["state"] == "review"
+        failing_paths.clear()
+        failing_paths.add(queue._store.path)
+        await must_fail(queue.async_accept(candidate["id"]))
+        assert cache.exact("Durable Selected") == old
+        assert cache.exact("Durable Alias") == old
+        assert queue._job(candidate["id"])["state"] == "review"
+        failing_paths.clear()
+        assert (await queue.async_accept(candidate["id"]))["state"] == "accepted"
+        assert cache.exact("Durable Selected") == new
+        assert cache.exact("Durable Alias") == old
 
 
 async def run():
@@ -209,6 +280,13 @@ async def run():
                 assert "missing or invalid" in str(exc)
             else:
                 raise AssertionError("Public link accepted a symlink")
+            await native_write_failures(entry.runtime_data)
+            # Manager-only clear must preserve legacy paid retry authorization barriers.
+            entry.runtime_data.queue._failed["manager legacy failure"] = "old error"
+            assert (await command(admin_ws, "clear_errors"))["success"]
+            assert await entry.runtime_data.queue.async_enqueue(["Manager Legacy Failure"]) == []
+            assert entry.runtime_data.queue.status()["failed"] == {}
+            assert "manager legacy failure" in entry.runtime_data.queue.status()["retry_blocked"]
             old_runtime = entry.runtime_data
             assert await async_unload_entry(hass, entry)
             assert not frontend.async_panel_exists(hass, PANEL_ROUTE)

@@ -506,6 +506,7 @@
       if (this._jobs.current && !represented.has(this._jobs.current)) this._queue.append(this._legacyJob(this._jobs.current, "running"));
       for (const title of this._jobs.pending) if (!represented.has(title)) this._queue.append(this._legacyJob(title, "pending"));
       for (const [title, error] of Object.entries(this._jobs.failed)) if (!represented.has(title)) this._queue.append(this._legacyJob(title, "failed", error));
+      for (const title of this._jobs.retry_blocked || []) if (!represented.has(title) && !Object.hasOwn(this._jobs.failed, title)) this._queue.append(this._legacyJob(title, "failed"));
       for (const job of jobs) {
         const card = el("article", undefined, "job");
         card.append(el("h3", job.title), el("p", `${job.kind} · ${job.state}`));
@@ -513,13 +514,13 @@
         if (job.error) card.append(el("p", job.error, "error"));
         const actions = el("div", undefined, "row");
         if (job.state === "pending") actions.append(button("Cancel waiting", () => this._cancelDialog(job.title)));
-        if (["failed", "interrupted"].includes(job.state)) actions.append(button("Retry…", () => this._retryDialog({ job_id: job.id }, job.title)));
+        if (["failed", "interrupted"].includes(job.state)) actions.append(button("Retry…", () => this._retryDialog(job.kind === "manual" ? { job_id: job.id } : { title: job.title }, job.title)));
         if (job.state === "review") actions.append(button("Review candidate", () => this._review(job)));
         if (job.image_id) actions.append(button("Open result", () => this._openDetail(job.image_id)));
         card.append(actions);
         this._queue.append(card);
       }
-      if (!jobs.length && !this._jobs.current && !this._jobs.pending.length && !Object.keys(this._jobs.failed).length) this._queue.append(el("p", "No queued jobs or recorded history."));
+      if (!jobs.length && !this._jobs.current && !this._jobs.pending.length && !Object.keys(this._jobs.failed).length && !(this._jobs.retry_blocked || []).length) this._queue.append(el("p", "No queued jobs or recorded history."));
     }
     _legacyJob(title, state, error) {
       const card = el("article", undefined, "job");

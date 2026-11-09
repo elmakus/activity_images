@@ -33,6 +33,7 @@ from .const import (
 )
 from .image_cache import ActivityImageCache
 from .image_queue import ActivityImageQueue
+from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
 _RETRY_DELAYS = (5, 15, 30)
@@ -282,7 +283,7 @@ class ActivityCalendarAdapter:
                 images = await self.cache.async_find_many(wanted)
                 if self._closed:
                     return self.status()
-                self._snapshot_task = self.hass.async_create_task(self._store.async_save(parsed))
+                self._snapshot_task = self.hass.async_create_task(async_save_verified(self.hass, self._store, parsed))
                 await asyncio.shield(self._snapshot_task)
                 if self._closed:
                     return self.status()

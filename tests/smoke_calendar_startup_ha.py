@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import atomicwrites  # noqa: E402
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, __version__  # noqa: E402
 from homeassistant.core import CoreState, HomeAssistant, SupportsResponse  # noqa: E402
+from homeassistant.helpers import storage as ha_storage  # noqa: E402
 from homeassistant.helpers.storage import Store  # noqa: E402
+from homeassistant.util.file import WriteError  # noqa: E402
 
 from custom_components.activity_images import calendar_adapter as module  # noqa: E402
 
@@ -450,6 +452,37 @@ async def snapshot_executor_write_drained_before_reload(hass):
     assert await fresh_store.async_load() == {ENTITY: ["Snapshot B"]}
 
 
+async def swallowed_snapshot_write_failure_preserves_last_good(hass):
+    import json
+    subject = adapter(hass, auto=True)
+    timers = Timers()
+    response = {ENTITY: {"events": [{"summary": "Old event"}]}}
+    async def events(call):
+        return response
+    register(hass, events)
+    with patch.object(module, "async_call_later", timers.later):
+        await subject.async_refresh()
+        previous_titles, previous_images = copy.deepcopy(subject.calendar_titles), dict(subject.images)
+        previous_scan = subject.last_scan
+        assert previous_scan and previous_titles == {ENTITY: ["Old event"]}
+        response = {ENTITY: {"events": [{"summary": "Uncommitted event"}]}}
+        native = ha_storage.write_utf8_file_atomic
+        def fail_native(filename, *args, **kwargs):
+            if filename == subject._store.path:
+                raise WriteError("Injected calendar disk failure")
+            return native(filename, *args, **kwargs)
+        with patch.object(ha_storage, "write_utf8_file_atomic", fail_native):
+            status = await subject.async_refresh()
+        assert subject.calendar_titles == previous_titles
+        assert subject.images == previous_images and subject.last_scan == previous_scan
+        assert "persistence verification failed" in status["error"]
+        assert subject.queue.calls == [[]]  # No enqueue after the failed commit.
+        envelope = await hass.async_add_executor_job(lambda: json.loads(Path(subject._store.path).read_text()))
+        assert envelope["data"] == previous_titles
+        await subject.async_shutdown()
+        clean(hass, subject, timers)
+
+
 async def run():
     assert __version__ == "2026.11.0", __version__
     with tempfile.TemporaryDirectory(prefix="ha-calendar-smoke-") as directory:
@@ -461,6 +494,7 @@ async def run():
         await image_saved_during_first_snapshot(hass)
         await image_saved_during_first_snapshot(hass, unload=True)
         await snapshot_executor_write_drained_before_reload(hass)
+        await swallowed_snapshot_write_failure_preserves_last_good(hass)
         hass.services.async_remove("calendar", "get_events")
         await persistence_and_prestart_unload(hass)
         await hass.async_block_till_done()

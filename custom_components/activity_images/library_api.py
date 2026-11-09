@@ -88,7 +88,7 @@ async def _dispatch(hass, command: str, args: dict):
             raise ValueError("Specify exactly one of job_id or title")
         return await queue.async_retry(**args)
     if command == "clear_errors":
-        return {"cleared": await queue.async_clear_errors()}
+        return {"cleared": await queue.async_clear_errors(preserve_retry_blocks=True)}
     raise ValueError("Unknown command")
 
 

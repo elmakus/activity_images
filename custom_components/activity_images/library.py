@@ -12,7 +12,11 @@ from pathlib import Path
 
 from PIL import Image
 
+from .generated_image import MAX_IMAGE_BYTES
 from .image_cache import ACTIVITY_IMAGE_PREFIX, ActivityImageCache, normalize_title
+
+# Bound standalone decoding to 25 million pixels, even for highly compressed files.
+MAX_IMAGE_PIXELS = 25_000_000
 
 IMAGE_API = "/api/activity_images/library"
 _EXTENSIONS = {".png", ".webp", ".jpg", ".jpeg", ".gif"}
@@ -33,9 +37,13 @@ def _read_owned(root: Path, filename: str) -> bytes:
     try:
         fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                raise ValueError("Invalid image asset")
-            return stream.read()
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_IMAGE_BYTES:
+                raise ValueError("Invalid or oversized image asset (maximum 20 MiB)")
+            data = stream.read(MAX_IMAGE_BYTES + 1)
+            if len(data) > MAX_IMAGE_BYTES:
+                raise ValueError("Image asset exceeds 20 MiB")
+            return data
     finally:
         os.close(directory)
 
@@ -44,11 +52,13 @@ def _verify(data: bytes) -> tuple[int, int, str]:
     with Image.open(BytesIO(data)) as image:
         width, height = image.size
         format_name = image.format
+        if format_name not in {"PNG", "WEBP", "JPEG", "GIF"} or width <= 0 or height <= 0:
+            raise ValueError("Unsupported image")
+        if width * height > MAX_IMAGE_PIXELS:
+            raise ValueError("Image exceeds 25 million pixels")
         image.verify()
     with Image.open(BytesIO(data)) as decoded:
         decoded.load()
-    if format_name not in {"PNG", "WEBP", "JPEG", "GIF"} or width <= 0 or height <= 0:
-        raise ValueError("Unsupported image")
     return width, height, format_name
 
 
