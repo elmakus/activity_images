@@ -1,4 +1,4 @@
-"""Admin Settings API behavior without a live Home Assistant instance."""
+"""Shared Settings transaction behavior; transport auth is tested in real HA."""
 import asyncio
 import importlib
 import sys
@@ -14,25 +14,15 @@ for name, root in (("custom_components", ROOT.parent), ("custom_components.activ
         pkg.__path__ = [str(root)]
         sys.modules[name] = pkg
 
-# The HA-free transport decorators are passive; the production decorators
-# perform authentication and schema validation on actual WebSocket messages.
 if "homeassistant" not in sys.modules:
     pkg = types.ModuleType("homeassistant")
     pkg.__path__ = []
     sys.modules["homeassistant"] = pkg
-if "homeassistant.components" not in sys.modules:
-    pkg = types.ModuleType("homeassistant.components")
-    pkg.__path__ = []
-    sys.modules["homeassistant.components"] = pkg
-ws = sys.modules.setdefault("homeassistant.components.websocket_api", types.ModuleType("websocket_api"))
-for name in ("websocket_command", "require_admin", "async_response"):
-    setattr(ws, name, (lambda fn: fn) if name != "websocket_command" else (lambda schema: lambda fn: fn))
-sys.modules["homeassistant.components"].__dict__["websocket_api"] = ws
 exc = sys.modules.setdefault("homeassistant.exceptions", types.ModuleType("homeassistant.exceptions"))
 if not hasattr(exc, "HomeAssistantError"):
     exc.__dict__["HomeAssistantError"] = type("HomeAssistantError", (Exception,), {})
 
-api = importlib.import_module("custom_components.activity_images.settings_api")
+api = importlib.import_module("custom_components.activity_images.settings")
 const = importlib.import_module("custom_components.activity_images.const")
 
 

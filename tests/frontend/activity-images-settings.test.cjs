@@ -227,9 +227,25 @@ test("Changing a reference invalidates both pending and loaded previews", async 
   window.happyDOM.abort();
 });
 
+test("A cold panel offers native Configure instead of an unloaded selector", async () => {
+  const window = new Window();
+  global.document = window.document;
+  const {renderReference} = await import(location("reference-view.mjs"));
+  const root = window.document.createElement("div");
+  const dispose = renderReference(root,{reference_media_content_id:""},()=>{},{});
+  assert.equal(root.querySelector("ha-selector"),null);
+  const link = root.querySelector("a");
+  assert.equal(link.getAttribute("href"),"/config/integrations/integration/activity_images");
+  assert.equal(link.target,"_blank");
+  assert.match(root.textContent,/native media picker is available in Configure/);
+  dispose();
+  window.happyDOM.abort();
+});
+
 test("Reference preview fetches with HA auth and revokes the object URL", async () => {
   const window = new Window();
   global.document = window.document;
+  window.customElements.define("ha-selector",class extends window.HTMLElement {});
   const {renderReference} = await import(location("reference-view.mjs"));
   const oldCreate = URL.createObjectURL;
   const oldRevoke = URL.revokeObjectURL;

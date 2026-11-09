@@ -54,6 +54,17 @@ from custom_components.activity_images.settings import (  # noqa: E402
 )
 
 
+def form_input(values):
+    """Use the same optional entity/media value shapes as HA's native form."""
+    data = dict(values)
+    if not data.get(CONF_AI_ENTITY):
+        data.pop(CONF_AI_ENTITY, None)
+    reference = data.pop(CONF_REFERENCE_MEDIA_ID, "")
+    if reference:
+        data[CONF_REFERENCE_MEDIA_ID] = {"media_content_id":reference, "media_content_type":"image"}
+    return data
+
+
 async def run():
     assert __version__ == "2026.11.0"
     with tempfile.TemporaryDirectory(prefix="activity-settings-native-") as directory:
@@ -90,7 +101,7 @@ async def run():
                 panel = await save_settings(hass, {CONF_PROMPT_TEMPLATE:"First {title}"}, original["revision"])
                 assert panel["changed"] and panel["reload"] == "none"
                 stale_values = {**original["values"], CONF_LOOKAHEAD_DAYS:14}
-                stale = await manager.options.async_configure(stale_form["flow_id"], stale_values)
+                stale = await manager.options.async_configure(stale_form["flow_id"], form_input(stale_values))
                 assert stale.get("type") == "form"
                 errors = stale.get("errors")
                 assert errors and errors.get("base") == "settings_conflict"
@@ -99,7 +110,7 @@ async def run():
                 manager.options.async_abort(stale_form["flow_id"])
                 form = await manager.options.async_init(entry.entry_id)
                 values = {**read_settings(hass)["values"], CONF_LOOKAHEAD_DAYS:14}
-                finished = await manager.options.async_configure(form["flow_id"], values)
+                finished = await manager.options.async_configure(form["flow_id"], form_input(values))
                 assert finished.get("type") == "create_entry"
                 assert update.call_count == 2  # One panel commit, one native flow commit.
                 await hass.async_block_till_done()
@@ -107,9 +118,23 @@ async def run():
                 assert entry.options["unrelated_option"] == {"preserved":True}
                 assert entry.data == {CONF_AI_ENTITY:"ai_task.before", CONF_AUTO_GENERATE:True}
                 noop = await manager.options.async_init(entry.entry_id)
-                await manager.options.async_configure(noop["flow_id"], values)
+                await manager.options.async_configure(noop["flow_id"], form_input(values))
                 await hass.async_block_till_done()
                 assert len(notifications) == 2  # HA detects the native no-op too.
+
+            # Native selector objects must round-trip as the existing string ID.
+            reference = "media-source://media_source/local/native-reference.webp"
+            media_form = await manager.options.async_init(entry.entry_id)
+            selected = {**read_settings(hass)["values"], CONF_REFERENCE_MEDIA_ID:reference}
+            saved_media = await manager.options.async_configure(media_form["flow_id"], form_input(selected))
+            assert saved_media.get("type") == "create_entry"
+            assert entry.options[CONF_REFERENCE_MEDIA_ID] == reference
+            media_form = await manager.options.async_init(entry.entry_id)
+            cleared_media = {**read_settings(hass)["values"], CONF_REFERENCE_MEDIA_ID:""}
+            saved_media = await manager.options.async_configure(media_form["flow_id"], form_input(cleared_media))
+            assert saved_media.get("type") == "create_entry"
+            assert entry.options[CONF_REFERENCE_MEDIA_ID] == ""
+            await hass.async_block_till_done()
 
             source = Path(directory) / "fake-provider.png"
             Image.new("RGBA", (24, 24), (200, 40, 60, 255)).save(source)
@@ -214,7 +239,7 @@ async def run():
             clear_form = await manager.options.async_init(entry.entry_id)
             cleared = dict(before_clear["values"])
             cleared.pop(CONF_AI_ENTITY)
-            await manager.options.async_configure(clear_form["flow_id"], cleared)
+            await manager.options.async_configure(clear_form["flow_id"], form_input(cleared))
             await hass.async_block_till_done()
             assert entry.options[CONF_AI_ENTITY] == "" and not wrapper.available
             try:
@@ -241,7 +266,7 @@ async def run():
             native = await manager.options.async_init(entry.entry_id)
             reserved_values = {**read_settings(hass)["values"], CONF_REFERENCE_MEDIA_ID:reference}
             reserved_values.pop(CONF_AI_ENTITY)
-            rejected = await manager.options.async_configure(native["flow_id"], reserved_values)
+            rejected = await manager.options.async_configure(native["flow_id"], form_input(reserved_values))
             errors = rejected.get("errors")
             assert errors and errors.get("base") == "invalid_settings"
             manager.options.async_abort(native["flow_id"])

@@ -1,7 +1,10 @@
 """Passive diagnostics and reference file guard tests."""
 import importlib
+import os
+import stat
 import sys
 import types
+from enum import IntFlag
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +18,15 @@ for name, root in (("custom_components", ROOT.parent), ("custom_components.activ
         pkg.__path__ = [str(root)]
         sys.modules[name] = pkg
 
+# The fast suite deliberately stubs HA; native transport runs in separate smokes.
+for name in ("homeassistant", "homeassistant.components", "homeassistant.components.ai_task"):
+    if name not in sys.modules:
+        package = types.ModuleType(name)
+        package.__path__ = []
+        sys.modules[name] = package
+features = sys.modules.setdefault("homeassistant.components.ai_task.const", types.ModuleType("ai_task_const"))
+features.__dict__["AITaskEntityFeature"] = IntFlag("AITaskEntityFeature", {"GENERATE_IMAGE":4,"SUPPORT_ATTACHMENTS":2})
+
 const = importlib.import_module("custom_components.activity_images.const")
 diag = importlib.import_module("custom_components.activity_images.settings_diagnostics")
 
@@ -26,7 +38,7 @@ def test_diagnostics_are_read_only_and_service_safe():
             service_calls.append((domain, name))
             return domain == "ai_task"
     hass = SimpleNamespace(
-        states=SimpleNamespace(get=lambda e: SimpleNamespace(state="idle") if e in ("ai_task.mock", "calendar.family") else None),
+        states=SimpleNamespace(get=lambda e: SimpleNamespace(state="idle", attributes={"supported_features":4}) if e in ("ai_task.mock", "calendar.family") else None),
         services=Services(),
     )
     entry = SimpleNamespace(data={}, options={
@@ -41,7 +53,25 @@ def test_diagnostics_are_read_only_and_service_safe():
     assert service_calls == [("ai_task", "generate_image"), ("calendar", "get_events")]
 
 
-def test_reference_preview_rejects_non_images_and_oversized_files(tmp_path):
+@pytest.mark.parametrize("capabilities,reference,expected", [
+    (1,"","image_generation_unsupported"),
+    (4,"","available"),
+    (4,"media-source://media_source/local/ref.png","attachments_unsupported"),
+    (6,"media-source://media_source/local/ref.jpg","available"),
+    ("bad","","image_generation_unsupported"),
+])
+def test_diagnostics_check_selected_provider_capabilities(capabilities, reference, expected):
+    state = SimpleNamespace(state="idle", attributes={"supported_features":capabilities})
+    hass = SimpleNamespace(states=SimpleNamespace(get=lambda _:state),
+                           services=SimpleNamespace(has_service=lambda *_:True))
+    entry = SimpleNamespace(data={}, options={const.CONF_AI_ENTITY:"ai_task.test",
+                                              const.CONF_REFERENCE_MEDIA_ID:reference})
+    result = diag.diagnostics(hass, entry)
+    assert result["provider"]["status"] == expected
+    assert isinstance(result["provider"]["attachments_supported"],bool)
+
+
+def test_reference_preview_rejects_non_images_and_oversized_files(tmp_path, monkeypatch):
     # Import media helpers via an isolated Home Assistant stub.
     aiohttp = pytest.importorskip("aiohttp")
     del aiohttp
@@ -54,11 +84,10 @@ def test_reference_preview_rejects_non_images_and_oversized_files(tmp_path):
         pkg.__path__ = []
         sys.modules["homeassistant.components"] = pkg
     http = sys.modules.setdefault("homeassistant.components.http", types.ModuleType("ha_http"))
-    http.KEY_HASS = "hass"
-    http.HomeAssistantView = object
-    http.require_admin = lambda f: f
+    http.__dict__.update(KEY_HASS="hass", HomeAssistantView=object, require_admin=lambda f:f)
     source = sys.modules.setdefault("homeassistant.components.media_source", types.ModuleType("media_source"))
-    source.async_resolve_media = lambda *_: None
+    source.__dict__["async_resolve_media"] = lambda *_: None
+    source.__dict__.setdefault("MediaSourceError", type("MediaSourceError", (Exception,), {}))
     media = importlib.import_module("custom_components.activity_images.settings_media")
     path = tmp_path / "ref.png"
     Image.new("RGB", (64, 64), (128, 20, 50)).save(path)
@@ -70,3 +99,20 @@ def test_reference_preview_rejects_non_images_and_oversized_files(tmp_path):
     path.write_bytes(b"x" * (media.MAX_REFERENCE_BYTES + 1))
     with pytest.raises(ValueError):
         media.read_preview(path)
+    Image.new("RGB", (4, 4)).save(path)
+    native_open = os.open
+    flags = []
+    def record_open(path, mode):
+        flags.append(mode)
+        return native_open(path, mode)
+    native_stat = os.fstat
+    def nonregular(fd):
+        fields = list(native_stat(fd))
+        fields[0] = stat.S_IFIFO
+        return os.stat_result(fields)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "open", record_open)
+        scoped.setattr(os, "fstat", nonregular)
+        with pytest.raises(ValueError, match="regular"):
+            media.read_preview(path)
+    assert flags[0] & os.O_NONBLOCK

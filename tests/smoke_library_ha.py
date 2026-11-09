@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from homeassistant.auth import auth_manager_from_config  # noqa: E402
 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER  # noqa: E402
-from homeassistant.components import frontend, websocket_api  # noqa: E402
+from homeassistant.components import frontend, media_source, websocket_api  # noqa: E402
 from homeassistant.components.http import StaticPathConfig  # noqa: E402
 from homeassistant.components.http.server import HomeAssistantHTTP  # noqa: E402
 from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE, __version__  # noqa: E402
@@ -290,6 +290,14 @@ async def run():
     with tempfile.TemporaryDirectory(prefix="activity-library-smoke-") as directory:
         hass: Any = HomeAssistant(directory)
         await prepare_http(hass)
+        media_folder = Path(directory) / "media"
+        media_folder.mkdir()
+        hass.config.media_dirs = {"local":str(media_folder)}
+        await media_source.async_setup(hass, {})
+        hass.config.components.add("media_source")
+        for extension in ("png", "jpg", "webp"):
+            Image.new("RGB", (16, 12), "green").save(media_folder / f"reference.{extension}")
+        (media_folder / "invalid.png").write_bytes(b"not an image")
         async def no_forward(*args):
             pass
         async def no_unload(*args):
@@ -397,6 +405,31 @@ async def run():
             forbidden_preview = "/api/activity_images/settings/reference?media_id=media-source%3A%2F%2Fmedia_source%2Flocal%2Freference.png"
             assert (await client.get(forbidden_preview)).status == 401
             assert (await client.get(forbidden_preview, headers={"Authorization": "Bearer " + user_token})).status == 401
+            for extension, content_type in (("png","image/png"),("jpg","image/jpeg"),("webp","image/webp")):
+                response = await client.get("/api/activity_images/settings/reference", params={
+                    "media_id":f"media-source://media_source/local/reference.{extension}"},
+                    headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 200 and response.content_type == content_type, (response.status, await response.text())
+                assert response.headers["Cache-Control"] == "private, no-store"
+                assert await response.read() == (media_folder / f"reference.{extension}").read_bytes()
+            for media_id in ("media-source://media_source/missing/reference.png",
+                             "media-source://media_source/local/missing.png",
+                             "media-source://media_source/local/invalid.png",
+                             "media-source://media_source/local/no_extension",
+                             "media-source://media_source/local/../reference.png"):
+                response = await client.get("/api/activity_images/settings/reference", params={"media_id":media_id},
+                                            headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 400, (media_id, response.status)
+            with patch.object(Image, "MAX_IMAGE_PIXELS", 1):
+                response = await client.get("/api/activity_images/settings/reference", params={
+                    "media_id":"media-source://media_source/local/reference.png"},
+                    headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 400  # Pillow decompression bombs are controlled errors.
+            with patch("custom_components.activity_images.settings_media.async_resolve_media", new_callable=AsyncMock) as resolver:
+                response = await client.get("/api/activity_images/settings/reference", params={
+                    "media_id":"media-source://external/example.png"}, headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 400
+                resolver.assert_not_called()  # Preview cannot invoke arbitrary provider resolvers.
             async def settings_command(name, **data):
                 nonlocal counter
                 counter += 1

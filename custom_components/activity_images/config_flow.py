@@ -32,12 +32,16 @@ def schema(settings: dict | None = None) -> vol.Schema:
         vol.Optional(CONF_AI_ENTITY, description={"suggested_value": provider})
         if provider else vol.Optional(CONF_AI_ENTITY)
     )
+    reference = settings.get(CONF_REFERENCE_MEDIA_ID)
+    if isinstance(reference, str) and reference:
+        reference = {"media_content_id":reference, "media_content_type":"image"}
+    reference_key = (
+        vol.Optional(CONF_REFERENCE_MEDIA_ID, description={"suggested_value":reference})
+        if reference else vol.Optional(CONF_REFERENCE_MEDIA_ID)
+    )
     return vol.Schema({
         provider_key: selector.EntitySelector(selector.EntitySelectorConfig(domain="ai_task")),
-        vol.Optional(
-            CONF_REFERENCE_MEDIA_ID,
-            default=settings.get(CONF_REFERENCE_MEDIA_ID, ""),
-        ): selector.TextSelector(),
+        reference_key: selector.MediaSelector(selector.MediaSelectorConfig(accept=["image/*"])),
         vol.Optional(
             CONF_LUCIDA_URL, default=settings.get(CONF_LUCIDA_URL, "")
         ): selector.TextSelector(),
@@ -58,12 +62,13 @@ def schema(settings: dict | None = None) -> vol.Schema:
     })
 
 
-def _valid(data: dict) -> bool:
-    try:
-        validate_settings(data)
-    except ValueError:
-        return False
-    return True
+def _form_settings(data: dict) -> dict:
+    """Adapt native media-selector objects to the unchanged persisted string ID."""
+    values = dict(data)
+    reference = values.get(CONF_REFERENCE_MEDIA_ID)
+    if isinstance(reference, dict):
+        values[CONF_REFERENCE_MEDIA_ID] = reference.get("media_content_id", "")
+    return validate_settings(values)
 
 
 class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -72,12 +77,14 @@ class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         errors = {}
         if user_input is not None:
-            if not _valid(user_input):
+            try:
+                values = _form_settings(user_input)
+            except ValueError:
                 errors["base"] = "invalid_settings"
             else:
                 await self.async_set_unique_id(DOMAIN)
                 self._abort_if_unique_id_configured()
-                return self.async_create_entry(title="Activity Images", data=user_input)
+                return self.async_create_entry(title="Activity Images", data=values)
         return self.async_show_form(step_id="user", data_schema=schema(user_input), errors=errors)
 
     @staticmethod
@@ -99,7 +106,7 @@ class ActivityImagesOptionsFlow(config_entries.OptionsFlow):
             try:
                 async with settings_lock(entry):
                     # The full native form can omit a cleared optional provider.
-                    values = validate_settings(user_input)
+                    values = _form_settings(user_input)
                     options = options_for_update(entry, values, self._revision)
                     # HA's flow manager persists this result without another await.
                     return self.async_create_entry(title="", data=options)

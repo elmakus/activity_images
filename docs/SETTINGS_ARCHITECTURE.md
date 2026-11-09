@@ -12,7 +12,7 @@ the independently corrected implementation, not permission to deploy or release 
 | `settings_api.py` | Admin-only WebSocket transport for get, save and diagnostics. No duplicate persistence policy. |
 | `config_flow.py` | Native setup/Configure forms. HA's options flow manager owns persistence of the returned options. |
 | `settings_media.py` | Authenticated, bounded reference image preview. No library writes. |
-| `settings_diagnostics.py` | Passive entity/service status. No generation or network probing. |
+| `settings_diagnostics.py` | Passive entity/service status and advertised provider feature bits. No generation or network probing. |
 | `prompts.py` | Original default template, template validation and rendering. |
 | `engine.py` | One configuration snapshot for each generation, its retries and image processing. |
 | `calendar_adapter.py` | Calendar subscriptions, scans and serialized live application of calendar options. |
@@ -99,6 +99,21 @@ replay until the user explicitly discards edits and reloads saved settings.
 Navigation retains draft and save/error status. Reference changes abort stale
 previews and revoke object URLs, including on disposal and decode failure.
 
+## Native media selection and sidebar fallback
+
+Native setup and **Configure** use HA's `MediaSelector` with `accept: ["image/*"]`.
+The form adapter converts its `{media_content_id, media_content_type}` object to the
+existing persisted string ID; clearing the optional selection writes an empty string.
+Suggested form values are converted back to selector objects. Both editors still use
+the same validation and settings transaction; there is no reference-file migration.
+
+The sidebar mounts `ha-selector` only if HA already registered that custom element.
+On a cold panel it offers a link to the integration's native Configure page and a
+manual media-source ID field. HA has no supported cold-panel selector loader; this
+integration does not import private frontend bundles, use unrelated component loaders
+or add a frontend dependency. Native Configure is a separate editor: save or discard
+sidebar edits before switching, and reload the sidebar after saving native options.
+
 ## Authorization and trust
 
 Settings WebSocket handlers and reference HTTP views require an administrator.
@@ -106,10 +121,27 @@ The sidebar panel is admin-only. Preview responses use private/no-store and
 nosniff. Text uses DOM `textContent`/`value`; HA access tokens never enter image
 URLs. Existing public `/local/activity_images/` exports remain public.
 
+Reference previews reject sources outside `media-source://media_source/` **before**
+resolution, so arbitrary external source resolvers cannot run. HA's local resolver
+handles configured media directories and traversal checks. The resolved path must be
+a regular file: the executor opens it nonblocking, verifies its type and reads at
+most **8 MiB + 1 byte**. Only nonempty PNG, JPEG and WebP files up to **8 MiB** and
+**32,000,000 pixels** pass Pillow structure verification. Missing/corrupt media,
+unsupported formats, decompression bombs and HA's unknown-extension assertion return
+a controlled HTTP 400. No remote proxy, upload or library write is provided. These
+limits apply to this preview endpoint, not the existing generation attachment path.
+
 Provider IDs and calendars are validated syntactically; saving does not test a
-provider through paid generation. Lucida is an administrator-selected trusted
-HTTP(S) endpoint. Actual generation sends image bytes to it. Passive diagnostics
-do not establish connectivity, image quality, provider billing or reliability.
+provider through paid generation. Diagnostics inspect selected entity availability,
+the image service registration and native `GENERATE_IMAGE` / `SUPPORT_ATTACHMENTS`
+feature bits. They distinguish unavailable, unsupported image generation and missing
+attachment support when a reference is configured. An available status only means
+those passive checks passed, not that a real request will succeed.
+
+Lucida is an administrator-selected trusted HTTP(S) endpoint. Actual generation
+sends image bytes to it. Diagnostics report configuration only and do not probe it.
+Passive diagnostics do not establish connectivity, image quality, provider billing
+or reliability.
 
 ## Verification
 
@@ -132,12 +164,18 @@ python tests/smoke_calendar_startup_ha.py
 completion, listeners and native delayed persistence. It flushes and reopens
 storage with a fresh manager. It bypasses integration discovery/platform loading
 and supplies local fake provider/calendar/Lucida responses. It covers cross-editor
-conflicts, no-op, provider clearing, unknown options, running/waiting generation,
-calendar lifecycle and reserved references. It does not prove a full HA reboot
+conflicts, no-op, provider/reference clearing, native media-selector object-to-string
+round-trips, unknown options, running/waiting generation, calendar lifecycle and
+reserved references. It does not prove a full HA reboot
 or real provider behavior.
 
-`smoke_library_ha.py` tests real HTTP/WebSocket authentication and schemas but
-uses a fake entry manager. It is not the persistence test. Frontend DOM tests are
-not a substitute for an authenticated cold-browser check of native HA components.
+`smoke_library_ha.py` tests real HTTP/WebSocket authentication and schemas, including
+local PNG/JPEG/WebP preview, controlled media errors, decompression-bomb rejection
+and rejecting external sources before resolution. It uses a fake entry manager;
+it is not the persistence test. Frontend DOM tests cover the cold-panel fallback
+and registered selector, but are not a substitute for an authenticated cold-browser
+check of native HA components. Full desktop/mobile browser validation remains
+outstanding; booting a disposable HA instance alone is not UI validation.
+See [Settings review](SETTINGS_REVIEW.md) for the bounded final verification results.
 No production HA, real image deletion, paid generation, merge or release is
 permitted by these tests.

@@ -14,6 +14,8 @@ export function renderDiagnostics(root, data, reload) {
   }
   row("Provider", (data.provider?.entity_id || "Not configured") + " — " + data.provider?.status);
   row("AI image service", data.provider?.image_service_registered ? "Registered" : "Unavailable");
+  row("Image generation capability", data.provider?.image_generation_supported ? "Supported" : "Not advertised");
+  row("Attachment capability", data.provider?.attachments_supported ? "Supported" : "Not advertised");
   row("Lucida", data.lucida?.status || "Unknown");
   row("Reference", data.reference?.configured ? "Configured" : "Not configured");
   row("Calendar service", data.calendar?.service_registered ? "Registered" : "Unavailable");

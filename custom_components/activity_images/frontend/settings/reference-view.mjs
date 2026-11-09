@@ -3,7 +3,7 @@ import {action, element, field, statusMessage} from "./controls.mjs";
 /** Native HA media selector with manual ID fallback and revocable previews. */
 export function renderReference(root, values, update, hass) {
   root.replaceChildren(element("h2", "Style reference"));
-  root.append(element("p", "Select an image in Home Assistant media or paste its media-source ID. Previews are authenticated and read-only.", "muted"));
+  root.append(element("p", "Select an image in Home Assistant media or paste its media-source ID. Previews support local PNG, JPEG and WebP files up to 8 MiB and 32 million pixels. They never save images into the library.", "muted"));
   const source = field("Reference media-source ID", values.reference_media_content_id,
     (v) => select(v),
     {placeholder: "media-source://media_source/local/icons/reference.png"});
@@ -17,7 +17,16 @@ export function renderReference(root, values, update, hass) {
     const selection = event.detail?.value;
     if (event.detail && "value" in event.detail) select(selection?.media_content_id || "");
   });
-  root.append(picker);
+  // HA has no public cold-panel selector loader. Native Configure always loads it.
+  if (root.ownerDocument.defaultView?.customElements.get("ha-selector")) root.append(picker);
+  else {
+    root.append(element("p", "The native media picker is available in Configure. You can also paste a media-source ID here.", "muted"));
+    const configure = element("a", "Open native Configure settings");
+    configure.href = "/config/integrations/integration/activity_images";
+    configure.target = "_blank";
+    configure.rel = "noopener";
+    root.append(configure);
+  }
   const status = element("p", "", "muted");
   status.setAttribute("role", "status");
   const preview = element("div", undefined, "reference-preview");

@@ -62,8 +62,14 @@ Regeneration in Activity Images does **not** replace copies previously saved by 
 The administrator-only **Settings** tab in the Activity Images sidebar offers four sections:
 **General** (AI Task provider, calendars, lookahead, automatic generation, Lucida URL),
 **Prompt** (editable global template with required `{title}` token and text-only preview),
-**Reference** (HA media selector / manual `media-source://` ID with authenticated preview),
-and **Diagnostics** (passive provider, Lucida configuration and calendar status).
+**Reference** (manual `media-source://` ID with authenticated preview, plus HA's media
+picker when already loaded), and **Diagnostics** (passive provider capabilities,
+Lucida configuration and calendar status).
+
+Native **Settings → Devices & services → Activity Images → Configure** provides the
+supported HA media picker. The sidebar links there when `ha-selector` is not already
+registered; it does not load private HA frontend bundles or require a custom card.
+Both editors retain the existing string reference ID in settings, not the selector object.
 
 Settings are validated in the backend and written only to native `ConfigEntry.options`.
 Changes apply without reloading the integration or interrupting generation. Each running
@@ -75,10 +81,17 @@ Both the panel and native **Configure** reject stale editors rather than overwri
 If a save result is unknown, explicitly discard edits and reload saved settings before retrying.
 
 **The Settings Diagnostics view does not test real AI generation or Lucida connectivity.**
-The reference preview reads only bounded local resolved media and never saves it into the
-image library. Visit [Settings implementation and review guide](docs/SETTINGS_ARCHITECTURE.md)
-for detailed boundaries, security checks, and known limitations. This feature remains
-an independently reviewed **Draft**, not a production release.
+It checks provider state, registered services and advertised image-generation/attachment
+feature bits; an available status is not proof a request will succeed or be free.
+Reference previews accept only HA's local `media-source://media_source/` source and
+regular PNG, JPEG or WebP files up to **8 MiB** and **32 million pixels**. External
+source resolvers are not invoked. Unsupported, missing or invalid media fails with a
+controlled error; previews never save images into the library. These are preview limits,
+not new restrictions on the existing generation attachment pipeline.
+Visit [Settings architecture](docs/SETTINGS_ARCHITECTURE.md) and the
+[Settings review](docs/SETTINGS_REVIEW.md) for verified results and limitations,
+including the outstanding full-browser check. This feature remains an independently
+reviewed **Draft**, not a production release.
 
 ## Public actions
 
