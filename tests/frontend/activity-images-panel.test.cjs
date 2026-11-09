@@ -194,10 +194,13 @@ test('candidate review old/new, accept conflicts leave candidate and errors visi
 });
 
 test('queue exposes legacy work and manual errors, cancel/retry/clear are explicit', async (t) => {
-  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([{ id: 'j', title: 'Read', kind: 'manual', state: 'interrupted', error: 'Provider unavailable' }], { current: 'Run', pending: ['Walk'], failed: { Swim: 'Timeout' } }) : undefined);
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([{ id: 'j', title: 'Read', kind: 'manual', state: 'interrupted', error: 'Provider unavailable' }], { current: 'Run', pending: ['Run', 'Walk'], failed: { Swim: 'Timeout' } }) : undefined);
   await tick();
   assert.match(panel._queue.textContent, /Provider unavailable/);
   assert.match(panel._queue.textContent, /Timeout/);
+  const running = [...panel._queue.querySelectorAll('article')].filter((card) => card.querySelector('h3').textContent === 'Run');
+  assert.equal(running.length, 1);
+  assert.equal(running[0].querySelectorAll('button').length, 0);
   findButton(panel._queue, 'Cancel waiting').click();
   findButton(panel._dialog, 'Cancel waiting job').click();
   await tick();

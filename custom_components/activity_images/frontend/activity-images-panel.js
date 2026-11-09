@@ -504,7 +504,7 @@
       const jobs = this._jobs.jobs;
       const represented = new Set(jobs.filter((job) => ACTIVE.has(job.state) || job.state === "failed").flatMap((job) => [job.title, job.key || job.title]));
       if (this._jobs.current && !represented.has(this._jobs.current)) this._queue.append(this._legacyJob(this._jobs.current, "running"));
-      for (const title of this._jobs.pending) if (!represented.has(title)) this._queue.append(this._legacyJob(title, "pending"));
+      for (const title of this._jobs.pending) if (title !== this._jobs.current && !represented.has(title)) this._queue.append(this._legacyJob(title, "pending"));
       for (const [title, error] of Object.entries(this._jobs.failed)) if (!represented.has(title)) this._queue.append(this._legacyJob(title, "failed", error));
       for (const title of this._jobs.retry_blocked || []) if (!represented.has(title) && !Object.hasOwn(this._jobs.failed, title)) this._queue.append(this._legacyJob(title, "failed"));
       for (const job of jobs) {
