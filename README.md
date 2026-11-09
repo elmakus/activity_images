@@ -11,7 +11,7 @@ Existing entity IDs, actions, prompt, reference-image behavior, fuzzy title matc
 ## Capabilities
 
 - Generate images through the standard `ai_task.generate_image` service
-- **Exact original full tactile 3D activity-icon prompt**, shared globally; no room/isometric prompt and no per-source customization
+- **Original full tactile 3D activity-icon prompt by default**, with an optional global Settings template. No room/isometric or per-source prompt.
 - Optional `media-source://` reference image passed as an AI Task attachment
 - Optional **Lucida** background removal using a user-configured trusted endpoint; deterministic Pillow-based fallback
 - Output normalized transparent PNG masters, WebP thumbnails, and light/dark QA previews
@@ -31,7 +31,7 @@ Existing entity IDs, actions, prompt, reference-image behavior, fuzzy title matc
 
 On Home Assistant **2026.11.0 or later**, add `elmakus/activity_images` as a custom **Integration** in **Settings → Marketplace** and install the stable release. Restart Home Assistant when prompted, then add **Activity Images** in **Settings → Devices & services**. See [installation, updates and recovery](docs/INSTALLATION_AND_RELEASE.md) for manual installation and existing development builds.
 
-An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
+An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt remains the default; the development Settings panel supports an optional global override. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
 
@@ -49,13 +49,33 @@ Open **Activity Images** in the Home Assistant sidebar as an administrator, or n
 - **Delete permanently / Delete selected:** review the exact files, aliases, current calendar consumers, and external-reference warning before confirming. If replacements are necessary, **Delete & Regenerate** requires separate paid authorization and preserves each original until its replacements are durable. Batch items can finish independently. Failed/interrupted precommit operations support explicit retry or **Keep originals…**. See [deletion behavior, safety, and rollback](docs/LIBRARY_DELETION.md).
 - **Queue & history:** inspect running/pending jobs, failures, candidates, deletion operations, and the last 100 terminal generation records. Small authenticated previews show real available results without cropping; missing/deleted results have clear placeholders. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted manual requests are not replayed after restart; pending legacy background work remains persistent.
 
-The manager's **Clear recorded errors** only clears displayed errors; it retains a persisted retry barrier and does not authorize another paid attempt. The existing public `activity_images.clear_errors` action retains its original clear-and-requeue behavior for legacy background jobs. Existing automatic-generation options are not enabled or changed by the panel.
+The manager's **Clear recorded errors** only clears displayed errors; it retains a persisted retry barrier and does not authorize another paid attempt. The existing public `activity_images.clear_errors` action retains its original clear-and-requeue behavior for legacy background jobs. Library and Queue controls do not change automatic generation; the separate development Settings view can update that option explicitly.
 
 The library supports at least **4,000 unique images**, not a deletion threshold. There is no LRU eviction of associations or automatic garbage collection. Physical deletion requires its own explicit confirmation. Gallery pages contain at most 96 records (the panel uses 48), with lazy authenticated previews. The inventory checks image headers/structure without decoding the entire collection; previews and linking perform full decoding. Files over **20 MiB** or **25 million pixels**, unsupported formats, corrupt files, and symlinks are excluded or rejected. Supported standalone formats are PNG, WebP, JPEG, and GIF. Inventory refreshes on demand, after generated assets, or after its short cache expires. Offset pagination reflects the current collection, not an immutable snapshot.
 
 The unchanged Home Tasks AI Task interface receives PNG bytes. Reusing a linked WebP/JPEG/GIF converts that result to PNG in memory, without changing its library source file or contacting AI. Existing PNG bytes remain unchanged; animated formats use their first frame.
 
 Regeneration in Activity Images does **not** replace copies previously saved by Home Tasks. See [future synchronization options and limits](docs/LIBRARY_MANAGER_DESIGN.md#future-home-tasks-synchronization).
+
+## Settings (development branch; not included in stable v0.3.0)
+
+The administrator-only **Settings** tab in the Activity Images sidebar offers four sections:
+**General** (AI Task provider, calendars, lookahead, automatic generation, Lucida URL),
+**Prompt** (editable global template with required `{title}` token and text-only preview),
+**Reference** (HA media selector / manual `media-source://` ID with authenticated preview),
+and **Diagnostics** (passive provider, Lucida configuration and calendar status).
+
+Settings are validated in the backend and written only to native `ConfigEntry.options`.
+A changed save triggers the integration's existing options update listener and entry reload.
+Saving is blocked while image generation is active, to avoid interrupting an in-flight paid
+request. No-op saves do not reload. Concurrent editors receive a revision conflict and
+must refresh rather than overwrite each other.
+
+**The Settings Diagnostics view does not test real AI generation or Lucida connectivity.**
+The reference preview reads only bounded local resolved media and never saves it into the
+image library. Visit [Settings implementation and review guide](docs/SETTINGS_ARCHITECTURE.md)
+for detailed boundaries, security checks, and known limitations. This feature requires
+independent Pi review and is **not a production release**.
 
 ## Public actions
 
