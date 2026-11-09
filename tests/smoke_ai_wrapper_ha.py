@@ -49,6 +49,9 @@ async def run():
     with tempfile.TemporaryDirectory(prefix="ha-wrapper-smoke-") as directory:
         hass = HomeAssistant(directory)
 
+        from smoke_library_ha import prepare_http
+        await prepare_http(hass)
+
         async def no_forward(*_args):
             return None
 

@@ -38,6 +38,9 @@ class TestEntry:
 async def run():
     with tempfile.TemporaryDirectory(prefix="ha-activity-images-smoke-") as tempdir:
         hass = HomeAssistant(tempdir)
+        from smoke_library_ha import prepare_http
+        await prepare_http(hass)
+
         assert await async_setup(hass, {})
         assert hass.services.has_service("activity_images", "generate_image")
         assert hass.services.has_service("activity_images", "queue_status")

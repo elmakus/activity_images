@@ -7,7 +7,11 @@
   "config_flow": true,
   "dependencies": [
     "ai_task",
-    "media_source"
+    "media_source",
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
   ],
   "documentation": "https://github.com/elmakus/activity_images",
   "integration_type": "service",

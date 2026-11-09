@@ -40,7 +40,7 @@ _package("homeassistant.components.media_source")
 
 
 class MemoryStore:
-    def __init__(self, hass, version, key):
+    def __init__(self, hass, version, key, **kwargs):
         self.hass = hass
         self.key = key
 
@@ -193,7 +193,7 @@ async def test_similar_matching_not_different_task(ha):
 
 
 @pytest.mark.asyncio
-async def test_cache_lru_preserves_files(ha, monkeypatch):
+async def test_cache_has_no_capacity_eviction(ha, monkeypatch):
     monkeypatch.setattr(cache_module, "MAX_CACHED_IMAGES", 2)
     cache = cache_module.ActivityImageCache(ha)
     await cache.async_setup()
@@ -204,7 +204,7 @@ async def test_cache_lru_preserves_files(ha, monkeypatch):
         Image.new("RGBA", (5, 5)).save(path)
         await cache.async_remember(name, f"/local/activity_images/{name}.png")
         await asyncio.sleep(0.005)
-    assert len(cache._entries) == 2
+    assert len(cache._entries) == 3
     assert all((ha.base / f"www/activity_images/{n}.png").exists() for n in names)
 
 
@@ -231,9 +231,16 @@ async def test_generate_real_png_thumbnail_and_qa(ha, configured):
 @pytest.mark.asyncio
 async def test_force_regeneration(ha, configured):
     cache, engine = configured
-    await engine.async_generate("Odkurzanie")
+    first = await engine.async_generate("Odkurzanie")
+    old = ha.base / "www" / first["image_url"].split("?", 1)[0].removeprefix("/local/")
+    original = old.read_bytes()
+    await cache.async_remember("Alias", first["image_url"])
     result = await engine.async_generate("Odkurzanie", force=True)
     assert result["reused"] is False
+    assert result["image_url"].split("?", 1)[0] != first["image_url"].split("?", 1)[0]
+    assert old.read_bytes() == original
+    assert cache.exact("Alias") == first["image_url"]
+    assert cache.exact("Odkurzanie") == result["image_url"]
     assert len(ha.services.calls) == 2
 
 
@@ -813,6 +820,10 @@ def _load_integration_entrypoint():
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
+    async def no_manager(hass):
+        pass
+    mod._async_register_manager = no_manager
+    mod._async_remove_manager = lambda hass: None
     return mod
 
 

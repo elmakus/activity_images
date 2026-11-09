@@ -5,13 +5,12 @@ from Home Tasks. Actions are registered in async_setup, as recommended by HA.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
@@ -22,6 +21,7 @@ from .const import DOMAIN
 from .engine import ActivityImageGenerator
 from .image_cache import ActivityImageCache, async_get_cache
 from .image_queue import ActivityImageQueue
+from .library import ActivityImageLibrary, _read_owned, _verify, validate_title
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,7 +29,16 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 MAX_TITLES_PER_REQUEST = 64
 _LOCAL_PNG = re.compile(r"^/local/activity_images/([A-Za-z0-9_.-]+\.png)(?:\?v=[A-Za-z0-9_.-]+)?$")
-_TITLE = vol.All(cv.string, vol.Length(min=1, max=255))
+
+
+def _valid_title(value):
+    try:
+        return validate_title(value)
+    except ValueError as exc:
+        raise vol.Invalid(str(exc)) from exc
+
+
+_TITLE = vol.All(str, vol.Length(min=1, max=255), _valid_title)
 _TITLES = vol.All(
     cv.ensure_list,
     vol.Length(min=1, max=MAX_TITLES_PER_REQUEST),
@@ -45,6 +54,7 @@ class ActivityImagesRuntime:
     queue: ActivityImageQueue
     cache: ActivityImageCache
     calendar: ActivityCalendarAdapter
+    library: ActivityImageLibrary
 
 
 def _get_runtime(hass: HomeAssistant) -> ActivityImagesRuntime:
@@ -94,9 +104,15 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         if match is None or match.group(1).startswith("."):
             raise HomeAssistantError("Only /local/activity_images/<filename>.png can be linked")
         filename = match.group(1)
-        path = Path(hass.config.path("www", "activity_images", filename))
-        if not await hass.async_add_executor_job(path.is_file):
-            raise HomeAssistantError("Local PNG does not exist")
+        root = Path(hass.config.path("www", "activity_images"))
+        def verify():
+            data = _read_owned(root, filename)
+            if _verify(data)[2] != "PNG":
+                raise ValueError("Expected a valid PNG")
+        try:
+            await hass.async_add_executor_job(verify)
+        except (OSError, ValueError) as exc:
+            raise HomeAssistantError("Local PNG is missing or invalid") from exc
         runtime = _get_runtime(hass)
         await runtime.cache.async_remember(title, url)
         await runtime.calendar.async_reconcile()
@@ -173,18 +189,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     cache = await async_get_cache(hass)
     generator = ActivityImageGenerator(hass, cache, settings)
     queue = ActivityImageQueue(hass, generator)
-    await queue.async_setup()
     calendar = ActivityCalendarAdapter(hass, cache, queue, settings)
     runtime = ActivityImagesRuntime(
         generator=generator, queue=queue, cache=cache, calendar=calendar,
+        library=ActivityImageLibrary(hass, cache),
     )
     entry.runtime_data = runtime
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
     generator.image_saved_callback = calendar.image_saved
+    manager_registered = False
     try:
+        await _async_register_manager(hass)
+        manager_registered = True
+        await queue.async_setup()
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "ai_task"])
         await calendar.async_start()
     except Exception:
+        if manager_registered:
+            _async_remove_manager(hass)
         generator.image_saved_callback = None
         await calendar.async_shutdown()
         await queue.async_shutdown()
@@ -201,8 +223,19 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if runtime is not None:
         if not await hass.config_entries.async_unload_platforms(entry, ["sensor", "ai_task"]):
             return False
+        _async_remove_manager(hass)
         runtime.generator.image_saved_callback = None
         await runtime.calendar.async_shutdown()
         await runtime.queue.async_shutdown()
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
+
+
+async def _async_register_manager(hass: HomeAssistant) -> None:
+    from .library_api import async_register_manager
+    await async_register_manager(hass)
+
+
+def _async_remove_manager(hass: HomeAssistant) -> None:
+    from .library_api import async_remove_manager
+    async_remove_manager(hass)
