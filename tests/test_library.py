@@ -162,6 +162,7 @@ async def test_manual_candidates_review_accept_cas_and_discard(ha, configured):
     with pytest.raises(ValueError, match="exact associated"):
         await library.async_generate(queue, "Different title", image_id)
     job = await library.async_generate(queue, "Walking", image_id)
+    assert job["key"] == "walking"
     again = await queue.async_candidate("WALKING!")
     assert job["id"] == again["id"]
     await finished(queue)

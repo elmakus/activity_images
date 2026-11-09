@@ -237,6 +237,7 @@ class ActivityImageQueue:
         url = job.get("result_url")
         image_id = ActivityImageLibrary.image_id(url.split("?", 1)[0].rsplit("/", 1)[-1]) if url else None
         return {key: job.get(key) for key in ("id", "title", "kind", "state", "error", "created_at", "updated_at")} | {
+            "key": normalize_title(job["title"]),
             "image_id": image_id, "image_url": f"{IMAGE_API}/{image_id}/master" if image_id else None,
         }
 

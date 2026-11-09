@@ -475,6 +475,21 @@ test('old awaited completion cannot refresh or unlock a newer lifecycle paid mut
   await tick();
 });
 
+test('manual failures do not duplicate normalized legacy errors or expose an invalid retry', async (t) => {
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([
+    { id: 'manual-id', key: 'playing the cello', title: 'Playing the Cello', kind: 'manual', state: 'failed', error: 'Fixture failure' },
+  ], { failed: { 'playing the cello': 'Fixture failure' } }) : undefined);
+  await tick();
+  const cards = [...panel._queue.querySelectorAll('article')];
+  assert.equal(cards.length, 1);
+  findButton(cards[0], 'Retry…').click();
+  panel._dialog.querySelector('input[type="checkbox"]').checked = true;
+  findButton(panel._dialog, 'Retry paid request').click();
+  await tick();
+  assert.equal(commands('retry').at(-1).job_id, 'manual-id');
+  assert.equal(commands('retry').at(-1).title, undefined);
+});
+
 test('cleared legacy retry barriers remain actionable and background history retries by title', async (t) => {
   const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([
     { id: 'background-id', title: 'Background Failure', kind: 'background', state: 'failed', error: null },
