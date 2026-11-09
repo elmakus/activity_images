@@ -213,8 +213,12 @@ async def test_malformed_partial_demand_cannot_authorize_generation(ha, configur
     await adapter.async_shutdown()
 
 
+class ProviderServerError(Exception):
+    status = 500
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", [TimeoutError, ConnectionError])
+@pytest.mark.parametrize("outcome", [TimeoutError, ConnectionError, ProviderServerError, asyncio.CancelledError])
 async def test_unknown_paid_outcome_is_never_replayed_by_scans_refresh_or_restart(ha, configured, monkeypatch, outcome):
     adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Uncertain activity"])
     await adapter.async_refresh()
@@ -228,8 +232,14 @@ async def test_unknown_paid_outcome_is_never_replayed_by_scans_refresh_or_restar
         raise outcome("Provider may already have accepted the image")
 
     monkeypatch.setattr(ha.services, "async_call", uncertain)
-    await queue._run()
-    assert attempts == [1] and queue._jobs[-1]["state"] == "failed"
+    if outcome is asyncio.CancelledError:
+        with pytest.raises(asyncio.CancelledError):
+            await queue._run()
+        assert queue._jobs[-1]["state"] == "interrupted"
+    else:
+        await queue._run()
+        assert queue._jobs[-1]["state"] == "failed"
+    assert attempts == [1]
     await adapter.async_refresh_coverage()
     await adapter.async_refresh()
     assert attempts == [1] and queue._pending == []
@@ -237,7 +247,11 @@ async def test_unknown_paid_outcome_is_never_replayed_by_scans_refresh_or_restar
     restored = behavior.queue_module.ActivityImageQueue(ha, configured[1])
     monkeypatch.setattr(restored, "_kick", lambda: None)
     await restored.async_setup()
-    assert restored._pending == [] and "uncertain activity" in restored._failed
+    assert restored._pending == []
+    if outcome is asyncio.CancelledError:
+        assert "uncertain activity" in restored._retry_blocked
+    else:
+        assert "uncertain activity" in restored._failed
     assert await restored.async_enqueue(["Uncertain activity"]) == []
     await restored.async_clear_errors(preserve_retry_blocks=True)
     assert await restored.async_enqueue(["Uncertain activity"]) == []
