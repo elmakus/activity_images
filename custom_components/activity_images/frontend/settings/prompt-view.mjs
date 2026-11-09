@@ -14,8 +14,8 @@ export function renderPrompt(root, values, update) {
   preview.setAttribute("aria-label", "Rendered prompt preview");
   root.append(preview);
   function showPreview() {
-    preview.textContent = editor.input.value.replaceAll("{{", "\u0000").replaceAll("}}", "\u0001")
-      .replace("{title}", example.input.value).replaceAll("\u0000", "{").replaceAll("\u0001", "}");
+    preview.textContent = editor.input.value.replace(/\{\{|\}\}|\{title\}/g,
+      (token) => token === "{title}" ? example.input.value : token[0]);
   }
   showPreview();
 }
