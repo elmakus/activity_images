@@ -9,6 +9,7 @@ import time
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 
 from PIL import Image
 
@@ -48,7 +49,7 @@ def _read_owned(root: Path, filename: str) -> bytes:
         os.close(directory)
 
 
-def _verify(data: bytes) -> tuple[int, int, str]:
+def _verify(data: bytes, *, decode: bool = True) -> tuple[int, int, str]:
     with Image.open(BytesIO(data)) as image:
         width, height = image.size
         format_name = image.format
@@ -57,8 +58,9 @@ def _verify(data: bytes) -> tuple[int, int, str]:
         if width * height > MAX_IMAGE_PIXELS:
             raise ValueError("Image exceeds 25 million pixels")
         image.verify()
-    with Image.open(BytesIO(data)) as decoded:
-        decoded.load()
+    if decode:
+        with Image.open(BytesIO(data)) as decoded:
+            decoded.load()
     return width, height, format_name
 
 
@@ -102,7 +104,8 @@ class ActivityImageLibrary:
                         details = previous[1]
                     else:
                         try:
-                            width, height, format_name = _verify(_read_owned(self.root, entry.name))
+                            # Decode only requested previews, not every pixel in the library.
+                            width, height, format_name = _verify(_read_owned(self.root, entry.name), decode=False)
                             details = {
                                 "width": width, "height": height, "format": format_name,
                                 "modified_at": datetime.fromtimestamp(info.st_mtime, UTC).isoformat(),
@@ -162,7 +165,7 @@ class ActivityImageLibrary:
     def _item(self, image_id: str, titles_by_url: dict) -> dict:
         image = self._images[image_id]
         filename = image["filename"]
-        url = ACTIVITY_IMAGE_PREFIX + filename
+        url = ACTIVITY_IMAGE_PREFIX + quote(filename, safe="")
         titles = sorted(set(titles_by_url.get(url, [])), key=str.casefold)
         metadata = self.cache.image_metadata(url)
         assets = {kind: f"{IMAGE_API}/{image_id}/{kind}" for kind in image["files"]}
@@ -205,7 +208,7 @@ class ActivityImageLibrary:
             raise ValueError("Image not found; refresh the library")
         image = self._images[image_id]
         item = self._item(image_id, self._titles(self.cache.entries()))
-        metadata = self.cache.image_metadata(ACTIVITY_IMAGE_PREFIX + image["filename"])
+        metadata = self.cache.image_metadata(ACTIVITY_IMAGE_PREFIX + quote(image["filename"], safe=""))
         return {**item, **{key: image[key] for key in ("width", "height", "format", "modified_at")},
                 "created_at": metadata.get("created_at"),
                 "assets": {kind: f"{IMAGE_API}/{image_id}/{kind}" for kind in image["files"]}}
@@ -214,7 +217,7 @@ class ActivityImageLibrary:
         item = await self.async_get(image_id)
         # Verify at the mutation boundary too, not only at inventory time.
         await self.async_read(image_id, "master")
-        return ACTIVITY_IMAGE_PREFIX + item["filename"]
+        return ACTIVITY_IMAGE_PREFIX + quote(item["filename"], safe="")
 
     async def async_read(self, image_id: str, asset: str) -> tuple[bytes, str]:
         await self.async_inventory()

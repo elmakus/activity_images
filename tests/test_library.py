@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
+from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 import test_behavior as behavior
@@ -74,9 +77,9 @@ async def test_inventory_complete_grouped_safe_and_cached(ha, configured, monkey
     import custom_components.activity_images.library as module
     original_verify = module._verify
     calls = []
-    def counted(data):
+    def counted(data, **kwargs):
         calls.append(1)
-        return original_verify(data)
+        return original_verify(data, **kwargs)
     monkeypatch.setattr(module, "_verify", counted)
     await library.async_list(query="M")
     await library.async_list(query="Mo")
@@ -93,6 +96,63 @@ async def test_inventory_complete_grouped_safe_and_cached(ha, configured, monkey
         await library.async_read("../../private", "master")
     with pytest.raises(ValueError):
         await library.async_read(orphan["id"], "../../private.png")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["orphan.webp", "imported.jpg", "imported.gif", "Summer ? #1%.webp"])
+async def test_linked_imported_formats_reuse_through_home_tasks_as_png(ha, configured, filename):
+    cache, engine = configured
+    path = picture(ha, filename)
+    original = path.read_bytes()
+    library = ActivityImageLibrary(ha, cache)
+    image_id = library.image_id(filename)
+    url = await library.async_url(image_id)
+    assert url == "/local/activity_images/" + quote(filename, safe="")
+    await cache.async_link("Reused imported image", url)
+    assert await cache.async_find("Reused imported image") == url
+    assert (await library.async_get(image_id))["titles"] == ["Reused imported image"]
+    wrapper, ai = behavior._load_ai_wrapper()
+    entry = SimpleNamespace(
+        entry_id="imported_format_test", data=engine.settings, options={},
+        runtime_data=SimpleNamespace(generator=engine),
+    )
+    entity = wrapper.ActivityImagesAITaskEntity(entry)
+    entity.hass = ha
+    entity._attr_entity_id = "ai_task.activity_images"
+    task = ai.GenImageTask(
+        name="home_tasks_imported_image",
+        instructions="Reused imported image\n\nThe image must have a square 1:1 aspect ratio.",
+    )
+    result = await entity._async_generate_image(task, SimpleNamespace(conversation_id="imported"))
+    assert result.mime_type == "image/png"
+    with Image.open(BytesIO(result.image_data)) as image:
+        assert image.format == "PNG" and image.size == (12, 10)
+    assert path.read_bytes() == original
+    assert ha.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_inventory_defers_pixel_decoding_until_preview_or_link(ha, configured, monkeypatch):
+    cache, _ = configured
+    picture(ha, "lazy.png")
+    library = ActivityImageLibrary(ha, cache)
+    calls = []
+    original_load = Image.Image.load
+
+    def track_load(image, *args, **kwargs):
+        calls.append(1)
+        return original_load(image, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "load", track_load)
+    result = await library.async_list()
+    assert result["total"] == 1
+    assert calls == []
+    image_id = result["items"][0]["id"]
+    await library.async_read(image_id, "master")
+    assert calls
+    calls.clear()
+    await library.async_url(image_id)
+    assert calls
 
 
 @pytest.mark.asyncio

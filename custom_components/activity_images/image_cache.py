@@ -12,6 +12,7 @@ from copy import deepcopy
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
+from urllib.parse import unquote
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -149,10 +150,11 @@ class ActivityImageCache:
         """Resolve one safe generated activity-image URL to its master file."""
         if not canonical_url.startswith(ACTIVITY_IMAGE_PREFIX):
             return None
-        filename = canonical_url[len(ACTIVITY_IMAGE_PREFIX):]
+        filename = unquote(canonical_url[len(ACTIVITY_IMAGE_PREFIX):])
         if (
             not filename
             or filename != os.path.basename(filename)
+            or "\\" in filename or chr(0) in filename
             or not filename.lower().endswith(".png")
             or filename in CANVAS_NORMALIZATION_EXCLUDED_FILES
         ):
@@ -460,8 +462,8 @@ class ActivityImageCache:
         if location is None:
             return True
         prefix, directory_parts = location
-        filename = path[len(prefix):]
-        if not filename or filename != os.path.basename(filename) or "\\" in filename:
+        filename = unquote(path[len(prefix):])
+        if not filename or filename != os.path.basename(filename) or "\\" in filename or chr(0) in filename:
             return False
         local_path = self.hass.config.path(*directory_parts, filename)
         return await self.hass.async_add_executor_job(os.path.isfile, local_path)

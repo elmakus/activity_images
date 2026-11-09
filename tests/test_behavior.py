@@ -1476,6 +1476,8 @@ async def test_ai_wrapper_rejects_nonlocal_or_malformed_png_paths(ha, monkeypatc
     for url in (
         "https://somewhere.example/unsafe.png",
         "/local/activity_images/../../secrets.png",
+        "/local/activity_images/%2e%2e%2fsecrets.png",
+        "/local/activity_images/%5chidden.png",
         "/local/activity_images/.hidden.png",
         "/local/activity_images/not-a-png.jpg",
         "file:///etc/passwd",
@@ -1484,7 +1486,7 @@ async def test_ai_wrapper_rejects_nonlocal_or_malformed_png_paths(ha, monkeypatc
         async def fake_generate(_title, *, force=False, result=url):
             return await bad_result(result)
         monkeypatch.setattr(entry.runtime_data.generator, "async_generate", fake_generate)
-        with pytest.raises(wrapper_module.HomeAssistantError, match="invalid PNG URL|nonlocal image URL|Invalid image filename"):
+        with pytest.raises(wrapper_module.HomeAssistantError, match="invalid image URL|nonlocal image URL|Invalid image filename|Unable to read processed"):
             await entity._async_generate_image(
                 task, SimpleNamespace(conversation_id="reject")
             )
