@@ -4,6 +4,7 @@ from __future__ import annotations
 import probatio as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
 from .const import (
@@ -18,7 +19,8 @@ from .const import (
     DOMAIN,
 )
 from .prompts import DEFAULT_PROMPT_TEMPLATE
-from .settings_schema import validate_settings
+from .settings import StaleSettingsError, options_for_update, revision, settings_lock
+from .settings_schema import effective_settings, validate_settings
 
 
 def schema(settings: dict | None = None) -> vol.Schema:
@@ -27,7 +29,7 @@ def schema(settings: dict | None = None) -> vol.Schema:
     # An empty EntitySelector is invalid on current Home Assistant releases.
     provider = settings.get(CONF_AI_ENTITY)
     provider_key = (
-        vol.Optional(CONF_AI_ENTITY, default=provider)
+        vol.Optional(CONF_AI_ENTITY, description={"suggested_value": provider})
         if provider else vol.Optional(CONF_AI_ENTITY)
     )
     return vol.Schema({
@@ -76,27 +78,36 @@ class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(DOMAIN)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(title="Activity Images", data=user_input)
-        return self.async_show_form(step_id="user", data_schema=schema(), errors=errors)
+        return self.async_show_form(step_id="user", data_schema=schema(user_input), errors=errors)
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return ActivityImagesOptionsFlow(config_entry)
+        return ActivityImagesOptionsFlow()
 
 
 class ActivityImagesOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry):
-        self._source_entry = config_entry
+    def __init__(self):
+        self._revision = None
 
     async def async_step_init(self, user_input=None):
+        entry = self.config_entry
+        if self._revision is None:
+            self._revision = revision(entry)
         errors = {}
         if user_input is not None:
-            if not _valid(user_input):
+            try:
+                async with settings_lock(entry):
+                    # The full native form can omit a cleared optional provider.
+                    values = validate_settings(user_input)
+                    options = options_for_update(entry, values, self._revision)
+                    # HA's flow manager persists this result without another await.
+                    return self.async_create_entry(title="", data=options)
+            except StaleSettingsError:
+                errors["base"] = "settings_conflict"
+            except (ValueError, HomeAssistantError):
                 errors["base"] = "invalid_settings"
-            else:
-                return self.async_create_entry(title="", data=user_input)
-        current = dict(self._source_entry.data)
-        current.update(self._source_entry.options)
         return self.async_show_form(
-            step_id="init", data_schema=schema(current), errors=errors
+            step_id="init", data_schema=schema(user_input if user_input is not None else effective_settings(entry)),
+            errors=errors,
         )

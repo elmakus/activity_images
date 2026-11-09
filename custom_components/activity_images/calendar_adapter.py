@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import timedelta
 
@@ -54,7 +54,7 @@ class ActivityCalendarAdapter:
         hass: HomeAssistant,
         cache: ActivityImageCache,
         queue: ActivityImageQueue,
-        settings: dict,
+        settings: Mapping,
     ) -> None:
         self.hass = hass
         self.cache = cache
@@ -68,6 +68,7 @@ class ActivityCalendarAdapter:
         self.last_error: str | None = None
         self._listeners: set[Callable[[], None]] = set()
         self._unsubscribers: list[Callable[[], None]] = []
+        self._state_unsubscribe: Callable[[], None] | None = None
         self._lock = asyncio.Lock()
         self._scan_task: asyncio.Task | None = None
         self._reconcile_task: asyncio.Task | None = None
@@ -206,12 +207,60 @@ class ActivityCalendarAdapter:
                 timedelta(minutes=CALENDAR_SCAN_MINUTES),
             )
         )
-        self._unsubscribers.append(
-            async_track_state_change_event(
-                self.hass, self.calendars, self._schedule_scan,
-            )
+        self._state_unsubscribe = async_track_state_change_event(
+            self.hass, self.calendars, self._schedule_scan,
         )
         self._unsubscribers.append(async_at_started(self.hass, self._at_started))
+
+    async def async_update_settings(self, settings) -> None:
+        """Apply the latest options between scans, without stopping accepted jobs."""
+        async with self._lock:
+            if self._closed:
+                return
+            calendars = tuple(settings.get(CONF_CALENDARS) or ())
+            days = int(settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS))
+            automatic = bool(settings.get(CONF_AUTO_GENERATE, False))
+            selection_changed = calendars != self.calendars
+            demand_changed = selection_changed or days != self.lookahead_days
+            enable_generation = automatic and not self.auto_generate
+            if not demand_changed and automatic == self.auto_generate:
+                return
+            self.calendars, self.lookahead_days, self.auto_generate = calendars, days, automatic
+            if self._retry_cancel:
+                self._retry_cancel()
+                self._retry_cancel = None
+            self._retry_count = 0
+            self._warned_error = None
+            if demand_changed:
+                self.last_scan = None
+                self.last_error = None
+                self._demand_truncated = False
+            if selection_changed:
+                self.calendar_titles = self._snapshot_titles(self.calendar_titles)
+                wanted = {title for titles in self.calendar_titles.values() for title in titles}
+                self.images = {title: url for title, url in self.images.items() if title in wanted}
+                if self._state_unsubscribe:
+                    self._state_unsubscribe()
+                    self._state_unsubscribe = None
+                if self._start_registered and calendars:
+                    self._state_unsubscribe = async_track_state_change_event(
+                        self.hass, calendars, self._schedule_scan,
+                    )
+                self._snapshot_task = self.hass.async_create_task(
+                    async_save_verified(self.hass, self._store, self.calendar_titles)
+                )
+                try:
+                    await asyncio.shield(self._snapshot_task)
+                except Exception as exc:
+                    self.last_error = f"Unable to save calendar snapshot: {exc}"
+                    _LOGGER.warning("Unable to save updated calendar selection", exc_info=True)
+            self._notify()
+        if self._closed:
+            return
+        if not self._start_registered:
+            await self.async_start()
+        elif demand_changed or enable_generation:
+            self._schedule_scan()
 
     async def async_refresh(self) -> dict:
         """Join the owned scan; public actions must obey the same lifecycle guards."""
@@ -387,6 +436,9 @@ class ActivityCalendarAdapter:
         for unsub in self._unsubscribers:
             unsub()
         self._unsubscribers.clear()
+        if self._state_unsubscribe:
+            self._state_unsubscribe()
+            self._state_unsubscribe = None
         for task in (self._scan_task, self._reconcile_task):
             if task and not task.done():
                 task.cancel()

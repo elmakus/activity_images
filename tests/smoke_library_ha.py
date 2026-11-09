@@ -316,12 +316,14 @@ async def run():
         flow_manager: Any = SimpleNamespace()
         view = _BaseFlowManagerView[Any, Any](flow_manager)
         assert len(view._prepare_result_json(form)["data_schema"]) == 7
-        options_flow = ActivityImagesOptionsFlow(Entry())
+        entry: Any = Entry()
+        hass.config_entries.async_get_known_entry = lambda _: entry
+        options_flow = ActivityImagesOptionsFlow()
+        options_flow.handler = entry.entry_id
         options_flow.hass = hass
         options_form = await options_flow.async_step_init()
         assert len(view._prepare_result_json(options_form)["data_schema"]) == 7
         assert await async_setup(hass, {})
-        entry: Any = Entry()
         hass.config_entries.async_entries = lambda domain: [entry]
         hass.config_entries.async_update_entry = lambda item, *, options: setattr(item, "options", options)
         assert await async_setup_entry(hass, entry)
@@ -411,6 +413,8 @@ async def run():
             saved = await settings_command("save", revision=revision, values={"calendar_lookahead_days": 21})
             assert saved["success"] and saved["result"]["changed"], saved
             assert entry.options["calendar_lookahead_days"] == 21
+            # This transport harness bypasses ConfigEntries; native listener tests are separate.
+            await entry.runtime_data.calendar.async_update_settings(entry.runtime_data.generator.settings)
             stale = await settings_command("save", revision=revision, values={"calendar_lookahead_days": 22})
             assert stale["error"]["code"] == "settings_conflict", stale
             diagnostics = await settings_command("diagnostics")

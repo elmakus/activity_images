@@ -6,6 +6,7 @@ No side effects or Home Assistant imports, so validation can be tested in isolat
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from urllib.parse import urlsplit
 
 from .const import (
@@ -38,14 +39,32 @@ def effective_settings(entry) -> dict:
             **{k: v for k, v in entry.options.items() if k in KEYS}}
 
 
+class ConfigEntrySettings(Mapping):
+    """Read-only live view; the native entry remains the only source of settings."""
+
+    def __init__(self, entry):
+        self.entry = entry
+
+    def __getitem__(self, key):
+        if key not in KEYS:
+            raise KeyError(key)
+        return self.entry.options.get(key, self.entry.data.get(key, DEFAULTS[key]))
+
+    def __iter__(self):
+        return iter(DEFAULTS)
+
+    def __len__(self):
+        return len(DEFAULTS)
+
+
 def validate_settings(changes: dict, current: dict | None = None) -> dict:
     """Return a complete validated snapshot; reject unknown keys and bad types.
 
     The API passes a partial update and current settings; options flow uses the
     same rules for its complete form submission.
     """
-    if not isinstance(changes, dict) or KEYS.isdisjoint(changes) and changes:
-        raise ValueError("Unknown settings")
+    if not isinstance(changes, dict):
+        raise ValueError("Settings must be an object")
     if set(changes) - KEYS:
         raise ValueError("Unknown setting key")
     values = {**DEFAULTS, **(current or {}), **changes}
@@ -67,6 +86,7 @@ def validate_settings(changes: dict, current: dict | None = None) -> dict:
         raise ValueError("Automatic generation requires a provider")
     reference = values[CONF_REFERENCE_MEDIA_ID]
     if (not isinstance(reference, str) or len(reference) > 1024
+            or "\x00" in reference
             or (reference and not reference.startswith("media-source://"))):
         raise ValueError("Reference must be a media-source ID")
     url = values[CONF_LUCIDA_URL]
@@ -75,7 +95,11 @@ def validate_settings(changes: dict, current: dict | None = None) -> dict:
     if url:
         parsed = urlsplit(url)
         if (parsed.scheme not in ("http", "https") or not parsed.hostname
-                or parsed.username or parsed.password or parsed.fragment):
+                or parsed.username or parsed.password or parsed.fragment
+                or any(char.isspace() for char in url)):
             raise ValueError("Lucida URL must be HTTP(S) without credentials or fragment")
+        # Accessing port also rejects malformed and out-of-range port numbers.
+        if parsed.port == 0:
+            raise ValueError("Invalid Lucida port")
     validate_prompt_template(values[CONF_PROMPT_TEMPLATE])
     return {key: values[key] for key in DEFAULTS}

@@ -66,16 +66,19 @@ The administrator-only **Settings** tab in the Activity Images sidebar offers fo
 and **Diagnostics** (passive provider, Lucida configuration and calendar status).
 
 Settings are validated in the backend and written only to native `ConfigEntry.options`.
-A changed save triggers the integration's existing options update listener and entry reload.
-Saving is blocked while image generation is active, to avoid interrupting an in-flight paid
-request. No-op saves do not reload. Concurrent editors receive a revision conflict and
-must refresh rather than overwrite each other.
+Changes apply without reloading the integration or interrupting generation. Each running
+request keeps its configuration; waiting work uses the settings current when it starts.
+Disabling automatic generation stops new calendar jobs, not already accepted work.
+Cancel waiting work explicitly in **Queue & history**. A save can wait for an ongoing
+calendar scan or deletion boundary. No-op saves do not notify update listeners.
+Both the panel and native **Configure** reject stale editors rather than overwrite changes.
+If a save result is unknown, explicitly discard edits and reload saved settings before retrying.
 
 **The Settings Diagnostics view does not test real AI generation or Lucida connectivity.**
 The reference preview reads only bounded local resolved media and never saves it into the
 image library. Visit [Settings implementation and review guide](docs/SETTINGS_ARCHITECTURE.md)
-for detailed boundaries, security checks, and known limitations. This feature requires
-independent Pi review and is **not a production release**.
+for detailed boundaries, security checks, and known limitations. This feature remains
+an independently reviewed **Draft**, not a production release.
 
 ## Public actions
 

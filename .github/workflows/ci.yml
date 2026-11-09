@@ -33,6 +33,7 @@ jobs:
           home-assistant-intents==2026.10.27 pytest pytest-asyncio
       - run: python -m pytest -q tests
       - run: python tests/smoke_library_ha.py
+      - run: python tests/smoke_settings_ha.py
       - run: python tests/smoke_ha_runtime.py
       - run: python tests/smoke_ai_wrapper_ha.py
       - run: python tests/smoke_calendar_startup_ha.py

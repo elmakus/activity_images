@@ -1,4 +1,5 @@
 """Pure validation and render tests; no Home Assistant runtime needed."""
+import hashlib
 import importlib
 import sys
 import types
@@ -38,6 +39,11 @@ def test_defaults_keep_original_prompt_and_data_precedence():
     {const.CONF_LUCIDA_URL: "file:///etc/passwd"},
     {const.CONF_LUCIDA_URL: "http://username:password@host/"},
     {const.CONF_REFERENCE_MEDIA_ID: "/local/private.png"},
+    {const.CONF_REFERENCE_MEDIA_ID: "media-source://media_source/local/a\x00.png"},
+    {const.CONF_LUCIDA_URL: "http://host:invalid/"},
+    {const.CONF_LUCIDA_URL: "http://host:65536/"},
+    {const.CONF_LUCIDA_URL: "http://host:0/"},
+    {const.CONF_LUCIDA_URL: "http://host/\n"},
     {const.CONF_PROMPT_TEMPLATE: "No placeholder"},
     {const.CONF_PROMPT_TEMPLATE: "Repeated {title} {title}"},
     {const.CONF_PROMPT_TEMPLATE: "{title.__class__}"},
@@ -60,6 +66,24 @@ def test_partial_update_and_safe_prompt_rendering():
         "Party {strange}", "Draw {{once}}: {title}"
     )
     assert rendered == "Draw {once}: Party {strange}"
+
+
+def test_original_default_is_byte_identical_to_stable_030():
+    # Golden output independently rendered from stable commit 5ae5371.
+    output = prompts.build_activity_image_instructions("Example activity")
+    assert hashlib.sha256(output.encode()).hexdigest() == "68163a62b71ee645f631a0ef1355bbc0ea9c60d10d6994bdac0e774a3ab5b0b9"
+
+
+def test_live_entry_view_does_not_retain_an_old_options_object():
+    entry = types.SimpleNamespace(data={const.CONF_AI_ENTITY:"ai_task.old"}, options={})
+    view = schema.ConfigEntrySettings(entry)
+    snapshot = dict(view)
+    entry.options = {const.CONF_AI_ENTITY:"ai_task.new"}
+    assert view[const.CONF_AI_ENTITY] == "ai_task.new"
+    assert snapshot[const.CONF_AI_ENTITY] == "ai_task.old"
+    assert view[const.CONF_PROMPT_TEMPLATE] == prompts.DEFAULT_PROMPT_TEMPLATE
+    with pytest.raises(KeyError):
+        _ = view["unknown"]
 
 
 def test_title_content_is_not_reinterpreted_as_template():

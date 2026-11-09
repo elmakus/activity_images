@@ -186,8 +186,6 @@ async def async_register_manager(hass) -> None:
             websocket_api.async_register_command(hass, _handler(command, fields))
         from .settings_api import async_register_settings
         async_register_settings(hass)
-        from .settings_diagnostics_api import async_register_settings_diagnostics
-        async_register_settings_diagnostics(hass)
         registered.add("ws")
     await panel_custom.async_register_panel(
         hass, frontend_url_path=PANEL_ROUTE, webcomponent_name="activity-images-panel",

@@ -21,7 +21,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, __version__  # noqa
 from homeassistant.core import CoreState, HomeAssistant, SupportsResponse  # noqa: E402
 from homeassistant.helpers import storage as ha_storage  # noqa: E402
 from homeassistant.helpers.storage import Store  # noqa: E402
-from homeassistant.util.file import WriteError  # noqa: E402
+from homeassistant.util.file import WriteError, write_utf8_file_atomic  # noqa: E402
 
 from custom_components.activity_images import calendar_adapter as module  # noqa: E402
 
@@ -143,7 +143,7 @@ async def lifecycle_and_recovery(hass):
         subject._schedule_scan()
         await hass.async_block_till_done()
         assert calls == [] and subject._scan_task is None
-        assert len(subject._unsubscribers) == 3
+        assert len(subject._unsubscribers) == 2 and subject._state_unsubscribe is not None
         await hass.async_start()  # Actual HA transition and async_at_started dispatch.
         await hass.async_block_till_done()
         assert len(calls) == 1
@@ -466,7 +466,7 @@ async def swallowed_snapshot_write_failure_preserves_last_good(hass):
         previous_scan = subject.last_scan
         assert previous_scan and previous_titles == {ENTITY: ["Old event"]}
         response = {ENTITY: {"events": [{"summary": "Uncommitted event"}]}}
-        native = ha_storage.write_utf8_file_atomic
+        native = write_utf8_file_atomic
         def fail_native(filename, *args, **kwargs):
             if filename == subject._store.path:
                 raise WriteError("Injected calendar disk failure")

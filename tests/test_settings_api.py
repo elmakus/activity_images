@@ -1,4 +1,5 @@
 """Admin Settings API behavior without a live Home Assistant instance."""
+import asyncio
 import importlib
 import sys
 import types
@@ -26,10 +27,10 @@ if "homeassistant.components" not in sys.modules:
 ws = sys.modules.setdefault("homeassistant.components.websocket_api", types.ModuleType("websocket_api"))
 for name in ("websocket_command", "require_admin", "async_response"):
     setattr(ws, name, (lambda fn: fn) if name != "websocket_command" else (lambda schema: lambda fn: fn))
-sys.modules["homeassistant.components"].websocket_api = ws
+sys.modules["homeassistant.components"].__dict__["websocket_api"] = ws
 exc = sys.modules.setdefault("homeassistant.exceptions", types.ModuleType("homeassistant.exceptions"))
 if not hasattr(exc, "HomeAssistantError"):
-    exc.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+    exc.__dict__["HomeAssistantError"] = type("HomeAssistantError", (Exception,), {})
 
 api = importlib.import_module("custom_components.activity_images.settings_api")
 const = importlib.import_module("custom_components.activity_images.const")
@@ -37,7 +38,7 @@ const = importlib.import_module("custom_components.activity_images.const")
 
 class Entries:
     def __init__(self):
-        self.entry = types.SimpleNamespace(data={const.CONF_AI_ENTITY: "ai_task.mock"}, options={})
+        self.entry = types.SimpleNamespace(entry_id="current", data={const.CONF_AI_ENTITY: "ai_task.mock"}, options={})
         self.updates = []
 
     def async_entries(self, domain):
@@ -49,29 +50,31 @@ class Entries:
         entry.options = options
 
 
-def test_read_noop_update_and_real_update():
+@pytest.mark.asyncio
+async def test_read_noop_update_and_real_update():
     hass = types.SimpleNamespace(config_entries=Entries())
     start = api.read_settings(hass)
     assert start["values"][const.CONF_AI_ENTITY] == "ai_task.mock"
-    result = api.save_settings(hass, {}, start["revision"])
+    result = await api.save_settings(hass, {}, start["revision"])
     assert result["changed"] is False
     assert not hass.config_entries.updates
-    changed = api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 14}, start["revision"])
+    changed = await api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 14}, start["revision"])
     assert changed["changed"] is True
-    assert changed["reload"] == "scheduled"
+    assert changed["reload"] == "none"
     assert len(hass.config_entries.updates) == 1
     assert hass.config_entries.entry.data == {const.CONF_AI_ENTITY: "ai_task.mock"}
     assert api.read_settings(hass)["values"][const.CONF_LOOKAHEAD_DAYS] == 14
 
 
-def test_stale_editor_and_invalid_changes_do_not_persist():
+@pytest.mark.asyncio
+async def test_stale_editor_and_invalid_changes_do_not_persist():
     hass = types.SimpleNamespace(config_entries=Entries())
     original = api.read_settings(hass)["revision"]
-    api.save_settings(hass, {const.CONF_AUTO_GENERATE: True}, original)
+    await api.save_settings(hass, {const.CONF_AUTO_GENERATE: True}, original)
     with pytest.raises(api.StaleSettingsError):
-        api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 3}, original)
+        await api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 3}, original)
     with pytest.raises(ValueError):
-        api.save_settings(hass, {const.CONF_AI_ENTITY: "sensor.unsafe"}, api.read_settings(hass)["revision"])
+        await api.save_settings(hass, {const.CONF_AI_ENTITY: "sensor.unsafe"}, api.read_settings(hass)["revision"])
     assert len(hass.config_entries.updates) == 1
 
 
@@ -81,16 +84,31 @@ def test_no_config_entry_rejects_request():
         api.read_settings(hass)
 
 
-def test_reject_reload_during_active_generation():
+@pytest.mark.asyncio
+async def test_saving_waits_for_calendar_boundary_without_stopping_generation():
     entries = Entries()
-    entries.entry.entry_id = "current"
-    hass = types.SimpleNamespace(
-        config_entries=entries,
-        data={const.DOMAIN: {"current": types.SimpleNamespace(
-            generator=types.SimpleNamespace(is_generating=True)
-        )}},
+    entries.entry.runtime_data = types.SimpleNamespace(
+        generator=types.SimpleNamespace(is_generating=True),
+        calendar=types.SimpleNamespace(_lock=asyncio.Lock(), _closed=False),
     )
+    entries.entry.options = {"unrelated": "retained"}
+    hass = types.SimpleNamespace(config_entries=entries)
     revision = api.read_settings(hass)["revision"]
-    with pytest.raises(api.HomeAssistantError, match="generation"):
-        api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 5}, revision)
-    assert entries.updates == []
+    async with entries.entry.runtime_data.calendar._lock:
+        pending = asyncio.create_task(api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 5}, revision))
+        await asyncio.sleep(0)
+        assert not pending.done() and entries.updates == []
+    result = await pending
+    assert result["changed"] and result["reload"] == "none"
+    assert entries.entry.options["unrelated"] == "retained"
+    assert entries.entry.runtime_data.generator.is_generating
+
+
+@pytest.mark.asyncio
+async def test_revision_rejects_a_recreated_entry_with_identical_settings():
+    hass = types.SimpleNamespace(config_entries=Entries())
+    revision = api.read_settings(hass)["revision"]
+    hass.config_entries.entry.entry_id = "replacement"
+    with pytest.raises(api.StaleSettingsError):
+        await api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 5}, revision)
+    assert hass.config_entries.updates == []
