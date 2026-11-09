@@ -1,6 +1,6 @@
 # Settings review
 
-Status: **unreleased Draft**, stable remains **v0.3.0**. This review covers the
+Status at the time of independent review: **unreleased Draft**, stable **v0.3.0**. This review covers the
 original PR state at `7ac4b74`, the independent corrections through `bf5a79a`, and
 the final bounded media/diagnostics delta. It is not deployment or release approval.
 

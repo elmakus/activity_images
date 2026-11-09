@@ -1,6 +1,6 @@
 # Settings architecture
 
-Status: **unreleased Draft PR**. Stable remains v0.3.0. This document describes
+Status when this architecture was reviewed: **unreleased Draft PR**, stable v0.3.0. This document describes
 the independently corrected implementation, not permission to deploy or release it.
 
 ## Responsibilities and dependency direction
