@@ -104,7 +104,21 @@ Final native-HA measurements also preserved 317:512 at desktop/mobile sizes.
 The fix bounds the replaced image itself and outlines its actual box.
 It does not rewrite files, change thumbnail generation, or repeat canvas migration.
 
-Screenshots and assertion outputs use synthetic data and remain private review artifacts unless explicitly attached to the PR.
+The following review screenshots contain only synthetic test data, not production images.
+Geometry markers and simple circles are intentional fixtures, not changes to the generation style.
+Private authentication data, integrity manifests, and detailed assertion outputs are not committed.
+
+**Desktop gallery — full image composition and actual canvas outlines:**
+
+![Synthetic desktop gallery](images/library-manager-gallery.png)
+
+**Mobile detail — transparency checkerboard with the complete 317 × 512 canvas:**
+
+![Synthetic mobile detail preview](images/library-manager-preview-mobile.png)
+
+**Queue history — accepted/review previews and a deleted-result placeholder:**
+
+![Synthetic queue history](images/library-manager-history.png)
 
 ## Independent review
 
