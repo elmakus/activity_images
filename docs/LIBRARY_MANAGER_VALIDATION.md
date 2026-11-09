@@ -2,9 +2,9 @@
 
 ## Status and boundaries
 
-The development version is **0.2.0.dev0**, based on released **v0.1.0** (`f03ac5589e8ab526c2b66c0a2e271582208addd5`). This report describes isolated development validation, not production acceptance or an official HA quality tier.
+Stable **0.2.0** promotes development **0.2.0.dev0** at `5a798d0975402f25e0948144d1747aab7928734b`, based on released **v0.1.0** (`f03ac5589e8ab526c2b66c0a2e271582208addd5`). Only the component manifest version changes for stable promotion; Python, frontend, translations, and storage formats remain identical. The tests below cover that runtime. This report does not claim an official HA quality tier.
 
-The baseline deployed source was compared file-by-file with the repository and matched. Existing mappings and image assets were copied read-only into an isolated HA environment. No production code, configuration, mappings, dashboards, theme, Home Tasks source, or image files were modified during development. Automatic generation settings were not enabled. No external or paid AI provider request was made.
+The baseline deployed source was compared file-by-file with the repository and matched. Existing mappings and image assets were copied read-only into an isolated HA environment. The isolated development phase did not change production or call an external AI provider. The later, separately approved production validation is recorded below; it is distinct from the fixture-based tests.
 
 ## Automated checks
 
@@ -60,6 +60,14 @@ An isolated benchmark created **4,001 images / 12,003 master-thumbnail-QA files*
 
 The inventory performs disk/image-header work in the executor and reuses fingerprints for unchanged files. Only selected previews and link targets perform full decoding. These measurements are from one development environment, not a performance guarantee for every HAOS storage device.
 
+## Approved production validation and stable promotion
+
+On 2026-11-09, the operator approved deployment of `0.2.0.dev0`, one restart, and one real-provider regeneration for review. All 22 installed component files matched the reviewed commit. The integration loaded on HA Core 2026.11.0 with automatic generation still disabled. Calendar refresh recovered without an error; existing Home Tasks-format PNG reuse passed without another provider call.
+
+The single real-provider request produced a transparent **364 × 512 PNG** with thumbnail and QA variants. It initially remained a review candidate without changing the selected title. Deployment checks preserved all **206 original files**, **66 title associations**, entity IDs, configuration, dashboards, and Home Tasks data. The operator subsequently accepted the gallery's appearance and functionality and authorized the stable release.
+
+Before stable promotion, a new read-only comparison confirmed that all 22 installed files still matched the development commit. The current library contained **209 physical files** and **66 associations**, with no pending or failed jobs. This is the preservation baseline for release work; no additional production AI request or acceptance is needed. The stable promotion itself does not need a production reinstall or restart.
+
 ## Review and remaining limits
 
 Independent reviews found and verified fixes for overlapping frontend mutation locks, calendar writes outliving unload, native Store swallowing disk failures, stale forget predicates, unbounded reads/decodes, manager error-clearing reauthorizing legacy retries, and HA's deferred stopping-state writes. A subsequent focused review accepted lightweight inventory and bounded imported-format reuse.
@@ -75,4 +83,4 @@ Known limits:
 - No physical deletion or Home Tasks image synchronization is implemented.
 - Browser validation used Chromium with a narrow viewport, not a physical iOS/Android device or every companion-app WebView.
 - The isolated full HA environment reported unrelated missing FFmpeg/libturbojpeg facilities. These do not implement this panel or its PNG/AI pipeline; native feature smokes passed. This is not a claim that the entire isolated HA installation had zero warnings.
-- Production install/restart, real-provider acceptance, and production Home Tasks/Calendar Card Pro checks still require operator approval and the deployment checklist.
+- Stable-package replacement on the running development installation has not been performed as part of release preparation. Marketplace detection and package compatibility must be checked after publication; version labels alone do not prove which runtime files are installed.

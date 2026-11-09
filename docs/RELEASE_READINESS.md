@@ -1,5 +1,12 @@
 # Activity Images — release-readiness review (2026-11-03)
 
+> Historical v0.1.0 preparation record. PR #7 was subsequently merged and
+> v0.1.0 published. The blockers and beta requirements below describe that
+> earlier point in time, not the current release. For stable v0.2.0, see
+> [release notes](RELEASE_NOTES_v0.2.0.md),
+> [validation](LIBRARY_MANAGER_VALIDATION.md), and
+> [current installation instructions](INSTALLATION_AND_RELEASE.md).
+
 ## Verified end-to-end
 
 - The user confirmed both Calendar Card Pro and the **unmodified original

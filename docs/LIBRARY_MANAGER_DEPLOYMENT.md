@@ -2,7 +2,9 @@
 
 ## Approval boundary
 
-This is a development branch, not an already deployed release. Do not merge, publish a release, replace the active custom component, reload/restart production, or run a paid provider acceptance test without the operator's approval. Never overwrite the published v0.1.0 tag or its contents.
+Version **0.2.0** promotes the validated `0.2.0.dev0` runtime without changing its Python, frontend, translations, or storage formats. Its only component-file change from development commit `5a798d0975402f25e0948144d1747aab7928734b` is `manifest.json`'s version. The operator approved the stable release process after accepting the gallery. That approval does not require another deployment or restart. Production replacement, reload/restart, and paid generation still require their own applicable approval. Never overwrite published tags or release contents.
+
+For an existing working development installation, compare the exact release package against installed files before deciding whether to update. If all runtime files match, keep it running. Marketplace can advertise the new stable version independently of the running integration's manifest or its own last-installed version. Do not edit Marketplace storage to reconcile those labels. At the next planned maintenance window, the verified stable version can be installed through Marketplace to align its installation record; preserve current data and expect a normal restart prompt. See [installation and updates](INSTALLATION_AND_RELEASE.md#working-development-installations).
 
 The tested target is Home Assistant Core **2026.11.0** on Python **3.14**, with the native frontend and Home Tasks **2.5.0**. Later HA releases require their own validation. No extra server, container, theme change, custom Lovelace resource, or runtime package is required.
 
@@ -20,7 +22,7 @@ The tested target is Home Assistant Core **2026.11.0** on Python **3.14**, with 
 ## Deploy only after approval
 
 1. Stage the candidate custom-component directory separately. Verify its complete manifest and hashes before touching the active directory. Keep the previous directory intact for rollback.
-2. If a release is approved, select a new version and immutable release artifact. Do not silently publish this development branch as v0.1.0.
+2. Select the approved immutable release and verify its tag, commit, manifest version, and complete component file list. The Marketplace installs this repository's tagged `custom_components/activity_images` directory; no generated ZIP asset is required.
 3. Replace only Activity Images code using the instance's supported installation/update path. Never replace the `www/activity_images` directory or rewrite the existing configuration entry as part of a code upgrade.
 4. Prefer reloading the integration when the changed Python modules are actually reimported by the installed HA version. Do not claim that a reload loads replaced Python modules without checking. A code-install restart may be necessary; obtain approval before doing it and perform at most the necessary restart.
 5. Verify entry setup, unchanged entity IDs, and the admin sidebar panel. Confirm that automatic-generation settings remain unchanged and that opening the manager causes no provider request.

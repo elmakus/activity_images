@@ -4,7 +4,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Development version: 0.2.0.dev0. Released baseline: v0.1.0.** This development branch adds an administrator-only image library manager and startup reliability improvements for Home Assistant 2026.11+. Existing image files, associations, entity IDs, actions, prompt, title matching, and Home Tasks integration remain compatible. The completed original migration is not repeated. Historical live AI and Home Tasks validation is recorded in `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`; it is not a claim that the new manager has been deployed.
+**Stable version: 0.2.0.** This release adds an administrator-only image library manager and startup reliability improvements for Home Assistant 2026.11+. Existing image files, associations, entity IDs, actions, prompt, title matching, and Home Tasks integration remain compatible. The completed original migration is not repeated. See [release notes](docs/RELEASE_NOTES_v0.2.0.md) and [validation results](docs/LIBRARY_MANAGER_VALIDATION.md).
 
 ## Capabilities
 
@@ -26,11 +26,13 @@ Standalone activity-icon generator for [Home Assistant](https://www.home-assista
 
 ## Installation
 
-Copy the `custom_components/activity_images` directory to `/config/custom_components/activity_images`, restart Home Assistant, and add **Activity Images** in **Settings → Devices & services**. An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
+On Home Assistant **2026.11.0 or later**, add `elmakus/activity_images` as a custom **Integration** in **Settings → Marketplace** and install the stable release. Restart Home Assistant when prompted, then add **Activity Images** in **Settings → Devices & services**. See [installation, updates and recovery](docs/INSTALLATION_AND_RELEASE.md) for manual installation and existing development builds.
+
+An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
 
-For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). This development branch is not an instruction to overwrite a working installation without approval.
+For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). A working `0.2.0.dev0` installation with identical runtime files does not need an immediate reinstall or restart just to use the stable version label.
 
 ## Image library manager
 
@@ -170,7 +172,7 @@ a new transparent PNG through Activity Images, and the original upstream
 Home Tasks 2.5.0 called the wrapper and reused this cached PNG without
 another paid provider request. A separate test dashboard is available at
 `/home-tasks-image-test/validation`; the user confirmed the original card renders the generated image.
-Keep automatic generation disabled until final release acceptance.
+Automatic generation remains an explicit opt-in; publishing or installing a release does not enable it.
 
 ## Safety and migration
 
@@ -185,7 +187,7 @@ The optional Lucida URL is configured locally; no server address or API credenti
 3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** live sensor and test dashboard D verified (see `docs/STAGE4_FRONTEND_RESULT.md`), with visible icon confirmed by the user.
 4. **Stage 5:** `ai_task.activity_images` wrapper, deployed on new HA and live-tested with unchanged upstream Home Tasks 2.5.0 (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md` and live test report).
 5. **Stage 6 (historical):** migrated 202 assets and 64 mappings and validated real Gemini generation and upstream Home Tasks wrapper/cached image reuse (see `docs/STAGE6_MIGRATION_RESULT.md` and `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`). The v0.1.0 release was published afterward.
-6. **Library manager:** see [design decisions](docs/LIBRARY_MANAGER_DESIGN.md), [validation](docs/LIBRARY_MANAGER_VALIDATION.md), and [safe deployment](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Production deployment and real-provider acceptance require separate approval.
+6. **Library manager:** the operator accepted the validated development build and approved stable v0.2.0. See [design decisions](docs/LIBRARY_MANAGER_DESIGN.md), [validation](docs/LIBRARY_MANAGER_VALIDATION.md), and [safe deployment](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Future production replacements and paid tests still require the applicable approval.
 
 ## Removal
 
