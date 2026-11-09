@@ -5,6 +5,7 @@ import asyncio
 import importlib
 from copy import deepcopy
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import test_behavior as behavior
@@ -392,4 +393,71 @@ async def test_ignored_titles_remain_consumers_for_permanent_deletion(ha, config
     assert plan["items"][0]["needed_titles"] == ["Keep this image"]
     assert plan["items"][0]["safe_without_regeneration"] is False
     assert not ha.services.calls
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_public_clear_errors_never_rearms_unknown_calendar_outcomes(ha, configured, monkeypatch):
+    adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Unknown result"])
+    integration = behavior._load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    ha.data[const.DOMAIN]["synthetic"] = SimpleNamespace(queue=queue)
+    attempts = []
+    call = ha.services.async_call
+
+    async def uncertain(*args, **kwargs):
+        if args[:2] != ("ai_task", "generate_image"):
+            return await call(*args, **kwargs)
+        attempts.append(1)
+        raise TimeoutError("Unknown provider outcome")
+
+    monkeypatch.setattr(ha.services, "async_call", uncertain)
+    await adapter.async_refresh()
+    await queue._run()
+    result = await ha.services.async_call("activity_images", "clear_errors", {})
+    assert result == {"cleared": 1}
+    await adapter.async_refresh()
+    assert attempts == [1] and queue._pending == [] and "unknown result" in queue._retry_blocked
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_ignore_storage_keeps_library_and_manual_candidates_available(ha, monkeypatch):
+    integration = behavior._load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = behavior.MockConfigEntry()
+    entry.options = {const.CONF_CALENDARS: ["calendar.school"], const.CONF_AUTO_GENERATE: True}
+    ha.saved["activity_images_ignored_titles"] = {"titles": "not a list", "revision": 1}
+    monkeypatch.setattr(integration.ActivityImageQueue, "_kick", lambda _self: None)
+
+    async def events(_call):
+        return {"calendar.school": {"events": [{"summary": "Manual despite ignore storage failure"}]}}
+
+    ha.services.async_register("calendar", "get_events", events)
+    assert await integration.async_setup_entry(ha, entry)
+    runtime: Any = entry.runtime_data
+    await runtime.calendar.async_refresh()
+    assert "automatic generation is blocked" in runtime.calendar.status()["ignore_error"]
+    assert runtime.calendar.automatic_sources() == [] and runtime.queue._pending == []
+    assert (await runtime.library.async_list())["total"] == 0 and not ha.services.calls
+    job = await runtime.queue.async_candidate("Manual despite ignore storage failure")
+    await runtime.queue._run()
+    assert runtime.queue._job(job["id"])["state"] == "review" and len(ha.services.calls) == 1
+    assert await integration.async_unload_entry(ha, entry)
+
+
+@pytest.mark.asyncio
+async def test_legacy_trimmed_snapshot_never_invents_an_original_raw_summary(ha, configured, monkeypatch):
+    adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Basen 9:15 "])
+    ha.saved[adapter._store.key] = {"calendar.school": ["Basen 9:15"]}
+    ha.state = "not_running"
+    await adapter.async_setup()
+    await adapter.async_start()
+    assert adapter.calendar_titles == {"calendar.school": ["Basen 9:15"]}
+    assert adapter.raw_occurrences == {} and adapter.automatic_sources() == []
+    assert adapter.status()["stale"] and queue._pending == []
+    ha.state = "running"
+    await adapter.async_refresh_coverage()
+    assert adapter.raw_occurrences["calendar.school"][0]["raw_summary"] == "Basen 9:15 "
+    assert queue._pending == [] and not ha.services.calls
     await adapter.async_shutdown()

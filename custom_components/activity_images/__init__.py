@@ -98,7 +98,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         }
 
     async def clear(call: ServiceCall) -> dict:
-        return {"cleared": await _get_runtime(hass).queue.async_clear_errors()}
+        return {"cleared": await _get_runtime(hass).queue.async_clear_errors(preserve_retry_blocks=True)}
 
     async def link_existing(call: ServiceCall) -> dict:
         """Remember a verified local PNG, without regenerating it."""

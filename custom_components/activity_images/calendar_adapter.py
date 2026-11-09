@@ -73,6 +73,7 @@ class ActivityCalendarAdapter:
         self.ignored_titles: frozenset[str] = frozenset()
         self.ignore_revision = 0
         self._ignores_loaded = False
+        self._ignore_error: str | None = None
         self._verified_config: tuple | None = None
         self._scan_in_progress = False
         self.queue.calendar_authorizer = self.async_authorize_generation
@@ -100,7 +101,16 @@ class ActivityCalendarAdapter:
 
     async def async_setup(self) -> None:
         async with self._lock:
+            await self._try_load_ignores_locked()
+
+    async def _try_load_ignores_locked(self) -> None:
+        try:
             await self._load_ignores_locked()
+        except (ValueError, OSError) as exc:
+            message = f"Ignored-title storage unavailable; automatic generation is blocked: {exc}"
+            if message != self._ignore_error:
+                _LOGGER.error("%s", message)
+            self._ignore_error = message
 
     async def _load_ignores_locked(self) -> None:
         if self._ignores_loaded:
@@ -115,6 +125,7 @@ class ActivityCalendarAdapter:
             self.ignored_titles = frozenset(data["titles"])
             self.ignore_revision = data["revision"]
         self._ignores_loaded = True
+        self._ignore_error = None
 
     async def async_ignore(self, raw_summary: str, ignored: bool, revision: int) -> dict:
         """Persist exact HA summaries before acknowledging an authorization change."""
@@ -450,7 +461,7 @@ class ActivityCalendarAdapter:
             end = now + timedelta(days=self.lookahead_days)
             self._scan_in_progress = True
             try:
-                await self._load_ignores_locked()
+                await self._try_load_ignores_locked()
                 if not self.hass.services.has_service("calendar", "get_events"):
                     raise ValueError("calendar.get_events is not ready")
                 bindings = dict(self._policy_bindings())
@@ -602,7 +613,8 @@ class ActivityCalendarAdapter:
             "tracked_titles": sum(len(items) for items in self.calendar_titles.values()),
             "images": len(self.images),
             "last_scan": self.last_scan,
-            "error": self.last_error,
+            "error": self.last_error or self._ignore_error,
+            "ignore_error": self._ignore_error,
             "automatic_generation": bool(calendar_auto_ids(self.settings)),
             "complete": not self._demand_truncated and not self.coverage_stale(),
             "stale": self.coverage_stale(),
