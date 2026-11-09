@@ -4,7 +4,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Release candidate v0.1.0 (not yet published):** the standalone library and native AI Task wrapper run on new HA `192.168.2.180`. **202 PNG/WebP assets and 64 legacy mappings** were migrated. The real CLIProxyAPI/Gemini provider was connected; a single `Playing the Cello` PNG with transparent background was successfully generated. **Unmodified upstream Home Tasks 2.5.0** then called `ai_task.activity_images`, reused that image with no further provider request, and saved an identical PNG to its own test task. The user confirmed the image also renders correctly in the original Home Tasks test dashboard. Automatic generation remains disabled. See `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`.
+**Development version: 0.2.0.dev0. Released baseline: v0.1.0.** This development branch adds an administrator-only image library manager and startup reliability improvements for Home Assistant 2026.11+. Existing image files, associations, entity IDs, actions, prompt, title matching, and Home Tasks integration remain compatible. The completed original migration is not repeated. Historical live AI and Home Tasks validation is recorded in `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`; it is not a claim that the new manager has been deployed.
 
 ## Capabilities
 
@@ -13,20 +13,45 @@ Standalone activity-icon generator for [Home Assistant](https://www.home-assista
 - Optional `media-source://` reference image passed as an AI Task attachment
 - Optional **Lucida** background removal using a user-configured trusted endpoint; deterministic Pillow-based fallback
 - Output normalized transparent PNG masters, WebP thumbnails, and light/dark QA previews
-- Persistent normalized-title cache, conservative similar-title matching, 2,000-image LRU index
+- Persistent normalized-title associations and unchanged conservative similar-title matching; tested with 4,001 unique images, with no capacity-based eviction
 - Persistent background queue, unique-title deduplication, **no cooldown**, failure tracking and no automatic requeue of failed titles
 - Maximum **three total provider requests** for transient HTTP 429/5xx, timeouts and connection failures, with bounded exponential backoff and Retry-After when available; permanent errors are not retried.
 - Watch up to 10 selected `calendar.*` entities, scan upcoming events (30 days by default, up to 60), and safely resolve at most 64 distinct titles with 15-minute polling plus calendar state-change refreshes.
 - Publish `sensor.activity_images_library` with the `images` map and pre-escaped `calendar_rules` attribute for Auto-Entities + Calendar Card Pro; refresh after each newly generated PNG.
 - Automatically generating missing calendar illustrations is **off by default** to prevent surprise provider usage. Enable it in the integration's options after reviewing the existing library.
 - Expose an optional `ai_task.activity_images` wrapper for unmodified upstream Home Tasks. The wrapper extracts the task title from the official upstream request, builds the full original prompt, and returns the processed PNG through the official AI Task entity interface. The wrapper was deployed and verified with unmodified Home Tasks 2.5.0 on the test Home Assistant.
-- Existing files survive cache eviction. No changes to Home Tasks or other Home Assistant integrations.
+- Administrator-only library panel with paginated gallery, search, aliases, PNG/thumbnail/QA previews, title assignment, and unlinking without file deletion
+- Explicit paid candidate generation and regeneration, review before acceptance, persistent jobs, bounded retries, and manual retry after interruption
+- Existing files and useful associations are retained independently of library size. No changes to Home Tasks or other Home Assistant integrations.
 
-## Manual installation (release pending)
+## Installation
 
 Copy the `custom_components/activity_images` directory to `/config/custom_components/activity_images`, restart Home Assistant, and add **Activity Images** in **Settings → Devices & services**. An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
 
-Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`.
+Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
+
+For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). This development branch is not an instruction to overwrite a working installation without approval.
+
+## Image library manager
+
+Open **Activity Images** in the Home Assistant sidebar as an administrator, or navigate to `/activity-images`. No dashboard changes, Lovelace resources, custom cards, or external server are required. The panel respects the active Home Assistant theme, including Lumina; it does not modify themes.
+
+- **Library:** browse all supported image files in the integration's directory, not just calendar matches. Recognized PNG masters, thumbnails, and QA variants appear once. Standalone files without associations also appear. Search matches titles, aliases, and filenames. Filters are **All images**, **Linked**, **Unlinked**, and **Generated**.
+- **Details:** inspect the master, available thumbnail/QA previews, dimensions, format, filename, associated titles, and reliable dates. Old assets have **unknown** origin unless explicit metadata exists; a hash is not evidence of generation or import. Modification time is not creation time. There is no guessed Imported filter.
+- **Assign title:** reuse the selected image without contacting AI. Replacing another exact title association requires confirmation. Other aliases remain unchanged.
+- **Unlink:** remove one confirmed title association. Files and other titles remain. **Unlinked does not mean safe to delete**: dashboards, Home Tasks, or other integrations may still use the file.
+- **Generate new image / Regenerate:** enter a title or choose exactly one existing alias, then explicitly authorize the potentially paid request. The shared AI Task/reference/Lucida pipeline creates a new file and leaves the current mapping unchanged. Review the candidate, then **Accept for this title** or **Discard candidate**. Discard never deletes files. Acceptance rejects a stale request if another operation changed that title's mapping.
+- **Queue & history:** inspect running/pending jobs, failures, candidates and the last 100 terminal records. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted manual requests are not replayed after restart; pending legacy background work remains persistent.
+
+The manager's **Clear recorded errors** only clears displayed errors; it retains a persisted retry barrier and does not authorize another paid attempt. The existing public `activity_images.clear_errors` action retains its original clear-and-requeue behavior for legacy background jobs. Existing automatic-generation options are not enabled or changed by the panel.
+
+The library supports at least **4,000 unique images**, not a deletion threshold. There is no LRU eviction of associations and no physical deletion action. Gallery pages contain at most 96 records (the panel uses 48), with lazy authenticated previews. The inventory checks image headers/structure without decoding the entire collection; previews and linking perform full decoding. Files over **20 MiB** or **25 million pixels**, unsupported formats, corrupt files, and symlinks are excluded or rejected. Supported standalone formats are PNG, WebP, JPEG, and GIF. Inventory refreshes on demand, after generated assets, or after its short cache expires. Offset pagination reflects the current collection, not an immutable snapshot.
+
+The unchanged Home Tasks AI Task interface receives PNG bytes. Reusing a linked WebP/JPEG/GIF converts that result to PNG in memory, without changing its library source file or contacting AI. Existing PNG bytes remain unchanged; animated formats use their first frame.
+
+Regeneration in Activity Images does **not** replace copies previously saved by Home Tasks. See [future synchronization options and limits](docs/LIBRARY_MANAGER_DESIGN.md#future-home-tasks-synchronization).
+
+## Public actions
 
 The built-in services are usable in **Developer Tools → Actions**. For a synchronous generation, call:
 
@@ -59,14 +84,14 @@ data:
   image_url: /local/activity_images/stage4_green_waste.png
 ```
 
-The action immediately returns cached `images`, `image_metadata`, the newly `queued` titles, and `queue_size`. A request may include **1–64 activity titles**, each up to 255 characters. Query `activity_images.queue_status` for pending and failed titles. The actions are registered once at integration startup; without a configured generator they return a clear error. Queued work runs independently of an open dashboard. On terminal failure a title is stored in `failed` and is **not** retried automatically on future scans. Use `activity_images.clear_errors` to permit a fresh attempt. `activity_images.cancel_queued` cancels waiting titles; `activity_images.forget_image` removes cached mappings without deleting PNG/WebP files. The generator does **not** yet automatically discover Home Tasks tasks. Selected calendar events are scanned independently of any dashboard.
+`activity_images.resolve_images` returns cached `images`, `image_metadata`, the newly `queued` titles, and `queue_size`. A request may include **1–64 activity titles**, each up to 255 characters. Query `activity_images.queue_status` for pending and failed titles. The actions are registered once at integration startup; without a configured generator they return a clear error. Queued work runs independently of an open dashboard. On terminal failure a title is stored in `failed` and is **not** retried automatically on future scans. Use `activity_images.clear_errors` to permit a fresh attempt. `activity_images.cancel_queued` cancels waiting titles; `activity_images.forget_image` removes cached mappings without deleting PNG/WebP files. The generator does **not** yet automatically discover Home Tasks tasks. Selected calendar events are scanned independently of any dashboard.
 
 ## Calendar library
 
 Select calendars in **Settings → Devices & services → Activity Images → Configure**.
-The new `sensor.activity_images_library` provides the cached URLs in the `images`
-attribute and an already escaped, bounded list of Calendar Card Pro entries in
-`calendar_rules`. The sensor's state is the number of matching cached images.
+`sensor.activity_images_library` continues to expose only the selected calendars' bounded image map in the `images` attribute and Calendar Card Pro entries in `calendar_rules`. It is not the complete gallery. The sensor's state is the number of matching calendar titles.
+
+Calendar scans start after Home Assistant reaches its running state. Temporary failures retain the last successful title snapshot and image mappings, then retry after 5, 15, and 30 seconds. Normal 15-minute refreshes and state-change listeners remain active after the bounded retry sequence. Setup does not wait for calendar services or retry sleeps. Reload/unload removes timers and listeners and drains an already-started snapshot write.
 
 The stage-4 Card Pro configuration, now displaying a real sensor-backed image on the user's test HA, is:
 
@@ -149,7 +174,7 @@ Keep automatic generation disabled until final release acceptance.
 
 ## Safety and migration
 
-The old Home Tasks fork, its `.storage` state and its generated files remain untouched. This stage creates its own `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` files. Do not run automatic generation from both engines against the same tasks during later migration.
+Home Tasks source, `.storage` state, and generated files remain untouched. Activity Images retains its existing `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` envelopes with additive metadata. A new `.storage/activity_images_calendar_snapshot` stores only bounded titles for selected calendars. Verified atomic saves detect native Store write failures instead of reporting an unpersisted association as saved. There is no new migration of the original image collection and no automatic file cleanup.
 
 The optional Lucida URL is configured locally; no server address or API credential is embedded in this repository. Generated image URLs are not automatically written to external services. Review generated images and QA previews before relying on them for important displays.
 
@@ -159,7 +184,12 @@ The optional Lucida URL is configured locally; no server address or API credenti
 2. **Stage 2:** independent title resolution, six Home Assistant actions and unload/reload lifecycle (see `docs/STAGE2_STANDALONE_RESULT.md`).
 3. **Stage 3:** selected calendar watcher + bounded library sensor (see `docs/STAGE3_CALENDAR_RESULT.md`). **Stage 4:** live sensor and test dashboard D verified (see `docs/STAGE4_FRONTEND_RESULT.md`), with visible icon confirmed by the user.
 4. **Stage 5:** `ai_task.activity_images` wrapper, deployed on new HA and live-tested with unchanged upstream Home Tasks 2.5.0 (see `docs/STAGE5_AI_TASK_WRAPPER_RESULT.md` and live test report).
-5. **Stage 6:** migrated 202 images and 64 mappings, validated real Gemini generation and upstream Home Tasks wrapper/cached image reuse (see `docs/STAGE6_MIGRATION_RESULT.md` and `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`). Browser confirmation passed; Marketplace/HACS validation and the first release remain pending.
+5. **Stage 6 (historical):** migrated 202 assets and 64 mappings and validated real Gemini generation and upstream Home Tasks wrapper/cached image reuse (see `docs/STAGE6_MIGRATION_RESULT.md` and `docs/STAGE6_LIVE_AI_AND_HOME_TASKS_VALIDATION.md`). The v0.1.0 release was published afterward.
+6. **Library manager:** see [design decisions](docs/LIBRARY_MANAGER_DESIGN.md), [validation](docs/LIBRARY_MANAGER_VALIDATION.md), and [safe deployment](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Production deployment and real-provider acceptance require separate approval.
+
+## Removal
+
+Remove the Activity Images entry from **Settings → Devices & services**. Its panel, platform entities, timers, and queue worker unload. Existing image files are not deleted. Stop any automations that call its actions before uninstalling the custom component. Keep the library directory and its storage files if a future reinstall or rollback may need them; do not treat an unlinked image as unused elsewhere.
 
 ## Attribution
 

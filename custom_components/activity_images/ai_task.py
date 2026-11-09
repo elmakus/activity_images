@@ -129,7 +129,7 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
             image_data, width, height = await self.hass.async_add_executor_job(
                 _read_png, path
             )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
             raise HomeAssistantError(
                 "Unable to read processed Activity Images PNG"
             ) from exc
