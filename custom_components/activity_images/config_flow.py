@@ -1,15 +1,21 @@
 """UI setup and options for the standalone Activity Images generator."""
 from __future__ import annotations
 
-import voluptuous as vol
+import probatio as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
-    DOMAIN, CONF_AI_ENTITY, CONF_REFERENCE_MEDIA_ID, CONF_LUCIDA_URL,
-    CONF_CALENDARS, CONF_LOOKAHEAD_DAYS, CONF_AUTO_GENERATE,
-    DEFAULT_LOOKAHEAD_DAYS, MAX_CALENDARS,
+    CONF_AI_ENTITY,
+    CONF_AUTO_GENERATE,
+    CONF_CALENDARS,
+    CONF_LOOKAHEAD_DAYS,
+    CONF_LUCIDA_URL,
+    CONF_REFERENCE_MEDIA_ID,
+    DEFAULT_LOOKAHEAD_DAYS,
+    DOMAIN,
+    MAX_CALENDARS,
 )
 
 

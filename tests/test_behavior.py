@@ -3,6 +3,11 @@
 Fake HA storage, media and AI Task service exercise real generator, cache, queue,
 Pillow pipeline and persistence. No real provider calls or existing HA data.
 """
+# The HA-free harness deliberately supplies dynamic modules and runtime state.
+# pyright: reportAttributeAccessIssue=false
+# pyright: reportOptionalMemberAccess=false
+# pyright: reportArgumentType=false
+# pyright: reportGeneralTypeIssues=false
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +20,6 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from PIL import Image, ImageDraw
-
 
 ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "activity_images"
 
@@ -518,8 +522,9 @@ async def test_lucida_valid_transparency_is_used(ha, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_lucida_failure_uses_original_fallback(ha, monkeypatch):
-    import aiohttp
     from io import BytesIO
+
+    import aiohttp
 
     opaque = Image.new("RGB", (64, 64), (255, 255, 255))
     raw = BytesIO()
@@ -784,7 +789,8 @@ async def test_engine_401_does_not_retry_or_cache(ha, configured, monkeypatch):
 # registrations with a fake HA service registry, without touching the user's HA.
 def _load_integration_entrypoint():
     import importlib.util
-    import voluptuous as vol
+
+    import probatio as vol
 
     if "homeassistant.config_entries" not in sys.modules:
         _package("homeassistant.config_entries")
@@ -820,8 +826,8 @@ def _load_integration_entrypoint():
         _package("homeassistant.util")
     if "homeassistant.util.dt" not in sys.modules:
         _package("homeassistant.util.dt")
-    from datetime import datetime, timezone
-    sys.modules["homeassistant.util.dt"].now = lambda: datetime.now(timezone.utc)
+    from datetime import UTC, datetime
+    sys.modules["homeassistant.util.dt"].now = lambda: datetime.now(UTC)
     sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
     core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
     sys.modules["homeassistant.config_entries"].ConfigEntry = object
@@ -925,7 +931,7 @@ async def test_actions_register_once_in_setup_before_config_entry(ha, configured
 
 @pytest.mark.asyncio
 async def test_actions_queue_and_validate_request_limits(ha, monkeypatch):
-    import voluptuous as vol
+    import probatio as vol
 
     integration = _load_integration_entrypoint()
     assert await integration.async_setup(ha, {})
@@ -989,7 +995,9 @@ async def test_unload_and_reconfigure_keep_services_and_cached_images(ha):
 def _calendar_test_setup(ha, configured, monkeypatch, events, *,
                          enabled=False, calendars=("calendar.school",)):
     integration = _load_integration_entrypoint()
-    from custom_components.activity_images.calendar_adapter import ActivityCalendarAdapter
+    from custom_components.activity_images.calendar_adapter import (
+        ActivityCalendarAdapter,
+    )
 
     cache, engine = configured
     queue = queue_module.ActivityImageQueue(ha, engine)
@@ -1011,6 +1019,7 @@ def _calendar_test_setup(ha, configured, monkeypatch, events, *,
 def test_calendar_rules_escaped_for_js_regex():
     _load_integration_entrypoint()
     import re
+
     from custom_components.activity_images.calendar_adapter import escape_event_title
     samples = [
         "Dentist (Hanna) + checkup?",
@@ -1438,7 +1447,7 @@ async def test_wrapper_rejects_extra_attachments(ha):
     task = ai.GenImageTask(
         name="home_tasks_ef",
         instructions="School\n\nThe image must have a square 1:1 aspect ratio.",
-        attachments=[SimpleNamespace(path="/tmp/random.jpg")],
+        attachments=[SimpleNamespace(path=ha.base / "rejected-attachment.jpg")],
     )
     with pytest.raises(wrapper_module.HomeAssistantError, match="does not accept"):
         await entity._async_generate_image(task, SimpleNamespace(conversation_id="test"))

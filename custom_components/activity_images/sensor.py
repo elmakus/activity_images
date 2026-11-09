@@ -32,13 +32,13 @@ class ActivityImagesLibrarySensor(SensorEntity):
         self._unsubscribe = None
 
     @property
-    def native_value(self) -> int:
-        """Number of calendar titles with a usable image."""
+    def native_value(self) -> int:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Keep the count dynamic rather than caching the initial calendar map."""
         return len(self._calendar.images)
 
     @property
-    def extra_state_attributes(self) -> dict:
-        """Expose a safe, bounded map and ready-to-render Calendar Card Pro rules."""
+    def extra_state_attributes(self) -> dict:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Keep the bounded image map and Calendar Card Pro rules dynamic."""
         return {
             "images": dict(self._calendar.images),
             "calendar_rules": self._calendar.rules,

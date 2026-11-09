@@ -1,4 +1,4 @@
-"""Standalone Activity Images integration and public actions.
+"""Standalone Activity Images library manager and compatible public actions.
 
 The image engine, matching cache, and graphics pipeline are kept independent
 from Home Tasks. Actions are registered in async_setup, as recommended by HA.
@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import voluptuous as vol
+import probatio as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError

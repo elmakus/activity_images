@@ -1,4 +1,4 @@
-"""Real Home Assistant Core 2026.10.4 action-registry smoke test.
+"""Real Home Assistant Core 2026.11.0 action-registry smoke test.
 
 No connected Home Assistant modified; no real AI provider calls.
 """
@@ -147,6 +147,6 @@ async def run():
             else:
                 raise AssertionError("Service should reject calls after unload")
 
-        print("ACTUAL_HA_2026_10_4_CALENDAR_SMOKE_PASS", len(provider_calls), first["image_url"])
+        print("ACTUAL_HA_2026_11_CALENDAR_SMOKE_PASS", len(provider_calls), first["image_url"])
 
 asyncio.run(run())
