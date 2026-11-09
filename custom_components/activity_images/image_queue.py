@@ -261,10 +261,10 @@ class ActivityImageQueue:
             if existing := self._manual(title):
                 return self._public_job(existing)
             if any(normalize_title(t) == normalize_title(title) for t in self._pending):
-                job = self._new_job(title, "background")
-                job["id"] = "legacy:" + normalize_title(title)
-                job["state"] = "running" if self._current and normalize_title(self._current) == normalize_title(title) else "pending"
-                return self._public_job(job)
+                raise ValueError(
+                    "A background job already exists for this title. Wait for it or cancel "
+                    "the waiting job before requesting a fresh candidate."
+                )
             job = self._new_job(title, "manual")
             self._manual_blocked.add(normalize_title(title))
             self._jobs.append(job)

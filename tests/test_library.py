@@ -255,6 +255,27 @@ async def test_manual_candidates_review_accept_cas_and_discard(ha, configured):
 
 
 @pytest.mark.asyncio
+async def test_manual_regeneration_never_silently_reuses_a_background_job(ha, configured, monkeypatch):
+    cache, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_setup()
+    assert await queue.async_enqueue(["Selected activity"]) == ["Selected activity"]
+    path = picture(ha, "linked-after-enqueue.png")
+    await cache.async_link("Selected activity", "/local/activity_images/" + path.name)
+    library = ActivityImageLibrary(ha, cache)
+    with pytest.raises(ValueError, match="background job already exists"):
+        await library.async_generate(queue, "Selected activity", library.image_id(path.name))
+    assert ha.services.calls == []
+    assert queue.status()["pending"] == ["Selected activity"]
+    assert queue.status()["jobs"] == []
+    assert await queue.async_cancel(["Selected activity"]) == 1
+    job = await library.async_generate(queue, "Selected activity", library.image_id(path.name))
+    assert job["kind"] == "manual" and job["state"] == "pending"
+    await queue.async_shutdown()
+
+
+@pytest.mark.asyncio
 async def test_manual_interrupted_restart_requires_explicit_retry(ha, configured):
     cache, engine = configured
     started = asyncio.Event()
