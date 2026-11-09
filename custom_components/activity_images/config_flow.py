@@ -8,8 +8,9 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
 from .const import (
+    CALENDAR_BINDINGS,
     CONF_AI_ENTITY,
-    CONF_AUTO_GENERATE,
+    CONF_AUTO_CALENDARS,
     CONF_CALENDARS,
     CONF_LOOKAHEAD_DAYS,
     CONF_LUCIDA_URL,
@@ -19,7 +20,7 @@ from .const import (
     DOMAIN,
 )
 from .prompts import DEFAULT_PROMPT_TEMPLATE
-from .settings import StaleSettingsError, options_for_update, revision, settings_lock
+from .settings import StaleSettingsError, calendar_identity, options_for_update, revision, settings_lock
 from .settings_schema import effective_settings, validate_settings
 
 
@@ -55,10 +56,9 @@ def schema(settings: dict | None = None) -> vol.Schema:
             CONF_LOOKAHEAD_DAYS,
             default=settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS),
         ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
-        vol.Required(
-            CONF_AUTO_GENERATE,
-            default=settings.get(CONF_AUTO_GENERATE, False),
-        ): selector.BooleanSelector(),
+        vol.Optional(
+            CONF_AUTO_CALENDARS, default=settings.get(CONF_AUTO_CALENDARS, []),
+        ): selector.EntitySelector(selector.EntitySelectorConfig(domain="calendar", multiple=True)),
     })
 
 
@@ -71,21 +71,39 @@ def _form_settings(data: dict) -> dict:
     return validate_settings(values)
 
 
+def paid_confirmation_schema():
+    return vol.Schema({vol.Required("confirm_paid", default=False): selector.BooleanSelector()})
+
+
 class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
+
+    async def _finish(self):
+        await self.async_set_unique_id(DOMAIN)
+        self._abort_if_unique_id_configured()
+        bindings = {entity: calendar_identity(self.hass, entity) for entity in self._pending_values[CONF_CALENDARS]}
+        return self.async_create_entry(title="Activity Images", data={**self._pending_values, CALENDAR_BINDINGS: bindings})
 
     async def async_step_user(self, user_input=None):
         errors = {}
         if user_input is not None:
             try:
-                values = _form_settings(user_input)
+                self._pending_values = _form_settings(user_input)
             except ValueError:
                 errors["base"] = "invalid_settings"
             else:
-                await self.async_set_unique_id(DOMAIN)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(title="Activity Images", data=values)
+                if self._pending_values[CONF_AUTO_CALENDARS]:
+                    return await self.async_step_confirm_auto()
+                return await self._finish()
         return self.async_show_form(step_id="user", data_schema=schema(user_input), errors=errors)
+
+    async def async_step_confirm_auto(self, user_input=None):
+        if user_input and user_input.get("confirm_paid") is True:
+            return await self._finish()
+        return self.async_show_form(
+            step_id="confirm_auto", data_schema=paid_confirmation_schema(),
+            description_placeholders={"calendars": ", ".join(self._pending_values[CONF_AUTO_CALENDARS])},
+        )
 
     @staticmethod
     @callback
@@ -107,9 +125,13 @@ class ActivityImagesOptionsFlow(config_entries.OptionsFlow):
                 async with settings_lock(entry):
                     # The full native form can omit a cleared optional provider.
                     values = _form_settings(user_input)
-                    options = options_for_update(entry, values, self._revision)
-                    # HA's flow manager persists this result without another await.
-                    return self.async_create_entry(title="", data=options)
+                    options = options_for_update(self.hass, entry, values, self._revision)
+                    if set(values[CONF_AUTO_CALENDARS]) - set(effective_settings(entry)[CONF_AUTO_CALENDARS]):
+                        self._pending_values = values
+                    else:
+                        # HA's flow manager persists this result without another await.
+                        return self.async_create_entry(title="", data=options)
+                return await self.async_step_confirm_auto()
             except StaleSettingsError:
                 errors["base"] = "settings_conflict"
             except (ValueError, HomeAssistantError):
@@ -117,4 +139,22 @@ class ActivityImagesOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="init", data_schema=schema(user_input if user_input is not None else effective_settings(entry)),
             errors=errors,
+        )
+
+    async def async_step_confirm_auto(self, user_input=None):
+        expected_revision = self._revision
+        if expected_revision is None:
+            return self.async_abort(reason="invalid_settings")
+        if user_input and user_input.get("confirm_paid") is True:
+            try:
+                async with settings_lock(self.config_entry):
+                    options = options_for_update(self.hass, self.config_entry, self._pending_values, expected_revision)
+                    return self.async_create_entry(title="", data=options)
+            except StaleSettingsError:
+                return self.async_abort(reason="settings_conflict")
+            except (ValueError, HomeAssistantError):
+                return self.async_abort(reason="invalid_settings")
+        return self.async_show_form(
+            step_id="confirm_auto", data_schema=paid_confirmation_schema(),
+            description_placeholders={"calendars": ", ".join(self._pending_values[CONF_AUTO_CALENDARS])},
         )

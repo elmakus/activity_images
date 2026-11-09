@@ -1,4 +1,4 @@
-"""Bounded provider retries. No retries for permanent or unclassified errors."""
+"""Bounded retries for explicit rate-limit rejection, never unknown outcomes."""
 from __future__ import annotations
 
 import asyncio
@@ -6,8 +6,6 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import logging
 from typing import Awaitable, Callable, TypeVar
-
-import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -42,16 +40,9 @@ def _transient(exc: BaseException) -> bool:
     for item in _chain(exc):
         status = _status(item)
         if status is not None:
-            if status == 429 or 500 <= status <= 599:
-                return True
-            # Explicit HTTP failures (400, 401, 403, ...) are permanent,
-            # even when a provider presents them using a generic exception.
-            return False
-        if isinstance(
-            item, (TimeoutError, ConnectionError,
-                   aiohttp.ClientConnectionError, aiohttp.ClientPayloadError),
-        ):
-            return True
+            # A timeout, disconnect or 5xx can follow accepted billable work.
+            # Only an explicit 429 rejection authorizes an automatic retry.
+            return status == 429
     return False
 
 
@@ -79,7 +70,7 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
 
 
 async def async_retry_transient(operation: Callable[[], Awaitable[T]]) -> T:
-    """Perform at most 3 provider requests, respecting bounded Retry-After."""
+    """At most 3 rate-limit-rejected attempts; other outcomes need explicit retry."""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             return await operation()

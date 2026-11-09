@@ -174,6 +174,11 @@ async def async_register_manager(hass) -> None:
                 str(Path(__file__).parent / "frontend" / "settings"),
                 False,
             ),
+            StaticPathConfig(
+                "/activity_images/coverage",
+                str(Path(__file__).parent / "frontend" / "coverage"),
+                False,
+            ),
         ])
         registered.add("static")
     if "http" not in registered:
@@ -186,6 +191,8 @@ async def async_register_manager(hass) -> None:
             websocket_api.async_register_command(hass, _handler(command, fields))
         from .settings_api import async_register_settings
         async_register_settings(hass)
+        from .calendar_api import async_register_calendar_api
+        async_register_calendar_api(hass)
         registered.add("ws")
     await panel_custom.async_register_panel(
         hass, frontend_url_path=PANEL_ROUTE, webcomponent_name="activity-images-panel",

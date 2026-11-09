@@ -15,8 +15,10 @@ from unittest.mock import patch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from homeassistant.config_entries import ConfigEntries  # noqa: E402
 from homeassistant.core import CoreState, HomeAssistant, SupportsResponse  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
+from homeassistant.helpers import entity_registry as er  # noqa: E402
 
 from custom_components.activity_images import (  # noqa: E402
     async_setup,
@@ -46,6 +48,9 @@ async def run():
         hass.states.async_set("calendar.demo", "off")
         from smoke_library_ha import prepare_http
         await prepare_http(hass)
+        hass.config_entries = ConfigEntries(hass, {})
+        await hass.config_entries.async_initialize()
+        await er.async_load(hass)
 
         assert await async_setup(hass, {})
         assert hass.services.has_service("activity_images", "generate_image")
@@ -104,6 +109,7 @@ async def run():
         hass.config_entries = SimpleNamespace(
             async_forward_entry_setups=fake_forward,
             async_unload_platforms=fake_unload,
+            async_update_entry=lambda item, *, options: setattr(item, "options", options),
         )
         with patch(
             "custom_components.activity_images.generated_image.async_resolve_media",

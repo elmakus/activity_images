@@ -24,12 +24,13 @@ async def settings_get_handler(hass, connection, msg):
     "type": f"{DOMAIN}/settings/save",
     vol.Required("values"): dict,
     vol.Required("revision"): vol.All(str, vol.Length(min=64, max=64)),
+    vol.Optional("confirm_auto", default=False): bool,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
 async def settings_save_handler(hass, connection, msg):
     try:
-        result = await save_settings(hass, msg["values"], msg["revision"])
+        result = await save_settings(hass, msg["values"], msg["revision"], confirm_auto=msg.get("confirm_auto", False))
     except StaleSettingsError as exc:
         connection.send_error(msg["id"], "settings_conflict", str(exc))
     except (ValueError, HomeAssistantError) as exc:

@@ -60,7 +60,7 @@ async def test_read_noop_update_and_real_update():
 async def test_stale_editor_and_invalid_changes_do_not_persist():
     hass = types.SimpleNamespace(config_entries=Entries())
     original = api.read_settings(hass)["revision"]
-    await api.save_settings(hass, {const.CONF_AUTO_GENERATE: True}, original)
+    await api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 14}, original)
     with pytest.raises(api.StaleSettingsError):
         await api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 3}, original)
     with pytest.raises(ValueError):

@@ -28,6 +28,7 @@ from homeassistant.core import (  # noqa: E402
     ServiceResponse,
     SupportsResponse,
 )
+from homeassistant.helpers import entity_registry as er  # noqa: E402
 from smoke_library_ha import prepare_http  # noqa: E402
 
 from custom_components.activity_images import (  # noqa: E402
@@ -57,6 +58,7 @@ from custom_components.activity_images.settings import (  # noqa: E402
 def form_input(values):
     """Use the same optional entity/media value shapes as HA's native form."""
     data = dict(values)
+    data.pop(CONF_AUTO_GENERATE, None)  # Legacy input is not an editable native field.
     if not data.get(CONF_AI_ENTITY):
         data.pop(CONF_AI_ENTITY, None)
     reference = data.pop(CONF_REFERENCE_MEDIA_ID, "")
@@ -73,6 +75,7 @@ async def run():
         await prepare_http(hass)
         manager = hass.config_entries = ConfigEntries(hass, {})
         await manager.async_initialize()
+        await er.async_load(hass)
         entry = ConfigEntry(domain=DOMAIN, title="Activity Images", version=1, minor_version=1,
                             source="user", unique_id=DOMAIN, subentries_data=None, discovery_keys=MappingProxyType({}),
                             data={CONF_AI_ENTITY:"ai_task.before", CONF_AUTO_GENERATE:True},
@@ -230,7 +233,7 @@ async def run():
             await hass.async_block_till_done()
             assert not runtime.calendar.calendar_titles and not runtime.calendar.images
             assert runtime.calendar._state_unsubscribe is None
-            assert await runtime.calendar._store.async_load() == {}
+            assert await runtime.calendar._store.async_load() == runtime.calendar._snapshot()
             assert len(calls) == 3  # No implicit AI calls from saving, previews or scans.
             reload_entry.assert_not_called()
 

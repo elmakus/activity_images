@@ -23,6 +23,7 @@ from .image_cache import ActivityImageCache, async_get_cache
 from .image_queue import ActivityImageQueue
 from .library import ActivityImageLibrary, _read_owned, _verify, validate_title
 from .library_deletion import ActivityImageDeletions
+from .settings import migrate_calendar_options
 from .settings_schema import ConfigEntrySettings
 
 _LOGGER = logging.getLogger(__name__)
@@ -190,6 +191,7 @@ async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Load the one independent image generator and its persistent queue."""
+    migrate_calendar_options(hass, entry)
     settings = ConfigEntrySettings(entry)
     cache = await async_get_cache(hass)
     generator = ActivityImageGenerator(hass, cache, settings)
@@ -207,6 +209,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await _async_register_manager(hass)
         manager_registered = True
+        await calendar.async_setup()
         await queue.async_setup()
         await runtime.deletions.async_setup()
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "ai_task"])

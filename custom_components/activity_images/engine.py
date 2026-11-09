@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -29,6 +29,10 @@ def generation_stem(title: str, nonce: str) -> str:
     return hashlib.sha256(normalize_title(title).encode("utf-8")).hexdigest()[:16] + "_" + nonce
 
 
+class GenerationSuppressed(ValueError):
+    """An automatic job lost authorization before a new paid provider attempt."""
+
+
 class ActivityImageGenerator:
     def __init__(self, hass: HomeAssistant, cache: ActivityImageCache, settings: Mapping) -> None:
         self.hass = hass
@@ -47,7 +51,7 @@ class ActivityImageGenerator:
         result = await self.async_generate(title, force=True)
         return result["image_url"]
 
-    async def async_generate(self, title: str, *, force: bool = False, remember: bool = True, deletion: dict | None = None) -> dict:
+    async def async_generate(self, title: str, *, force: bool = False, remember: bool = True, deletion: dict | None = None, authorize: Callable[[], Awaitable[None]] | None = None) -> dict:
         """Resolve existing or create a new image and return its public URL."""
         title = title.strip()
         if not title or len(title) > 255:
@@ -82,6 +86,9 @@ class ActivityImageGenerator:
                 # Native media resolution supplies the actual MIME, including JPEG/WebP.
                 payload["attachments"] = [{"media_content_id": reference}]
             async def request_image():
+                # This runs after all lock/I/O waits, and again before each retry.
+                if authorize is not None:
+                    await authorize()
                 return await self.hass.services.async_call(
                     "ai_task", "generate_image", payload,
                     blocking=True, return_response=True,
