@@ -566,7 +566,7 @@
       this._dialog.append(el("p", "The activity check covers selected calendars within the configured lookahead only. Later events and external uses cannot be verified."));
       if (plan.calendar_warning) this._dialog.append(el("p", plan.calendar_warning, "error"));
       const requests = plan.replacement_requests;
-      this._dialog.append(el("p", `${requests} new AI generation request${requests === 1 ? "" : "s"} ${operationId ? "remain" : "may be required"}. Existing retry limits allow up to ${plan.max_provider_attempts} provider attempts in total. Provider charges may apply to failed or timed-out attempts.`));
+      this._dialog.append(el("p", `${requests} new AI generation request${requests === 1 ? "" : "s"} ${operationId ? "remain" : "may be required"}. Activity Images may make up to ${plan.max_provider_attempts} AI Task attempts in total. Provider retries and billing are outside this budget; failed or timed-out attempts may still incur charges.`));
       this._dialog.append(el("p", "Replacements are saved before the old image is removed. If generation fails, that image and its associations remain. Successful images in a batch can finish independently. Automatic generation stays unchanged."));
       const acknowledgement = el("input");
       acknowledgement.type = "checkbox";

@@ -4,7 +4,7 @@
 
 Review build: **0.3.0.dev0**, based on published **v0.2.0** (`d8a49ee`).
 The destructive backend and integrated frontend were independently reviewed.
-The final source safety fix is `1050dcd`; subsequent review preparation changes documentation and the manifest version only.
+The final backend safety fix is `1050dcd`. Review preparation also clarifies paid-budget wording and updates documentation and the manifest version; generation and retry behavior are unchanged.
 This is not approval to merge, publish, deploy, restart production, or delete production images.
 
 Production inspection was read-only. Source hashes, image hashes, mapping identities, image metadata, configuration, entity records, queue, Home Tasks source, and dashboard/Home Tasks storage were compared before and after development.

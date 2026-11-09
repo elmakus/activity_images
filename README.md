@@ -17,7 +17,7 @@ Existing entity IDs, actions, prompt, reference-image behavior, fuzzy title matc
 - Output normalized transparent PNG masters, WebP thumbnails, and light/dark QA previews
 - Persistent normalized-title associations and unchanged conservative similar-title matching; tested with 4,001 unique images, with no capacity-based eviction
 - Persistent background queue, unique-title deduplication, **no cooldown**, failure tracking and no automatic requeue of failed titles
-- Maximum **three total provider requests** for transient HTTP 429/5xx, timeouts and connection failures, with bounded exponential backoff and Retry-After when available; permanent errors are not retried.
+- Maximum **three AI Task service attempts by Activity Images** for transient HTTP 429/5xx, timeouts and connection failures, with bounded exponential backoff and Retry-After when available; permanent errors are not retried. Provider-internal retries and billing are outside this budget.
 - Watch up to 10 selected `calendar.*` entities, scan upcoming events (30 days by default, up to 60), and safely resolve at most 64 distinct titles with 15-minute polling plus calendar state-change refreshes.
 - Publish `sensor.activity_images_library` with the `images` map and pre-escaped `calendar_rules` attribute for Auto-Entities + Calendar Card Pro; refresh after each newly generated PNG.
 - Automatically generating missing calendar illustrations is **off by default** to prevent surprise provider usage. Enable it in the integration's options after reviewing the existing library.

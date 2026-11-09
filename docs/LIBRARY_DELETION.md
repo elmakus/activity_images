@@ -30,8 +30,9 @@ Later events outside the configured window cannot be established as current cons
 
 Needed titles receive fresh replacements through the existing serialized AI Task/reference-image/Lucida pipeline.
 The confirmation states the number of new logical generation requests.
-Each logical request retains the existing maximum of **three provider attempts** for eligible transient failures.
-A failed or timed-out provider attempt can still incur a charge.
+Each logical request retains the existing maximum of **three AI Task service attempts by Activity Images** for eligible transient failures.
+The configured provider can apply its own internal retries and billing; this is not a billing ceiling or a bound on its internal HTTP calls.
+A failed or timed-out attempt can still incur a charge.
 
 This authorization applies only to the reviewed replacement titles.
 It does **not** enable the global automatic-generation option.

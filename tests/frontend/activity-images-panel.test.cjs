@@ -613,7 +613,8 @@ test('bulk needed images require separate exact paid authorization; repeated cli
   assert.match(panel._dialog.textContent, /2 images selected/);
   assert.match(panel._dialog.textContent, /Replacement needed: Reading/);
   assert.match(panel._dialog.textContent, /Historical Alias/);
-  assert.match(panel._dialog.textContent, /up to 3 provider attempts in total/);
+  assert.match(panel._dialog.textContent, /up to 3 AI Task attempts in total/);
+  assert.match(panel._dialog.textContent, /Provider retries and billing are outside this budget/);
   assert.match(panel._dialog.textContent, /Automatic generation stays unchanged/);
   assert.equal([...panel._dialog.querySelectorAll('button')].some((b) => b.textContent === 'Delete permanently'), false);
   const checkboxes = panel._dialog.querySelectorAll('[type=checkbox]');
