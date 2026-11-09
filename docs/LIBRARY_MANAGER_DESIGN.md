@@ -1,5 +1,7 @@
 # Library manager design
 
+This document records the **0.2.0** architecture. Version **0.3.0** extends it with [explicit deletion, replacement, and recovery](LIBRARY_DELETION.md). Its new verification is recorded separately in [library improvements validation](LIBRARY_IMPROVEMENTS_VALIDATION.md).
+
 ## Scope and baseline
 
 The baseline is Activity Images v0.1.0 (`f03ac5589e8ab526c2b66c0a2e271582208addd5`). The implementation keeps the existing prompt, image processing, title normalization and fuzzy matching, AI Task wrapper, calendar sensor, action signatures, entity IDs, and completed canvas migration. Home Tasks remains unmodified. Automatic generation settings remain unchanged.

@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 from PIL import Image
 
+from .deletion_files import open_root, validate_filename
 from .generated_image import MAX_IMAGE_BYTES
 from .image_cache import ACTIVITY_IMAGE_PREFIX, ActivityImageCache, normalize_title
 
@@ -32,9 +33,8 @@ def validate_title(title: str) -> str:
 
 def _read_owned(root: Path, filename: str) -> bytes:
     """Open relative to the owned directory; never follow a replaced symlink."""
-    if Path(filename).name != filename or filename.startswith(".") or "\\" in filename:
-        raise ValueError("Invalid image asset")
-    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    validate_filename(filename)
+    directory = open_root(root)
     try:
         fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         with os.fdopen(fd, "rb") as stream:
@@ -81,22 +81,28 @@ class ActivityImageLibrary:
         return hashlib.sha256(filename.encode()).hexdigest()[:32]
 
     def _scan(self) -> tuple[dict, int]:
-        valid = {}
-        fingerprints = {}
-        storage_bytes = 0
         if not self.root.exists():
             self._verified = {}
             return {}, 0
         if self.root.is_symlink() or not self.root.is_dir():
             raise ValueError("The image directory must not be a symlink")
-        with os.scandir(self.root) as entries:
+        directory = open_root(self.root)
+        try:
+            return self._scan_directory(directory)
+        finally:
+            os.close(directory)
+
+    def _scan_directory(self, directory: int) -> tuple[dict, int]:
+        valid, fingerprints, storage_bytes = {}, {}, 0
+        with os.scandir(directory) as entries:
             for entry in entries:
                 try:
                     info = entry.stat(follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode):
                         continue
                     storage_bytes += info.st_size
-                    if Path(entry.name).suffix.lower() not in _EXTENSIONS or entry.name.startswith("."):
+                    if (Path(entry.name).suffix.lower() not in _EXTENSIONS or entry.name.startswith(".")
+                            or self.cache.is_deleted(ACTIVITY_IMAGE_PREFIX + quote(entry.name, safe=""))):
                         continue
                     fingerprint = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
                     previous = self._verified.get(entry.name)
@@ -225,14 +231,21 @@ class ActivityImageLibrary:
         if image is None:
             await self.async_inventory(refresh=True)
             image = self._images.get(image_id)
-        if image is None or asset not in image["files"]:
+        if image is None or (asset != "preview" and asset not in image["files"]):
             raise ValueError("Image asset not found")
         def read():
-            data = _read_owned(self.root, image["files"][asset])
+            data = _read_owned(self.root, image["files"]["master" if asset == "preview" else asset])
             try:
                 _, _, format_name = _verify(data)
             except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
                 raise ValueError("Invalid image asset") from exc
+            if asset == "preview":
+                with Image.open(BytesIO(data)) as original:
+                    preview = original.convert("RGBA")
+                    preview.thumbnail((256, 256), Image.Resampling.LANCZOS)
+                    output = BytesIO()
+                    preview.save(output, format="PNG")
+                return output.getvalue(), "image/png"
             return data, {"PNG": "image/png", "WEBP": "image/webp", "JPEG": "image/jpeg", "GIF": "image/gif"}[format_name]
         return await self.hass.async_add_executor_job(read)
 

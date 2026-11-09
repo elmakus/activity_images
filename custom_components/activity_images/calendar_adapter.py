@@ -73,6 +73,8 @@ class ActivityCalendarAdapter:
         self._reconcile_task: asyncio.Task | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._rescan_needed = False
+        self._generation_suppressed = 0
+        self._demand_truncated = False
         self._reconcile_needed = False
         self._closed = False
         self._start_registered = False
@@ -221,6 +223,27 @@ class ActivityCalendarAdapter:
             await asyncio.shield(self._scan_task)
         return self.status()
 
+    async def async_refresh_for_deletion(self) -> dict:
+        """Verify live demand without authorizing automatic missing-image jobs."""
+        self._generation_suppressed += 1
+        refresh = asyncio.create_task(self.async_refresh())
+        cancelled = False
+        try:
+            # A cancelled admin request must not leave its scan free to enqueue.
+            while not refresh.done():
+                try:
+                    await asyncio.shield(refresh)
+                except asyncio.CancelledError:
+                    cancelled = True
+            result = await refresh
+            if cancelled:
+                raise asyncio.CancelledError
+            if self._demand_truncated:
+                raise ValueError("Calendar demand exceeded 64 distinct titles or 512 events; permanent deletion is blocked")
+            return result
+        finally:
+            self._generation_suppressed -= 1
+
     async def _async_refresh_once(self) -> dict:
         """Read a 30-day by-default window, group by calendar, resolve, then queue."""
         async with self._lock:
@@ -251,6 +274,7 @@ class ActivityCalendarAdapter:
                     raise ValueError("calendar.get_events did not return a calendar mapping")
                 parsed: dict[str, list[str]] = {}
                 seen: set[str] = set()
+                truncated = False
                 for entity in self.calendars:
                     if entity not in response:
                         raise ValueError(f"No calendar event data returned for {entity}")
@@ -260,6 +284,8 @@ class ActivityCalendarAdapter:
                     events = payload.get("events", [])
                     if not isinstance(events, list):
                         raise ValueError(f"Invalid event response for {entity}")
+                    if len(events) > 512:
+                        truncated = True
                     titles: list[str] = []
                     for event in events[:512]:
                         if not isinstance(event, dict) or event.get("status") == "cancelled":
@@ -271,6 +297,7 @@ class ActivityCalendarAdapter:
                         if not title or len(title) > 255:
                             continue
                         if title not in seen and len(seen) >= MAX_TRACKED_TITLES:
+                            truncated = True
                             continue
                         if title not in titles:
                             titles.append(title)
@@ -280,7 +307,13 @@ class ActivityCalendarAdapter:
                 wanted = list(dict.fromkeys(
                     title for titles in parsed.values() for title in titles
                 ))
-                images = await self.cache.async_find_many(wanted)
+                if self._generation_suppressed:
+                    images = {}
+                    for title in wanted:
+                        if url := await self.cache.async_find(title, touch=False, prune=False):
+                            images[title] = url
+                else:
+                    images = await self.cache.async_find_many(wanted)
                 if self._closed:
                     return self.status()
                 self._snapshot_task = self.hass.async_create_task(async_save_verified(self.hass, self._store, parsed))
@@ -290,11 +323,12 @@ class ActivityCalendarAdapter:
                 self._retry_count = 0
                 self._warned_error = None
                 self.calendar_titles = parsed
+                self._demand_truncated = truncated
                 self.images = images
                 self.last_scan = now.isoformat()
                 self.last_error = None
                 self._notify()
-                if self.auto_generate and not self._closed:
+                if self.auto_generate and not self._closed and not self._generation_suppressed:
                     missing = [title for title in wanted if title not in images]
                     await self.queue.async_enqueue(missing)
             except asyncio.CancelledError:

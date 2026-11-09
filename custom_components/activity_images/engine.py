@@ -24,6 +24,10 @@ from .retry import async_retry_transient
 _LOGGER = logging.getLogger(__name__)
 
 
+def generation_stem(title: str, nonce: str) -> str:
+    return hashlib.sha256(normalize_title(title).encode("utf-8")).hexdigest()[:16] + "_" + nonce
+
+
 class ActivityImageGenerator:
     def __init__(self, hass: HomeAssistant, cache: ActivityImageCache, settings: dict) -> None:
         self.hass = hass
@@ -42,12 +46,14 @@ class ActivityImageGenerator:
         result = await self.async_generate(title, force=True)
         return result["image_url"]
 
-    async def async_generate(self, title: str, *, force: bool = False, remember: bool = True) -> dict:
+    async def async_generate(self, title: str, *, force: bool = False, remember: bool = True, deletion: dict | None = None) -> dict:
         """Resolve existing or create a new image and return its public URL."""
         title = title.strip()
         if not title or len(title) > 255:
             raise ValueError("Activity title must contain 1–255 characters")
         async with self._lock:
+            if self.cache.reserved(title, operation_id=deletion["operation_id"] if deletion else None):
+                raise ValueError("Title is reserved for permanent deletion")
             if not force:
                 cached = await self.cache.async_find(title)
                 if cached:
@@ -61,7 +67,7 @@ class ActivityImageGenerator:
             signature = normalize_title(title)
             task_id = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
             # Keep the provider task name stable but never overwrite published files.
-            suffix = task_id + "_" + uuid4().hex
+            suffix = generation_stem(title, deletion["job_id"] if deletion else uuid4().hex)
             payload = {
                 "task_name": f"activity_image_{task_id}",
                 "instructions": build_activity_image_instructions(title),
@@ -88,14 +94,33 @@ class ActivityImageGenerator:
                 source = image.get("url")
             if not isinstance(source, str) or not source:
                 raise ValueError("ai_task.generate_image did not return an image URL")
-            saved = await async_save_generated_image(
-                self.hass, source, suffix,
-                lucida_url=self.settings.get(CONF_LUCIDA_URL) or None,
-            )
-            image_url = f"{saved.image_url}?v={time.time_ns()}"
-            await self.cache.async_record_image(image_url, {
-                "origin": "generated", "created_at": datetime.now(UTC).isoformat(),
-            })
+            async def persist_result():
+                saved = await async_save_generated_image(
+                    self.hass, source, suffix,
+                    lucida_url=self.settings.get(CONF_LUCIDA_URL) or None,
+                )
+                url = f"{saved.image_url}?v={time.time_ns()}"
+                metadata = {"origin": "generated", "created_at": datetime.now(UTC).isoformat()}
+                if deletion:
+                    await self.cache.async_record_candidate(url, metadata, deletion)
+                else:
+                    await self.cache.async_record_image(url, metadata)
+                return saved, url
+
+            if deletion:
+                # Executor writes cannot be cancelled: finish and journal paid results before unload.
+                persistence = asyncio.create_task(persist_result())
+                cancelled = False
+                while not persistence.done():
+                    try:
+                        await asyncio.shield(persistence)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                saved, image_url = await persistence
+                if cancelled:
+                    raise asyncio.CancelledError
+            else:
+                saved, image_url = await persist_result()
             if remember:
                 await self.cache.async_remember(title, image_url)
             if remember and self.image_saved_callback is not None:

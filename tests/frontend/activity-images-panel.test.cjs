@@ -514,3 +514,315 @@ test('cleared legacy retry barriers remain actionable and background history ret
   await tick();
   assert.equal(commands('retry').at(-1).title, 'Older Failure');
 });
+
+const deletionPlan = (entries = [{ id: 'one', filename: 'one.png', files: ['one.png', 'one_thumb.webp', 'one_qa.webp'], titles: ['Read'], needed_titles: [], safe_without_regeneration: true }], extra = {}) => ({ token: 'reviewed-token', items: entries, replacement_requests: 0, max_provider_attempts: 0, external_warning: 'External references cannot be verified. Home Tasks copies are never modified.', ...extra });
+
+test('canvas outlines follow actual images; preview backgrounds preserve variant, bytes and authenticated fetch count', async (t) => {
+  const { panel, images } = setup(t);
+  await tick();
+  panel._detail({ ...item(), width: 317, height: 512, assets: { master: item().image_url, thumbnail: item().thumbnail_url } });
+  await tick();
+  const preview = panel._dialog.querySelector('.preview');
+  const image = preview.querySelector('img');
+  const count = images.length;
+  const backgrounds = panel._dialog.querySelector('[aria-label="Preview background"]');
+  assert.equal(preview.dataset.background, 'dark');
+  for (const [label, key] of [['Light', 'light'], ['Transparency checkerboard', 'checkerboard'], ['Dark', 'dark']]) {
+    findButton(backgrounds, label).click();
+    assert.equal(preview.dataset.background, key);
+    assert.equal(findButton(backgrounds, label).getAttribute('aria-pressed'), 'true');
+    assert.equal(preview.querySelector('img'), image);
+  }
+  assert.equal(images.length, count);
+  findButton(backgrounds, 'Light').click();
+  findButton(panel._dialog, 'Thumbnail').click();
+  await tick();
+  assert.equal(preview.dataset.background, 'light');
+  assert.equal(images.at(-1).path, item().thumbnail_url);
+  const css = panel.shadowRoot.querySelector('style').textContent;
+  assert.match(css, /\.image img, \.preview img, \.job-preview img \{[^}]*position:absolute;[^}]*width:auto; height:auto;[^}]*max-width:calc\(100% - 16px\); max-height:calc\(100% - 16px\);[^}]*outline:1px solid/);
+  assert.match(css, /background:Canvas/);
+  assert.match(css, /repeating-conic-gradient/);
+  assert.ok(!css.includes('object-fit:cover'));
+  assert.ok(!css.includes('.comparison img { height:240px; }'));
+});
+
+test('gallery selection is explicit, bounded and preserved across pages without opening image details', async (t) => {
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/list') ? listing([item(r.offset ? 'two' : 'one')], { offset: r.offset, total: 80 }) : undefined);
+  await tick();
+  findButton(panel._gallery, 'Select images').click();
+  panel._grid.querySelector('button').click();
+  assert.equal(panel._selected.size, 1);
+  assert.equal(panel._grid.querySelector('button').getAttribute('aria-pressed'), 'true');
+  assert.equal(commands('get').length, 0);
+  findButton(panel._pager, 'Next').click();
+  await tick();
+  panel._grid.querySelector('button').click();
+  assert.equal(panel._selected.size, 2);
+  assert.match(panel._selection.textContent, /2 selected/);
+  for (let index = 2; index < 65; index++) panel._toggleSelection(item(String(index)));
+  assert.equal(panel._selected.size, 64);
+  assert.match(panel._status.textContent, /at most 64/);
+  findButton(panel._selection, 'Clear selection').click();
+  assert.equal(panel._selected.size, 0);
+  assert.equal(findButton(panel._selection, 'Delete selected…').disabled, true);
+  findButton(panel._gallery, 'Done selecting').click();
+  assert.equal(panel._selection.hidden, true);
+  assert.equal(panel._grid.querySelector('button').hasAttribute('aria-pressed'), false);
+});
+
+test('single-image permanent deletion lists every file and association and requires destructive confirmation', async (t) => {
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/delete_plan') ? deletionPlan() : undefined);
+  await tick();
+  panel._detail({ ...item(), assets: { master: item().image_url } });
+  findButton(panel._dialog, 'Delete permanently…').click();
+  await tick();
+  assert.deepEqual([...commands('delete_plan')[0].image_ids], ['one']);
+  assert.match(panel._dialog.textContent, /one.png, one_thumb.webp, one_qa.webp/);
+  assert.match(panel._dialog.textContent, /Linked titles: Read/);
+  assert.match(panel._dialog.textContent, /External references cannot be verified/);
+  assert.match(panel._dialog.textContent, /Home Tasks copies are never modified/);
+  assert.equal(commands('delete').length, 0);
+  const remove = findButton(panel._dialog, 'Delete permanently');
+  assert.equal(remove.className, 'danger');
+  remove.click();
+  assert.equal(commands('delete').length, 0);
+  panel._dialog.querySelector('[type=checkbox]').checked = true;
+  remove.click();
+  await tick();
+  assert.equal(commands('delete').length, 1);
+  assert.equal(commands('delete')[0].token, 'reviewed-token');
+  assert.equal(commands('delete')[0].confirm, true);
+  assert.equal(commands('delete')[0].regenerate, false);
+  assert.equal(commands('generate').length, 0);
+  assert.equal(panel._queue.hidden, false);
+});
+
+test('bulk needed images require separate exact paid authorization; repeated clicks submit only once', async (t) => {
+  const waiting = deferred();
+  const entries = [
+    { id: 'one', filename: 'one.png', files: ['one.png'], titles: ['Read', 'Historical Alias'], needed_titles: ['Reading'], safe_without_regeneration: false },
+    { id: 'two', filename: 'two.png', files: ['two.png'], titles: [], needed_titles: [], safe_without_regeneration: true },
+  ];
+  const { panel, commands } = setup(t, (r) => {
+    if (r.type.endsWith('/delete_plan')) return deletionPlan(entries, { replacement_requests: 1, max_provider_attempts: 3 });
+    if (r.type.endsWith('/delete')) return waiting.promise;
+  });
+  await tick();
+  await panel._deleteDialog(['one', 'two']);
+  assert.match(panel._dialog.textContent, /2 images selected/);
+  assert.match(panel._dialog.textContent, /Replacement needed: Reading/);
+  assert.match(panel._dialog.textContent, /Historical Alias/);
+  assert.match(panel._dialog.textContent, /up to 3 AI Task attempts in total/);
+  assert.match(panel._dialog.textContent, /Provider retries and billing are outside this budget/);
+  assert.match(panel._dialog.textContent, /Automatic generation stays unchanged/);
+  assert.equal([...panel._dialog.querySelectorAll('button')].some((b) => b.textContent === 'Delete permanently'), false);
+  const checkboxes = panel._dialog.querySelectorAll('[type=checkbox]');
+  assert.equal(checkboxes.length, 2);
+  const remove = findButton(panel._dialog, 'Delete & Regenerate');
+  checkboxes[0].checked = true;
+  remove.click();
+  assert.equal(commands('delete').length, 0);
+  checkboxes[1].checked = true;
+  remove.click(); remove.click();
+  assert.equal(commands('delete').length, 1);
+  assert.equal(commands('delete')[0].regenerate, true);
+  assert.equal(remove.disabled, true);
+  waiting.resolve({ id: 'operation', state: 'running' });
+  await tick();
+  assert.equal(panel._busy, false);
+  assert.equal(commands('generate').length, 0);
+});
+
+test('blocked and stale deletion plans never authorize a request or leave a late confirmation open', async (t) => {
+  const late = deferred();
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/delete_plan') ? late.promise : undefined);
+  await tick();
+  const opening = panel._deleteDialog(['one']);
+  panel._dialog.close();
+  late.resolve(deletionPlan());
+  await opening;
+  assert.equal(panel._dialog.open, false);
+  panel._confirmDelete(deletionPlan([{ ...deletionPlan().items[0], blocked_reason: 'Reference image is protected' }]));
+  const remove = findButton(panel._dialog, 'Delete permanently');
+  assert.equal(remove.disabled, true);
+  panel._dialog.querySelector('[type=checkbox]').checked = true;
+  remove.click();
+  assert.equal(commands('delete').length, 0);
+  assert.match(panel._dialog.textContent, /Reference image is protected/);
+});
+
+test('unknown deletion outcomes do not replay and block later destructive requests until status recovery', async (t) => {
+  let disconnected = false;
+  const { panel, commands } = setup(t, (r) => {
+    if (r.type.endsWith('/delete_plan')) return deletionPlan();
+    if (r.type.endsWith('/delete')) return Promise.reject(new Error('Connection lost'));
+    if (r.type.endsWith('/jobs') && disconnected) return Promise.reject(new Error('Disconnected'));
+  });
+  await tick();
+  await panel._deleteDialog(['one']);
+  disconnected = true;
+  panel._dialog.querySelector('[type=checkbox]').checked = true;
+  findButton(panel._dialog, 'Delete permanently').click();
+  await tick();
+  assert.equal(panel._uncertain, true);
+  assert.equal(commands('delete').length, 1);
+  panel._confirmDelete(deletionPlan());
+  panel._dialog.querySelector('[type=checkbox]').checked = true;
+  assert.equal(findButton(panel._dialog, 'Delete permanently').disabled, true);
+  await panel._mutate('delete', { token: 'reviewed-token', confirm: true });
+  assert.equal(commands('delete').length, 1);
+  disconnected = false;
+  await panel._loadJobs();
+  assert.equal(panel._uncertain, false);
+  assert.equal(commands('delete').length, 1);
+});
+
+test('deletion history exposes partial errors and explicit retry with a newly reviewed remaining request budget', async (t) => {
+  const operation = { id: 'op', state: 'partial', items: [{ id: 'one', filename: 'one.png', state: 'failed', error: 'Provider failed' }, { id: 'two', filename: 'two.png', state: 'done' }] };
+  const { panel, commands } = setup(t, (r) => {
+    if (r.type.endsWith('/jobs')) return jobs([], { operations: [operation] });
+    if (r.type.endsWith('/delete_retry_plan')) return deletionPlan(undefined, { token: 'retry-token', replacement_requests: 1, max_provider_attempts: 3 });
+  });
+  await tick();
+  assert.match(panel._queue.textContent, /Provider failed/);
+  findButton(panel._queue, 'Review deletion retry…').click();
+  await tick();
+  assert.equal(commands('delete_retry_plan')[0].operation_id, 'op');
+  assert.equal(commands('delete_retry').length, 0);
+  for (const check of panel._dialog.querySelectorAll('[type=checkbox]')) check.checked = true;
+  findButton(panel._dialog, 'Retry Delete & Regenerate').click();
+  await tick();
+  assert.equal(commands('delete_retry')[0].operation_id, 'op');
+  assert.equal(commands('delete_retry')[0].token, 'retry-token');
+  assert.equal(commands('delete_retry')[0].confirm, true);
+  assert.equal(commands('retry').length, 0);
+});
+
+test('job cards lazily load protected thumbnails only when visible and reuse blobs across status changes', async (t) => {
+  let state = 'review';
+  const result = { id: 'candidate', title: 'Read', kind: 'manual', image_id: 'one', image_url: item().image_url, thumbnail_url: item().thumbnail_url };
+  const { panel, images, revoked } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([{ ...result, state }]) : undefined);
+  await tick();
+  assert.equal(images.filter((r) => r.path === item().thumbnail_url).length, 1); // Gallery only.
+  panel._showTab(true);
+  await tick();
+  assert.equal(images.filter((r) => r.path === item().thumbnail_url).length, 2);
+  const signal = panel._scopes.get('jobs').controller.signal;
+  const preview = panel._queue.querySelector('.job-preview img');
+  assert.ok(preview.src.startsWith('blob:'));
+  state = 'accepted';
+  await panel._loadJobs();
+  await tick();
+  assert.equal(panel._queue.querySelector('.job-preview img'), preview);
+  assert.equal(images.filter((r) => r.options.signal === signal).length, 1);
+  panel._showTab(false);
+  assert.ok(revoked.includes(preview.src));
+  assert.equal(panel._jobPreviews.size, 0);
+  assert.equal(panel._scopes.has('jobs'), false);
+});
+
+test('job result placeholders distinguish deleted, missing, pending, running and failed without inventing image URLs', async (t) => {
+  const entries = [
+    { id: 'deleted', title: 'Deleted', state: 'accepted', result_deleted: true },
+    { id: 'missing', title: 'Missing', state: 'completed', result_unavailable: true, image_id: 'gone', image_url: '/api/gone' },
+    { id: 'pending', title: 'Pending', state: 'pending' },
+    { id: 'running', title: 'Running', state: 'running' },
+    { id: 'failed', title: 'Failed', state: 'failed' },
+  ];
+  const { panel, images } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs(entries) : undefined);
+  await tick();
+  panel._showTab(true);
+  await tick();
+  assert.deepEqual([...panel._queue.querySelectorAll('.job-preview')].map((p) => p.textContent), ['Result deleted', 'Preview unavailable', 'Awaiting generation', 'Generating…', 'No image available']);
+  assert.equal(panel._queue.querySelectorAll('.job-preview img').length, 0);
+  assert.ok(!images.some((r) => r.path === '/api/gone'));
+  assert.ok(![...panel._queue.querySelectorAll('button')].some((b) => b.textContent === 'Open result'));
+});
+
+test('deletion replacement jobs cannot bypass their operation through generic candidate actions', async (t) => {
+  const { panel } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([
+    { id: 'managed', title: 'Read', kind: 'manual', state: 'review', operation_id: 'op', image_id: 'one', thumbnail_url: item().thumbnail_url },
+    { id: 'failed-managed', title: 'Study', kind: 'manual', state: 'failed', operation_id: 'op' },
+  ]) : undefined);
+  await tick();
+  assert.match(panel._queue.textContent, /deletion replacement/);
+  assert.ok(![...panel._queue.querySelectorAll('button')].some((b) => ['Review candidate', 'Retry…'].includes(b.textContent)));
+});
+
+test('unchanged job status recovery mounts visible previews after a connection loss from the library', async (t) => {
+  const result = { id: 'candidate', title: 'Read', kind: 'manual', state: 'accepted', image_id: 'one', thumbnail_url: item().thumbnail_url };
+  const { panel, window, images } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([result]) : undefined);
+  await tick();
+  assert.equal(panel._queue.hidden, true);
+  assert.equal(panel._jobPreviews.size, 0);
+  panel.hass.connection.dispatchEvent(new window.Event('disconnected'));
+  assert.equal(panel._uncertain, true);
+  const before = images.length;
+  await panel._loadJobs();
+  await tick();
+  assert.equal(panel._queue.hidden, false);
+  assert.ok(panel._queue.querySelector('.job-preview img'));
+  assert.equal(images.length, before + 1);
+});
+
+test('explicit status refresh retries a transient preview error without refetching successful results', async (t) => {
+  const result = { id: 'candidate', title: 'Read', kind: 'manual', state: 'accepted', image_id: 'one', thumbnail_url: item().thumbnail_url };
+  const { panel, window } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([result]) : undefined);
+  await tick();
+  let count = 0;
+  panel.hass.fetchWithAuth = async () => {
+    if (++count === 1) throw new Error('Transient network failure');
+    return { ok: true, blob: async () => new window.Blob(['image']) };
+  };
+  panel._showTab(true);
+  await tick();
+  assert.match(panel._queue.querySelector('.job-preview').textContent, /Transient network failure/);
+  await panel._loadJobs();
+  assert.equal(count, 1); // Polls do not repeatedly fetch a failing image.
+  findButton(panel._queue, 'Refresh job status').click();
+  await tick();
+  assert.equal(count, 2);
+  assert.ok(panel._queue.querySelector('.job-preview img'));
+  findButton(panel._queue, 'Refresh job status').click();
+  await tick();
+  assert.equal(count, 2);
+});
+
+test('decode errors revoke their blob immediately, including after removal from job history', async (t) => {
+  let entries = [{ id: 'candidate', title: 'Read', state: 'accepted', image_id: 'one', thumbnail_url: item().thumbnail_url }];
+  const { panel, window, revoked } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs(entries) : undefined);
+  await tick();
+  panel._showTab(true);
+  await tick();
+  const image = panel._queue.querySelector('.job-preview img');
+  const url = image.src;
+  image.dispatchEvent(new window.Event('error'));
+  assert.ok(revoked.includes(url));
+  assert.ok(!panel._scopes.get('jobs').urls.has(url));
+  entries = [];
+  await panel._loadJobs();
+  assert.equal(panel._jobPreviews.size, 0);
+  assert.equal(revoked.filter((value) => value === url).length, 1);
+});
+
+test('keeping originals is explicit, sends no AI authorization and never offers to abandon committed cleanup', async (t) => {
+  const operation = { id: 'op', state: 'failed', can_abandon: true, items: [{ id: 'one', filename: 'one.png', state: 'failed', error: 'Calendar demand changed' }] };
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { operations: [operation] }) : undefined);
+  await tick();
+  findButton(panel._queue, 'Keep originals…').click();
+  assert.equal(commands('delete_abandon').length, 0);
+  assert.match(panel._dialog.textContent, /original files, associations and saved candidates remain/);
+  assert.match(panel._dialog.textContent, /Committed cleanup is not stopped/);
+  assert.match(panel._dialog.textContent, /sends no AI request/);
+  findButton(panel._dialog, 'Keep originals').click();
+  await tick();
+  assert.equal(commands('delete_abandon').length, 1);
+  assert.equal(commands('delete_abandon')[0].operation_id, 'op');
+  assert.equal(commands('delete_abandon')[0].confirm, true);
+  assert.equal(commands('generate').length, 0);
+  operation.can_abandon = false;
+  operation.state = 'cleanup_failed';
+  panel._renderJobs();
+  assert.ok(![...panel._queue.querySelectorAll('button')].some((b) => b.textContent === 'Keep originals…'));
+});
