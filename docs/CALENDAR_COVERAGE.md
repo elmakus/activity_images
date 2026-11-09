@@ -1,6 +1,6 @@
-# Calendar Coverage — development branch
+# Calendar Coverage
 
-This feature requires human review and a future release decision. It is not a deployment instruction or evidence of production installation. Stable v0.4.0 predates these changes. No theme, dashboard, Home Tasks source, or existing image collection is migrated or replaced.
+Available in Activity Images **0.5.0**. See the [release notes](RELEASE_NOTES_v0.5.0.md) and [validation record](CALENDAR_COVERAGE_VALIDATION.md) before upgrading. No theme, dashboard, Home Tasks source, or existing image collection is migrated or replaced. Passing isolated tests does not establish production readiness for every provider or frontend.
 
 ## Select calendars and authorize costs
 
@@ -97,8 +97,8 @@ Malformed, failed, stale or truncated demand cannot authorize automatic work or 
 
 ## Human upgrade and rollback preparation
 
-1. Review the Draft PR, validation record, billing changes and current deletion operations. No merge, release, installation or production restart is authorized by this development work.
-2. Before a future installation, preserve a consistent copy of ConfigEntry data/options, image/cache/jobs/calendar/ignore Stores, all owned images and deletion quarantine. Record existing paid authorization.
+1. Review the release notes, validation record, billing changes and current deletion operations. Obtain deployment/restart approval for the target instance. Installation is not new paid-generation or deletion authorization.
+2. Before installation, preserve a consistent copy of ConfigEntry data/options, image/cache/jobs/calendar/ignore Stores, all owned images and deletion quarantine. Record existing paid authorization.
 3. Test legacy false/true migration and production-like calendar providers in a disposable environment. Confirm actual discovered names, unavailable selections and new-calendar defaults.
 4. Review or cancel waiting automatic jobs before a planned downgrade. An older queue may resume its `pending` list without understanding calendar provenance, even when its legacy global auto flag is false.
 5. Stop the integration before replacing code or restoring a consistent recovery copy. Do not restore an old cache/journal over a running instance. Never remove tombstones or confirmed deletion records to make a downgrade appear successful.

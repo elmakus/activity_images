@@ -1,6 +1,8 @@
-# Calendar Coverage — isolated validation record
+# Calendar Coverage — pre-release isolated validation record
 
-Date: 2026-11-09. Development branch: `feat/calendar-coverage`, based on `6bafcf189e1af5cc98387d5413f3993b76498e31` (stable v0.4.0).
+Date: 2026-11-09. Feature implementation: `2b7170c6d7ffca29b1939247704ce9e0b22ab36b` on `feat/calendar-coverage`, based on `6bafcf189e1af5cc98387d5413f3993b76498e31` (stable v0.4.0).
+
+This records the validation phase before release authorization. Its no-release/no-production statements describe that phase, not later separately approved operations. See the [0.5.0 release notes](RELEASE_NOTES_v0.5.0.md) for release and upgrade guidance.
 
 This is development evidence for a **Draft PR**, not release approval or production-readiness certification. No production Home Assistant, real calendar, image collection, Home Tasks source, theme or dashboard was changed. No real paid provider request, deployment, production restart, tag, release or merge was performed.
 

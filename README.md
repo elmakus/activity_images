@@ -4,11 +4,9 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stable version: 0.4.0.** This release adds the administrator-only Settings tab, a configurable shared AI prompt, reference previews and passive diagnostics. See [release notes](docs/RELEASE_NOTES_v0.4.0.md), [Settings architecture](docs/SETTINGS_ARCHITECTURE.md), and [independent validation](docs/SETTINGS_REVIEW.md). Previous [v0.3.0 library improvements](docs/RELEASE_NOTES_v0.3.0.md) and their recovery guidance remain applicable.
+**Stable version: 0.5.0.** This release adds Calendar Coverage, independent per-calendar monitoring/automatic-generation policies, persistent exact-title ignores, free image assignment and stronger billing safeguards. See [release notes](docs/RELEASE_NOTES_v0.5.0.md), [Calendar Coverage, migration and rollback](docs/CALENDAR_COVERAGE.md), and [isolated validation](docs/CALENDAR_COVERAGE_VALIDATION.md). Previous [Settings features](docs/RELEASE_NOTES_v0.4.0.md) and [library/deletion recovery](docs/RELEASE_NOTES_v0.3.0.md) remain applicable.
 
-**Development branch:** Calendar Coverage and per-calendar policies below are not part of stable v0.4.0. See [Calendar Coverage, billing safeguards, migration and rollback](docs/CALENDAR_COVERAGE.md) before reviewing or installing a future release.
-
-Existing entity IDs, public action signatures, prompt, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. This branch deliberately tightens retry, queue-restart and error-clearing behavior to prevent unknown-outcome paid requests from replaying. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
+Existing entity IDs, public action signatures, prompt, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. This release deliberately tightens retry, queue-restart and error-clearing behavior to prevent unknown-outcome paid requests from replaying. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
 
 ## Capabilities
 
@@ -38,7 +36,7 @@ An `ai_task.*` provider is **optional in library-only mode**; configure it later
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
 
-For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.3.0 to 0.4.0 changes runtime code and requires the normal installer restart. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
+For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.4.0 to 0.5.0 changes runtime code and requires the normal installer restart. Review legacy queued work and the stricter retry/error-clearing behavior first. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
 
 ## Image library manager
 

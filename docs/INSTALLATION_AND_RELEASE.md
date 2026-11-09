@@ -1,9 +1,9 @@
 # Installation, updates and recovery
 
-Version **0.4.0** is the stable Settings release. See the
-[release notes](RELEASE_NOTES_v0.4.0.md) and [independent Settings review](SETTINGS_REVIEW.md) for changes and known limits.
+Version **0.5.0** is the stable Calendar Coverage release. See the
+[release notes](RELEASE_NOTES_v0.5.0.md), [Calendar Coverage guide](CALENDAR_COVERAGE.md) and [isolated validation](CALENDAR_COVERAGE_VALIDATION.md) for changes and known limits.
 Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before installing.
-Versions 0.2.0 and 0.3.0 described below are historical; updating from 0.3.0 to 0.4.0 changes runtime code and needs the normal installer restart.
+Versions 0.2.0–0.4.0 described below are historical; updating from 0.4.0 to 0.5.0 changes runtime code and needs the normal installer restart.
 Historical `STAGE*` reports describe earlier migration and validation work;
 they are not current installation instructions.
 
@@ -38,7 +38,7 @@ but the integration still requires the declared Home Assistant version.
 ## Configure library and generation
 
 Select calendars in the integration's options if calendar matching is wanted.
-The default lookahead is 30 days. Automatic generation is **OFF by default**.
+The default lookahead is 30 days. Each monitored calendar has an independent automatic-generation choice, **OFF for newly selected calendars**. Legacy false stays off; legacy true preserves only previously selected authorization. New automatic authorization requires explicit paid confirmation.
 The complete gallery is in the sidebar; `sensor.activity_images_library`
 exposes the selected calendars' bounded `images` and `calendar_rules` data.
 Use `activity_images.refresh_calendars` in **Developer Tools → Actions** to
@@ -123,6 +123,9 @@ Marketplace-managed upgrades after the transition.
   `/config/.storage/activity_images_jobs`.
 - Last successful calendar snapshot:
   `/config/.storage/activity_images_calendar_snapshot`.
+- Exact ignored raw titles and revision (0.5.0+):
+  `/config/.storage/activity_images_ignored_titles`.
+- Calendar policies and private registry bindings: the existing native ConfigEntry options; preserve them through the supported backup/API path.
 - Deletion journal, reservations, and tombstones (0.3.0+):
   additive fields in `/config/.storage/activity_images_image_cache`.
 - Private confirmed-cleanup quarantine (0.3.0+):
