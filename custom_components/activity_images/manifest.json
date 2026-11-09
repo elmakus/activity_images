@@ -7,11 +7,15 @@
   "config_flow": true,
   "dependencies": [
     "ai_task",
-    "media_source"
+    "frontend",
+    "http",
+    "media_source",
+    "panel_custom",
+    "websocket_api"
   ],
   "documentation": "https://github.com/elmakus/activity_images",
   "integration_type": "service",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/elmakus/activity_images/issues",
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

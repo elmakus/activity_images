@@ -4,13 +4,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from copy import deepcopy
+from datetime import UTC, datetime
+from uuid import uuid4
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
 from .engine import ActivityImageGenerator
 from .image_cache import normalize_title
+from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,20 +23,27 @@ class ActivityImageQueue:
     def __init__(self, hass: HomeAssistant, engine: ActivityImageGenerator) -> None:
         self.hass = hass
         self.engine = engine
-        self._store = Store(hass, 1, f"{DOMAIN}_jobs")
+        self._store = Store(hass, 1, f"{DOMAIN}_jobs", atomic_writes=True)
         self._pending: list[str] = []
         self._failed: dict[str, str] = {}
         self._current: str | None = None
         self._worker: asyncio.Task | None = None
         self._lock = asyncio.Lock()
         self._closed = False
+        self._loaded = False
+        self._save_generation = 0
+        self._jobs: list[dict] = []
+        self._manual_blocked: set[str] = set()
+        self._retry_blocked: set[str] = set()
 
     async def async_setup(self) -> None:
         data = await self._store.async_load() or {}
+        self._manual_blocked = set(data.get("manual_blocked", []))
+        self._retry_blocked = set(data.get("retry_blocked", []))
         raw = data.get("pending") or []
         self._pending = [
             title for title in raw if isinstance(title, str) and title.strip()
-        ][:2000]
+        ]
         failed = data.get("failed") or {}
         self._failed = {
             k: v for k, v in failed.items()
@@ -45,22 +56,72 @@ class ActivityImageQueue:
             title for title in self._pending
             if normalize_title(title) not in self._failed
         ]
-        if len(self._pending) != previous_pending:
+        self._jobs = [job for job in data.get("jobs", []) if isinstance(job, dict)
+                      and job.get("kind") in {"manual", "background"} and isinstance(job.get("id"), str)
+                      and isinstance(job.get("title"), str) and job.get("state") in {
+                          "pending", "running", "review", "accepted", "discarded", "failed", "cancelled", "interrupted", "completed",
+                      } and not (job["kind"] == "background" and job["state"] in {"pending", "running"})]
+        for job in self._jobs:
+            if job["kind"] == "manual" and job["state"] in {"pending", "running"}:
+                self._set_state(job, "interrupted", "Interrupted; explicitly retry to generate a new candidate")
+                self._pending = [t for t in self._pending if normalize_title(t) != normalize_title(job["title"])]
+        self._trim_history()
+        self._loaded = True
+        if len(self._pending) != previous_pending or self._jobs:
             await self._save()
         if self._pending:
             self._kick()
 
     async def _save(self) -> None:
-        await self._store.async_save({
-            "pending": self._pending,
-            "failed": self._failed,
-        })
+        self._trim_history()
+        write = asyncio.create_task(async_save_verified(self.hass, self._store, {
+            "pending": list(self._pending),
+            "failed": deepcopy(self._failed),
+            "jobs": deepcopy([job for job in self._jobs if job["kind"] == "manual" or job["state"] not in {"pending", "running"}]),
+            "manual_blocked": sorted(self._manual_blocked),
+            "retry_blocked": sorted(self._retry_blocked),
+        }))
+        cancelled = False
+        # Drain the retained write before cancellation can release the queue lock.
+        while not write.done():
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                cancelled = True
+        await write
+        self._loaded = True
+        self._save_generation += 1
+        if cancelled:
+            raise asyncio.CancelledError
+
+    @contextlib.asynccontextmanager
+    async def _mutation(self):
+        async with self._lock:
+            if self._closed:
+                raise ValueError("Activity Images is unloading")
+            generation = self._save_generation
+            pending, failed, jobs, blocked = list(self._pending), dict(self._failed), list(self._jobs), set(self._manual_blocked)
+            retry_blocked = set(self._retry_blocked)
+            job_values = deepcopy(jobs)
+            try:
+                yield
+            except BaseException as exc:
+                if not isinstance(exc, asyncio.CancelledError) or generation == self._save_generation:
+                    self._pending, self._failed, self._jobs, self._manual_blocked = pending, failed, jobs, blocked
+                    self._retry_blocked = retry_blocked
+                    for job, values in zip(jobs, job_values, strict=True):
+                        job.clear()
+                        job.update(values)
+                raise
 
     async def async_enqueue(self, titles: list[str]) -> list[str]:
         """Accept up to 64 new unique jobs; never duplicate pending jobs."""
         accepted = []
-        async with self._lock:
+        async with self._mutation():
+            if self._closed:
+                raise ValueError("Activity Images is unloading")
             known = {normalize_title(t) for t in self._pending}
+            known.update(normalize_title(job["title"]) for job in self._jobs if job["state"] in {"pending", "running", "review"})
             if self._current:
                 known.add(normalize_title(self._current))
             for value in titles[:64]:
@@ -70,7 +131,7 @@ class ActivityImageQueue:
                 key = normalize_title(title)
                 if (
                     not title or len(title) > 255 or not key
-                    or key in known or key in self._failed
+                    or key in known or key in self._failed or key in self._manual_blocked or key in self._retry_blocked
                 ):
                     continue
                 if await self.engine.cache.async_find(title):
@@ -115,8 +176,11 @@ class ActivityImageQueue:
 
     async def async_cancel(self, titles: list[str]) -> int:
         keys = {normalize_title(value) for value in titles}
-        async with self._lock:
+        async with self._mutation():
             original = len(self._pending)
+            for job in self._jobs:
+                if job["state"] == "pending" and normalize_title(job["title"]) in keys:
+                    self._set_state(job, "cancelled")
             self._pending = [
                 t for t in self._pending
                 if normalize_title(t) not in keys or t == self._current
@@ -130,10 +194,17 @@ class ActivityImageQueue:
                 await self._save()
         return removed
 
-    async def async_clear_errors(self) -> int:
-        async with self._lock:
+    async def async_clear_errors(self, *, preserve_retry_blocks: bool = False) -> int:
+        async with self._mutation():
             removed = len(self._failed)
+            if preserve_retry_blocks:
+                self._retry_blocked.update(key for key in self._failed if key not in self._manual_blocked)
+            else:
+                # Preserve the existing public action's clear-and-requeue semantics.
+                self._retry_blocked.clear()
             self._failed.clear()
+            for job in self._jobs:
+                job["error"] = None
             await self._save()
             return removed
 
@@ -143,7 +214,131 @@ class ActivityImageQueue:
             "current": self._current,
             "failed": dict(self._failed),
             "next_run_at": None,
+            "jobs": [self._public_job(job) for job in self._jobs if job["kind"] == "manual" or job["state"] not in {"pending", "running"}],
+            "active": self.engine.is_generating or self._current is not None,
+            "retry_blocked": sorted({
+                next((job["title"] for job in reversed(self._jobs) if normalize_title(job["title"]) == key), key)
+                for key in self._retry_blocked
+            }),
         }
+
+    def _manual(self, title: str) -> dict | None:
+        return next((job for job in self._jobs if job["kind"] == "manual"
+                     and normalize_title(job["title"]) == normalize_title(title)
+                     and job["state"] in {"pending", "running", "review"}), None)
+
+    @staticmethod
+    def _set_state(job: dict, state: str, error: str | None = None) -> None:
+        job.update(state=state, error=error, updated_at=datetime.now(UTC).isoformat())
+
+    @staticmethod
+    def _public_job(job: dict) -> dict:
+        from .library import IMAGE_API, ActivityImageLibrary
+        url = job.get("result_url")
+        image_id = ActivityImageLibrary.image_id(url.split("?", 1)[0].rsplit("/", 1)[-1]) if url else None
+        return {key: job.get(key) for key in ("id", "title", "kind", "state", "error", "created_at", "updated_at")} | {
+            "key": normalize_title(job["title"]),
+            "image_id": image_id, "image_url": f"{IMAGE_API}/{image_id}/master" if image_id else None,
+        }
+
+    def _trim_history(self) -> None:
+        terminal = [job for job in self._jobs if job["state"] not in {"pending", "running", "review"}]
+        remove = {job["id"] for job in terminal[:-100]}
+        self._jobs = [job for job in self._jobs if job["id"] not in remove]
+
+    def _new_job(self, title: str, kind: str) -> dict:
+        now = datetime.now(UTC).isoformat()
+        return {"id": uuid4().hex, "title": title, "kind": kind, "state": "pending",
+                "error": None, "created_at": now, "updated_at": now,
+                "original_url": self.engine.cache.exact(title), "result_url": None}
+
+    async def async_candidate(self, title: str) -> dict:
+        from .library import validate_title
+        title = validate_title(title)
+        async with self._mutation():
+            if self._closed:
+                raise ValueError("Activity Images is unloading")
+            if existing := self._manual(title):
+                return self._public_job(existing)
+            if any(normalize_title(t) == normalize_title(title) for t in self._pending):
+                raise ValueError(
+                    "A background job already exists for this title. Wait for it or cancel "
+                    "the waiting job before requesting a fresh candidate."
+                )
+            job = self._new_job(title, "manual")
+            self._manual_blocked.add(normalize_title(title))
+            self._jobs.append(job)
+            self._pending.append(title)
+            await self._save()
+        self._kick()
+        return self._public_job(job)
+
+    def _job(self, job_id: str) -> dict:
+        job = next((job for job in self._jobs if job["id"] == job_id), None)
+        if not job:
+            raise ValueError("Job not found")
+        return job
+
+    def candidate_url(self, job_id: str) -> str | None:
+        return self._job(job_id).get("result_url")
+
+    async def async_accept(self, job_id: str) -> dict:
+        async with self._mutation():
+            job = self._job(job_id)
+            if job["state"] == "accepted":
+                return self._public_job(job)
+            if job["state"] != "review":
+                raise ValueError("Only a review candidate can be accepted")
+            if self.engine.cache.exact(job["title"]) != job["result_url"]:
+                await self.engine.cache.async_link(job["title"], job["result_url"], replace=True,
+                                                   expected=job["original_url"], compare=True)
+            self._set_state(job, "accepted")
+            self._trim_history()
+            try:
+                await self._save()
+            except Exception:
+                if job["original_url"] is None:
+                    await self.engine.cache.async_unlink(job["title"], job["result_url"], expected=job["result_url"], compare=True)
+                else:
+                    await self.engine.cache.async_link(job["title"], job["original_url"], replace=True,
+                                                       expected=job["result_url"], compare=True)
+                raise
+        if self.engine.image_saved_callback:
+            self.engine.image_saved_callback(job["title"], job["result_url"])
+        return self._public_job(job)
+
+    async def async_discard(self, job_id: str) -> dict:
+        async with self._mutation():
+            job = self._job(job_id)
+            if job["state"] != "review":
+                raise ValueError("Only a review candidate can be discarded")
+            self._set_state(job, "discarded")
+            await self._save()
+            self._trim_history()
+            return self._public_job(job)
+
+    async def async_retry(self, *, job_id: str | None = None, title: str | None = None) -> dict:
+        if job_id:
+            job = self._job(job_id)
+            if job["kind"] != "manual" or job["state"] not in {"failed", "interrupted"}:
+                raise ValueError("Only failed or interrupted manual jobs can be retried")
+            return await self.async_candidate(job["title"])
+        from .library import validate_title
+        title = validate_title(title or "")
+        key = normalize_title(title)
+        accepted = []
+        async with self._mutation():
+            if key in self._manual_blocked or (key not in self._failed and key not in self._retry_blocked):
+                raise ValueError("No failed legacy title to retry; manual jobs require job_id")
+            self._failed.pop(key, None)
+            self._retry_blocked.discard(key)
+            if not any(normalize_title(t) == key for t in self._pending) and not await self.engine.cache.async_find(title):
+                self._pending.append(title)
+                accepted.append(title)
+            await self._save()
+        if accepted:
+            self._kick()
+        return {"queued": accepted}
 
     def _kick(self) -> None:
         if self._closed or not self._pending:
@@ -165,36 +360,53 @@ class ActivityImageQueue:
             self._kick()
 
     async def _run(self) -> None:
-        """Try each distinct title once (the provider layer itself retries ≤2 times).
-
-        A terminal failure is recorded and removed from the pending queue.
-        Periodic calendar scans must not requeue failed titles until cleared.
-        """
+        """Persist the paid-attempt boundary before contacting the provider."""
         while not self._closed:
             async with self._lock:
                 if not self._pending:
                     return
                 title = self._pending[0]
                 self._current = title
-            failed = False
+                job = self._manual(title)
+                manual = job is not None
+                if job is None:
+                    job = self._new_job(title, "background")
+                    self._jobs.append(job)
+                self._set_state(job, "running")
+                try:
+                    await self._save()
+                except Exception:
+                    self._set_state(job, "interrupted", "Could not persist attempt; no provider request sent")
+                    if manual:
+                        self._pending.pop(0)
+                    self._current = None
+                    raise
+            result = None
+            state, error = "review" if manual else "completed", None
             try:
-                await self.engine.async_generate(title)
+                result = await self.engine.async_generate(title, force=True, remember=False) if manual else await self.engine.async_generate(title)
             except asyncio.CancelledError:
+                state, error = "interrupted", "Interrupted; explicitly retry to generate a new candidate"
                 raise
             except Exception as exc:
-                failed = True
-                _LOGGER.warning("Activity image generation failed for %r: %s", title, exc)
-                self._failed[normalize_title(title)] = (
-                    f"{type(exc).__name__}: {str(exc)[:300]}"
-                )
+                state, error = "failed", f"{type(exc).__name__}: {str(exc)[:300]}"
+                _LOGGER.warning("Activity image generation failed for %r: %s", title, error)
             finally:
-                if not self._closed:
-                    async with self._lock:
+                async with self._lock:
+                    if result:
+                        job["result_url"] = result["image_url"]
+                    self._set_state(job, state, error)
+                    if state == "failed" and error:
+                        self._failed[normalize_title(title)] = error
+                    if not self._closed or manual:
                         if self._pending and self._pending[0] == title:
                             self._pending.pop(0)
-                        if not failed:
+                        if state not in {"failed", "interrupted"}:
                             self._failed.pop(normalize_title(title), None)
-                        self._current = None
+                    self._current = None
+                    self._trim_history()
+                    # The durable running boundary already requires explicit manual retry.
+                    if self.hass.state is not CoreState.stopping:
                         await self._save()
 
     async def async_shutdown(self) -> None:
@@ -203,4 +415,7 @@ class ActivityImageQueue:
             self._worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
-        await self._save()
+        async with self._lock:
+            # Pending/running work was persisted before any provider request.
+            if self._loaded and self.hass.state is not CoreState.stopping:
+                await self._save()

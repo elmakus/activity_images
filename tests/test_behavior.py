@@ -3,6 +3,11 @@
 Fake HA storage, media and AI Task service exercise real generator, cache, queue,
 Pillow pipeline and persistence. No real provider calls or existing HA data.
 """
+# The HA-free harness deliberately supplies dynamic modules and runtime state.
+# pyright: reportAttributeAccessIssue=false
+# pyright: reportOptionalMemberAccess=false
+# pyright: reportArgumentType=false
+# pyright: reportGeneralTypeIssues=false
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +20,6 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from PIL import Image, ImageDraw
-
 
 ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "activity_images"
 
@@ -40,9 +44,10 @@ _package("homeassistant.components.media_source")
 
 
 class MemoryStore:
-    def __init__(self, hass, version, key):
+    def __init__(self, hass, version, key, **kwargs):
         self.hass = hass
         self.key = key
+        self.path = hass.config.path(".storage", key)
 
     async def async_load(self):
         import copy
@@ -50,7 +55,11 @@ class MemoryStore:
 
     async def async_save(self, value):
         import copy
+        import json
         self.hass.saved[self.key] = copy.deepcopy(value)
+        path = Path(self.path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"data": value}), encoding="utf-8")
 
 
 async def fake_resolve_media(hass, source, _user):
@@ -70,6 +79,8 @@ class MockHA:
             async_unload_platforms=self._unload_platforms,
         )
         self.forwarded = []
+        self.state = "running"
+        self.states = SimpleNamespace(get=lambda entity: SimpleNamespace(state="off"))
 
     async def _forward_platforms(self, entry, platforms):
         self.forwarded.append(("load", tuple(platforms)))
@@ -124,6 +135,7 @@ class FakeServices:
         return {"media_source_id": "media-source://generated/test"}
 
 
+sys.modules["homeassistant.core"].CoreState = SimpleNamespace(running="running", stopping="stopping")
 sys.modules["homeassistant.core"].HomeAssistant = MockHA
 sys.modules["homeassistant.helpers.storage"].Store = MemoryStore
 sys.modules["homeassistant.components.media_source"].async_resolve_media = fake_resolve_media
@@ -193,7 +205,7 @@ async def test_similar_matching_not_different_task(ha):
 
 
 @pytest.mark.asyncio
-async def test_cache_lru_preserves_files(ha, monkeypatch):
+async def test_cache_has_no_capacity_eviction(ha, monkeypatch):
     monkeypatch.setattr(cache_module, "MAX_CACHED_IMAGES", 2)
     cache = cache_module.ActivityImageCache(ha)
     await cache.async_setup()
@@ -204,7 +216,7 @@ async def test_cache_lru_preserves_files(ha, monkeypatch):
         Image.new("RGBA", (5, 5)).save(path)
         await cache.async_remember(name, f"/local/activity_images/{name}.png")
         await asyncio.sleep(0.005)
-    assert len(cache._entries) == 2
+    assert len(cache._entries) == 3
     assert all((ha.base / f"www/activity_images/{n}.png").exists() for n in names)
 
 
@@ -231,10 +243,19 @@ async def test_generate_real_png_thumbnail_and_qa(ha, configured):
 @pytest.mark.asyncio
 async def test_force_regeneration(ha, configured):
     cache, engine = configured
-    await engine.async_generate("Odkurzanie")
+    first = await engine.async_generate("Odkurzanie")
+    old = ha.base / "www" / first["image_url"].split("?", 1)[0].removeprefix("/local/")
+    original = old.read_bytes()
+    await cache.async_remember("Alias", first["image_url"])
     result = await engine.async_generate("Odkurzanie", force=True)
     assert result["reused"] is False
+    assert result["image_url"].split("?", 1)[0] != first["image_url"].split("?", 1)[0]
+    assert old.read_bytes() == original
+    assert cache.exact("Alias") == first["image_url"]
+    assert cache.exact("Odkurzanie") == result["image_url"]
     assert len(ha.services.calls) == 2
+    assert ha.services.calls[0][2]["task_name"] == ha.services.calls[1][2]["task_name"]
+    assert len(ha.services.calls[0][2]["task_name"].removeprefix("activity_image_")) == 16
 
 
 @pytest.mark.asyncio
@@ -503,8 +524,9 @@ async def test_lucida_valid_transparency_is_used(ha, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_lucida_failure_uses_original_fallback(ha, monkeypatch):
-    import aiohttp
     from io import BytesIO
+
+    import aiohttp
 
     opaque = Image.new("RGB", (64, 64), (255, 255, 255))
     raw = BytesIO()
@@ -769,7 +791,8 @@ async def test_engine_401_does_not_retry_or_cache(ha, configured, monkeypatch):
 # registrations with a fake HA service registry, without touching the user's HA.
 def _load_integration_entrypoint():
     import importlib.util
-    import voluptuous as vol
+
+    import probatio as vol
 
     if "homeassistant.config_entries" not in sys.modules:
         _package("homeassistant.config_entries")
@@ -780,6 +803,14 @@ def _load_integration_entrypoint():
     core = sys.modules["homeassistant.core"]
     core.ServiceCall = SimpleNamespace
     core.callback = lambda func: func
+    if "homeassistant.helpers.start" not in sys.modules:
+        _package("homeassistant.helpers.start")
+
+    def at_started(hass, listener):
+        listener(hass)
+        return lambda: None
+
+    sys.modules["homeassistant.helpers.start"].async_at_started = at_started
     if "homeassistant.helpers.event" not in sys.modules:
         _package("homeassistant.helpers.event")
     sys.modules["homeassistant.helpers.event"].async_track_state_change_event = (
@@ -788,12 +819,17 @@ def _load_integration_entrypoint():
     sys.modules["homeassistant.helpers.event"].async_track_time_interval = (
         lambda hass, listener, interval: lambda: None
     )
+    sys.modules["homeassistant.helpers.event"].async_call_later = (
+        lambda hass, delay, listener: asyncio.get_running_loop().call_later(
+            delay, listener, None
+        ).cancel
+    )
     if "homeassistant.util" not in sys.modules:
         _package("homeassistant.util")
     if "homeassistant.util.dt" not in sys.modules:
         _package("homeassistant.util.dt")
-    from datetime import datetime, timezone
-    sys.modules["homeassistant.util.dt"].now = lambda: datetime.now(timezone.utc)
+    from datetime import UTC, datetime
+    sys.modules["homeassistant.util.dt"].now = lambda: datetime.now(UTC)
     sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
     core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
     sys.modules["homeassistant.config_entries"].ConfigEntry = object
@@ -813,6 +849,10 @@ def _load_integration_entrypoint():
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
+    async def no_manager(hass):
+        pass
+    mod._async_register_manager = no_manager
+    mod._async_remove_manager = lambda hass: None
     return mod
 
 
@@ -893,7 +933,7 @@ async def test_actions_register_once_in_setup_before_config_entry(ha, configured
 
 @pytest.mark.asyncio
 async def test_actions_queue_and_validate_request_limits(ha, monkeypatch):
-    import voluptuous as vol
+    import probatio as vol
 
     integration = _load_integration_entrypoint()
     assert await integration.async_setup(ha, {})
@@ -957,7 +997,9 @@ async def test_unload_and_reconfigure_keep_services_and_cached_images(ha):
 def _calendar_test_setup(ha, configured, monkeypatch, events, *,
                          enabled=False, calendars=("calendar.school",)):
     integration = _load_integration_entrypoint()
-    from custom_components.activity_images.calendar_adapter import ActivityCalendarAdapter
+    from custom_components.activity_images.calendar_adapter import (
+        ActivityCalendarAdapter,
+    )
 
     cache, engine = configured
     queue = queue_module.ActivityImageQueue(ha, engine)
@@ -979,6 +1021,7 @@ def _calendar_test_setup(ha, configured, monkeypatch, events, *,
 def test_calendar_rules_escaped_for_js_regex():
     _load_integration_entrypoint()
     import re
+
     from custom_components.activity_images.calendar_adapter import escape_event_title
     samples = [
         "Dentist (Hanna) + checkup?",
@@ -1145,6 +1188,7 @@ async def test_calendar_start_tracks_state_and_periodic_scan(ha, configured, mon
     monkeypatch.setattr(adapter_module, "async_track_state_change_event", fake_track_state)
     monkeypatch.setattr(adapter_module, "async_track_time_interval", fake_track_time)
     await adapter.async_start()
+    await adapter.async_refresh()
     assert ("state", ("calendar.school",)) in tracked
     assert ("time", 15 * 60) in tracked
     assert adapter.calendar_titles["calendar.school"] == ["An event"]
@@ -1194,6 +1238,7 @@ async def test_integration_calendar_service_and_platform_lifecycle(ha, monkeypat
     ha.services.async_register("calendar", "get_events", get_events)
     assert await integration.async_setup_entry(ha, entry)
     assert ("load", ("sensor", "ai_task")) in ha.forwarded
+    await entry.runtime_data.calendar.async_refresh()
     assert entry.runtime_data.calendar.calendar_titles["calendar.school"] == ["New event"]
     assert len(ha.services.registered) == 9  # Eight activity actions + calendar service.
     result = await ha.services.async_call("activity_images", "refresh_calendars", {})
@@ -1218,6 +1263,7 @@ async def test_existing_png_can_be_linked_without_provider(ha, monkeypatch):
 
     ha.services.async_register("calendar", "get_events", get_events)
     await integration.async_setup_entry(ha, entry)
+    await entry.runtime_data.calendar.async_refresh()
     assert entry.runtime_data.generator.settings.get(const_module.CONF_AI_ENTITY) is None
     assert entry.runtime_data.calendar.images == {}
 
@@ -1403,7 +1449,7 @@ async def test_wrapper_rejects_extra_attachments(ha):
     task = ai.GenImageTask(
         name="home_tasks_ef",
         instructions="School\n\nThe image must have a square 1:1 aspect ratio.",
-        attachments=[SimpleNamespace(path="/tmp/random.jpg")],
+        attachments=[SimpleNamespace(path=ha.base / "rejected-attachment.jpg")],
     )
     with pytest.raises(wrapper_module.HomeAssistantError, match="does not accept"):
         await entity._async_generate_image(task, SimpleNamespace(conversation_id="test"))
@@ -1432,6 +1478,8 @@ async def test_ai_wrapper_rejects_nonlocal_or_malformed_png_paths(ha, monkeypatc
     for url in (
         "https://somewhere.example/unsafe.png",
         "/local/activity_images/../../secrets.png",
+        "/local/activity_images/%2e%2e%2fsecrets.png",
+        "/local/activity_images/%5chidden.png",
         "/local/activity_images/.hidden.png",
         "/local/activity_images/not-a-png.jpg",
         "file:///etc/passwd",
@@ -1440,7 +1488,7 @@ async def test_ai_wrapper_rejects_nonlocal_or_malformed_png_paths(ha, monkeypatc
         async def fake_generate(_title, *, force=False, result=url):
             return await bad_result(result)
         monkeypatch.setattr(entry.runtime_data.generator, "async_generate", fake_generate)
-        with pytest.raises(wrapper_module.HomeAssistantError, match="invalid PNG URL|nonlocal image URL|Invalid image filename"):
+        with pytest.raises(wrapper_module.HomeAssistantError, match="invalid image URL|nonlocal image URL|Invalid image filename|Unable to read processed"):
             await entity._async_generate_image(
                 task, SimpleNamespace(conversation_id="reject")
             )

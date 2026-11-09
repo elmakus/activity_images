@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "test:frontend": "node --test tests/frontend/*.test.cjs",
+    "check:frontend": "node --check custom_components/activity_images/frontend/activity-images-panel.js"
+  },
+  "devDependencies": {
+    "happy-dom": "21.0.4"
+  }
+}

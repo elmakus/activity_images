@@ -1,23 +1,27 @@
-"""Real Home Assistant Core 2026.10.4 action-registry smoke test.
+"""Real Home Assistant Core 2026.11.0 action-registry smoke test.
 
 No connected Home Assistant modified; no real AI provider calls.
 """
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import sys
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from homeassistant.core import HomeAssistant, SupportsResponse  # noqa: E402
+from homeassistant.core import CoreState, HomeAssistant, SupportsResponse  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
+
 from custom_components.activity_images import (  # noqa: E402
-    async_setup, async_setup_entry, async_unload_entry,
+    async_setup,
+    async_setup_entry,
+    async_unload_entry,
 )
 from custom_components.activity_images.sensor import ActivityImagesLibrarySensor  # noqa: E402
 
@@ -26,7 +30,7 @@ class TestEntry:
     entry_id = "isolated_smoke_entry"
     data = {"ai_task_entity_id": "ai_task.mock"}
     options = {}
-    runtime_data = None
+    runtime_data: Any = None
 
     def add_update_listener(self, callback):
         return lambda: None
@@ -37,7 +41,12 @@ class TestEntry:
 
 async def run():
     with tempfile.TemporaryDirectory(prefix="ha-activity-images-smoke-") as tempdir:
-        hass = HomeAssistant(tempdir)
+        hass: Any = HomeAssistant(tempdir)
+        hass.state = CoreState.running
+        hass.states.async_set("calendar.demo", "off")
+        from smoke_library_ha import prepare_http
+        await prepare_http(hass)
+
         assert await async_setup(hass, {})
         assert hass.services.has_service("activity_images", "generate_image")
         assert hass.services.has_service("activity_images", "queue_status")
@@ -56,7 +65,7 @@ async def run():
         picture.save(source)
         provider_calls = []
 
-        async def mock_provider(call):
+        async def mock_provider(call) -> dict[str, Any]:
             provider_calls.append(call.data)
             return {"media_source_id": "media-source://ai_task/image/test.png"}
 
@@ -69,7 +78,7 @@ async def run():
             assert media == "media-source://ai_task/image/test.png"
             return SimpleNamespace(path=source, url="/api/ai_task/image/test.png")
 
-        async def mock_get_events(call):
+        async def mock_get_events(call) -> dict[str, Any]:
             assert call.data["entity_id"] == ["calendar.demo"]
             return {"calendar.demo": {"events": [
                 {"summary": "Green Waste Collection", "start": "2026-11-03T09:00:00"}
@@ -79,7 +88,7 @@ async def run():
             "calendar", "get_events", mock_get_events,
             supports_response=SupportsResponse.ONLY,
         )
-        entry = TestEntry()
+        entry: Any = TestEntry()
         entry.data = {
             "ai_task_entity_id": "ai_task.mock",
             "calendar_entity_ids": ["calendar.demo"],
@@ -138,6 +147,6 @@ async def run():
             else:
                 raise AssertionError("Service should reject calls after unload")
 
-        print("ACTUAL_HA_2026_10_4_CALENDAR_SMOKE_PASS", len(provider_calls), first["image_url"])
+        print("ACTUAL_HA_2026_11_CALENDAR_SMOKE_PASS", len(provider_calls), first["image_url"])
 
 asyncio.run(run())

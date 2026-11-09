@@ -6,25 +6,25 @@ are used for calendar images and Home Tasks pictures.
 """
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
-import re
-from urllib.parse import urlsplit
-
-from PIL import Image
+from urllib.parse import unquote, urlsplit
 
 from homeassistant.components import ai_task
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from PIL import Image
 
 from .const import CONF_AI_ENTITY
+from .image_cache import ACTIVITY_IMAGE_PREFIX
+from .library import _read_owned, _verify
 from .prompts import build_activity_image_instructions
 
 # Current upstream Home Tasks passes the title in instructions, then this
 # aspect-ratio suffix. Its task_name contains a hash, NOT the readable title.
 _HOME_TASKS_ASPECT = "\n\nThe image must have a square 1:1 aspect ratio."
-_LOCAL_PNG = re.compile(r"/local/activity_images/([A-Za-z0-9_][A-Za-z0-9_.-]*\.png)")
 
 
 def extract_home_tasks_title(task_name: str, instructions: str) -> str:
@@ -47,16 +47,15 @@ def extract_home_tasks_title(task_name: str, instructions: str) -> str:
 
 
 def _read_png(path: Path) -> tuple[bytes, int, int]:
-    """Read only locally persisted PNG files, outside the event loop."""
-    with Image.open(path) as image:
-        if image.format != "PNG":
-            raise HomeAssistantError("The Activity Images output must be a PNG")
-        width, height = image.size
-        if not width or not height:
-            raise HomeAssistantError("Empty Activity Images PNG")
-        # Read after decoding to ensure malformed images fail before upload.
-        image.load()
-    return path.read_bytes(), width, height
+    """Return bounded local images as PNG without modifying library files."""
+    data = _read_owned(path.parent, path.name)
+    width, height, format_name = _verify(data)
+    if format_name != "PNG":
+        with Image.open(BytesIO(data)) as image:
+            output = BytesIO()
+            image.convert("RGBA").save(output, "PNG")
+            data = output.getvalue()
+    return data, width, height
 
 
 async def async_setup_entry(
@@ -82,8 +81,8 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
         self._attr_unique_id = f"{entry.entry_id}_ai_task"
 
     @property
-    def available(self) -> bool:
-        """Do not advertise image generation before a real provider is chosen."""
+    def available(self) -> bool:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Keep provider availability dynamic rather than caching its first value."""
         provider = self._entry.options.get(
             CONF_AI_ENTITY, self._entry.data.get(CONF_AI_ENTITY)
         )
@@ -116,11 +115,13 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
         parsed = urlsplit(url)
         if parsed.scheme or parsed.netloc or parsed.fragment:
             raise HomeAssistantError("Activity Images returned a nonlocal image URL")
-        match = _LOCAL_PNG.fullmatch(parsed.path)
-        if not match:
-            raise HomeAssistantError("Activity Images returned an invalid PNG URL")
-        filename = match.group(1)
-        if filename.startswith("."):
+        if not parsed.path.startswith(ACTIVITY_IMAGE_PREFIX):
+            raise HomeAssistantError("Activity Images returned an invalid image URL")
+        filename = unquote(parsed.path[len(ACTIVITY_IMAGE_PREFIX):])
+        if (
+            not filename or Path(filename).name != filename or filename.startswith(".")
+            or "\\" in filename or chr(0) in filename
+        ):
             raise HomeAssistantError("Invalid image filename")
 
         path = Path(self.hass.config.path("www", "activity_images", filename))
@@ -128,7 +129,7 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
             image_data, width, height = await self.hass.async_add_executor_job(
                 _read_png, path
             )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
             raise HomeAssistantError(
                 "Unable to read processed Activity Images PNG"
             ) from exc
