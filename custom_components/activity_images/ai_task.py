@@ -17,7 +17,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from PIL import Image
 
-from .const import CONF_AI_ENTITY
+from .const import CONF_AI_ENTITY, CONF_PROMPT_TEMPLATE
 from .image_cache import ACTIVITY_IMAGE_PREFIX
 from .library import _read_owned, _verify
 from .prompts import build_activity_image_instructions
@@ -140,5 +140,7 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
             mime_type="image/png",
             width=width,
             height=height,
-            revised_prompt=build_activity_image_instructions(title),
+            revised_prompt=build_activity_image_instructions(
+                title, runtime.generator.settings.get(CONF_PROMPT_TEMPLATE)
+            ),
         )

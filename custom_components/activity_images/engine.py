@@ -15,6 +15,7 @@ from .const import (
     CONF_AI_ENTITY,
     CONF_LUCIDA_URL,
     CONF_REFERENCE_MEDIA_ID,
+    CONF_PROMPT_TEMPLATE,
 )
 from .generated_image import async_save_generated_image
 from .image_cache import ActivityImageCache, normalize_title
@@ -70,7 +71,7 @@ class ActivityImageGenerator:
             suffix = generation_stem(title, deletion["job_id"] if deletion else uuid4().hex)
             payload = {
                 "task_name": f"activity_image_{task_id}",
-                "instructions": build_activity_image_instructions(title),
+                "instructions": build_activity_image_instructions(title, self.settings.get(CONF_PROMPT_TEMPLATE)),
                 "entity_id": entity_id,
             }
             reference = self.settings.get(CONF_REFERENCE_MEDIA_ID)

@@ -1508,3 +1508,11 @@ async def test_ai_task_platform_exports_exactly_one_stable_entity(ha):
     assert found[0]._attr_unique_id == f"{entry.entry_id}_ai_task"
     assert found[0]._attr_name == "Activity Images"
     assert found[0]._attr_supported_features == ai.AITaskEntityFeature.GENERATE_IMAGE
+
+@pytest.mark.asyncio
+async def test_custom_prompt_reaches_provider_with_literal_title(ha, configured):
+    """Only rendered instructions change; provider and image pipeline are shared."""
+    _cache, generator = configured
+    generator.settings[const_module.CONF_PROMPT_TEMPLATE] = "Icon of {title}"
+    await generator.async_generate("Craft {party}", force=True)
+    assert ha.services.calls[-1][2]["instructions"] == "Icon of Craft {party}"
