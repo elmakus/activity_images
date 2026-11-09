@@ -70,6 +70,7 @@ class ActivityCalendarAdapter:
         self._lock = asyncio.Lock()
         self._scan_task: asyncio.Task | None = None
         self._reconcile_task: asyncio.Task | None = None
+        self._snapshot_task: asyncio.Task | None = None
         self._rescan_needed = False
         self._reconcile_needed = False
         self._closed = False
@@ -281,7 +282,8 @@ class ActivityCalendarAdapter:
                 images = await self.cache.async_find_many(wanted)
                 if self._closed:
                     return self.status()
-                await self._store.async_save(parsed)
+                self._snapshot_task = self.hass.async_create_task(self._store.async_save(parsed))
+                await asyncio.shield(self._snapshot_task)
                 if self._closed:
                     return self.status()
                 self._retry_count = 0
@@ -355,4 +357,10 @@ class ActivityCalendarAdapter:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+        # Executor writes cannot be cancelled; finish this instance's write before reload.
+        if self._snapshot_task:
+            try:
+                await asyncio.shield(self._snapshot_task)
+            except Exception:
+                _LOGGER.warning("Unable to save Activity Images calendar snapshot", exc_info=True)
         self._listeners.clear()
