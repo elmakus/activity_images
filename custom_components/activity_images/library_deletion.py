@@ -51,6 +51,7 @@ class ActivityImageDeletions:
     @staticmethod
     def public(operation: dict) -> dict:
         return {"id": operation["id"], "state": operation["state"],
+                "can_abandon": any(item["state"] in {"failed", "interrupted"} for item in operation["items"]),
                 "replacement_requests": operation["replacement_requests"],
                 "items": [{key: deepcopy(item[key]) for key in
                            ("id", "filename", "state", "error", "needed_titles", "job_ids")}
@@ -255,7 +256,7 @@ class ActivityImageDeletions:
                 raise ValueError("Operation is not retryable")
             recoveries, blocked, invalid_candidates = {}, {}, {}
             for item in operation["items"]:
-                if item["state"] in {"done", "cleanup", "cleanup_failed"}:
+                if item["state"] in {"done", "abandoned", "cleanup", "cleanup_failed"}:
                     continue
                 invalid_candidates[item["id"]] = sorted(await self._invalid_candidates(item))
                 recoveries[item["id"]] = await self._recoverable(item)
@@ -264,7 +265,7 @@ class ActivityImageDeletions:
                 except (OSError, ValueError) as exc:
                     blocked[item["id"]] = str(exc)
             count = sum(len(set(map(normalize_title, item["needed_titles"])) - (set(item["candidates"]) - set(invalid_candidates.get(item["id"], []))) - set(recoveries.get(item["id"], {})))
-                        for item in operation["items"] if item["state"] not in {"done", "cleanup", "cleanup_failed"})
+                        for item in operation["items"] if item["state"] not in {"done", "abandoned", "cleanup", "cleanup_failed"})
             token = uuid4().hex
             self._plans[token] = {"retry": operation_id, "snapshot": deepcopy(operation), "replacement_requests": count,
                                   "recoveries": recoveries, "blocked": blocked, "invalid_candidates": invalid_candidates}
@@ -273,7 +274,7 @@ class ActivityImageDeletions:
                 needed = [title for title in item["needed_titles"] if (normalize_title(title) not in item["candidates"]
                            or normalize_title(title) in invalid_candidates.get(item["id"], []))
                           and normalize_title(title) not in recoveries.get(item["id"], {})
-                          and item["state"] not in {"done", "cleanup", "cleanup_failed"}]
+                          and item["state"] not in {"done", "abandoned", "cleanup", "cleanup_failed"}]
                 items.append({key: deepcopy(item[key]) for key in ("id", "filename", "files", "titles", "state", "error")} | {
                     "needed_titles": needed, "safe_without_regeneration": not needed and item["id"] not in blocked,
                     "blocked_reason": blocked.get(item["id"]),
@@ -331,6 +332,73 @@ class ActivityImageDeletions:
             self._kick()
             return self.public(operation)
 
+    @staticmethod
+    def _state(items: list[dict]) -> str:
+        states = {item["state"] for item in items}
+        return ("running" if states & {"running", "pending", "cleanup"} else
+                "cleanup_failed" if "cleanup_failed" in states else
+                "interrupted" if "interrupted" in states else "failed" if "failed" in states else
+                "abandoned" if "abandoned" in states else "done")
+
+    async def async_abandon(self, operation_id: str, confirm: bool) -> dict:
+        if confirm is not True:
+            raise ValueError("Abandonment requires explicit confirmation")
+        async with self._lock, self._boundaries():
+            if self._closed:
+                raise ValueError("Activity Images is unloading")
+            operation = deepcopy(self._operation(operation_id))
+            selected = {item["id"] for item in operation["items"] if item["state"] in {"failed", "interrupted"}}
+            if not selected:
+                if any(item["state"] == "abandoned" for item in operation["items"]):
+                    return self.public(operation)
+                raise MappingConflict("Only failed or interrupted precommit items can be abandoned; committed cleanup must be retried")
+            if self._task and not self._task.done():
+                raise MappingConflict("Deletion work is still settling; retry abandonment after it stops")
+            jobs = [job for job in self.queue._jobs
+                    if job.get("deletion", {}).get("operation_id") == operation_id
+                    and job["deletion"].get("image_id") in selected]
+            if any(job["state"] in {"pending", "running"} or self.queue._current == job["title"] for job in jobs):
+                raise MappingConflict("Managed generation is still settling; no abandonment was committed")
+            for item in operation["items"]:
+                if item["id"] in selected:
+                    if any(self.cache.is_deleted(url) for url in item["urls"]):
+                        raise MappingConflict("Committed image cleanup cannot be abandoned")
+                    item.update(state="abandoned", error=None)
+            operation["state"] = self._state(operation["items"])
+            before = list(self.queue._jobs)
+            values = deepcopy(before)
+
+            async def commit():
+                try:
+                    for job in jobs:
+                        item = next(item for item in operation["items"] if item["id"] == job["deletion"]["image_id"])
+                        job["result_url"] = item["candidates"].get(job["deletion"]["key"], job.get("result_url"))
+                        self.queue._set_state(job, "abandoned", "Deletion abandoned; generated files retained in the library")
+                    # Separate Stores: retain reservations until terminal history is durable.
+                    if jobs:
+                        await self.queue._save()
+                    await self.cache.async_journal(operation)
+                except BaseException:
+                    self.queue._jobs = before
+                    for job, previous in zip(before, values, strict=True):
+                        job.clear()
+                        job.update(previous)
+                    if jobs:
+                        await self.queue._save()
+                    raise
+
+            work = asyncio.create_task(commit())
+            cancelled = False
+            while not work.done():
+                try:
+                    await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    cancelled = True
+            await work
+            if cancelled:
+                raise asyncio.CancelledError
+            return self.public(self._operation(operation_id))
+
     def _operation(self, operation_id: str) -> dict:
         if operation_id not in self.cache._deletions:
             raise ValueError("Deletion operation not found")
@@ -367,10 +435,7 @@ class ActivityImageDeletions:
         operation = deepcopy(self._operation(operation_id))
         item = next(item for item in operation["items"] if item["id"] == image_id)
         item.update(values)
-        states = {item["state"] for item in operation["items"]}
-        operation["state"] = ("running" if states & {"running", "pending", "cleanup"} else
-                              "cleanup_failed" if "cleanup_failed" in states else
-                              "interrupted" if "interrupted" in states else "failed" if "failed" in states else "done")
+        operation["state"] = self._state(operation["items"])
         await self.cache.async_journal(operation)
 
     async def _run(self):

@@ -74,6 +74,7 @@ class ActivityCalendarAdapter:
         self._snapshot_task: asyncio.Task | None = None
         self._rescan_needed = False
         self._generation_suppressed = 0
+        self._demand_truncated = False
         self._reconcile_needed = False
         self._closed = False
         self._start_registered = False
@@ -237,6 +238,8 @@ class ActivityCalendarAdapter:
             result = await refresh
             if cancelled:
                 raise asyncio.CancelledError
+            if self._demand_truncated:
+                raise ValueError("Calendar demand exceeded 64 distinct titles or 512 events; permanent deletion is blocked")
             return result
         finally:
             self._generation_suppressed -= 1
@@ -271,6 +274,7 @@ class ActivityCalendarAdapter:
                     raise ValueError("calendar.get_events did not return a calendar mapping")
                 parsed: dict[str, list[str]] = {}
                 seen: set[str] = set()
+                truncated = False
                 for entity in self.calendars:
                     if entity not in response:
                         raise ValueError(f"No calendar event data returned for {entity}")
@@ -280,6 +284,8 @@ class ActivityCalendarAdapter:
                     events = payload.get("events", [])
                     if not isinstance(events, list):
                         raise ValueError(f"Invalid event response for {entity}")
+                    if len(events) > 512:
+                        truncated = True
                     titles: list[str] = []
                     for event in events[:512]:
                         if not isinstance(event, dict) or event.get("status") == "cancelled":
@@ -291,6 +297,7 @@ class ActivityCalendarAdapter:
                         if not title or len(title) > 255:
                             continue
                         if title not in seen and len(seen) >= MAX_TRACKED_TITLES:
+                            truncated = True
                             continue
                         if title not in titles:
                             titles.append(title)
@@ -316,6 +323,7 @@ class ActivityCalendarAdapter:
                 self._retry_count = 0
                 self._warned_error = None
                 self.calendar_titles = parsed
+                self._demand_truncated = truncated
                 self.images = images
                 self.last_scan = now.isoformat()
                 self.last_error = None

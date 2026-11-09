@@ -572,10 +572,10 @@ class ActivityImageCache:
     def reserved(self, title: str = "", url: str = "", *, operation_id: str | None = None) -> bool:
         key = normalize_title(title)
         for operation in self._deletions.values():
-            if operation["id"] == operation_id or operation["state"] == "done":
+            if operation["id"] == operation_id or operation["state"] in {"done", "abandoned"}:
                 continue
             for item in operation["items"]:
-                if item["state"] == "done":
+                if item["state"] in {"done", "abandoned"}:
                     continue
                 if asset_url(url) in item["urls"] or key in item["reserved_titles"]:
                     return True

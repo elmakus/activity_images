@@ -59,7 +59,7 @@ class ActivityImageQueue:
         self._jobs = [job for job in data.get("jobs", []) if isinstance(job, dict)
                       and job.get("kind") in {"manual", "background"} and isinstance(job.get("id"), str)
                       and isinstance(job.get("title"), str) and job.get("state") in {
-                          "pending", "running", "review", "accepted", "discarded", "failed", "cancelled", "interrupted", "completed",
+                          "pending", "running", "review", "accepted", "discarded", "failed", "cancelled", "interrupted", "completed", "abandoned",
                       } and not (job["kind"] == "background" and job["state"] in {"pending", "running"})]
         for job in self._jobs:
             if (job["kind"] == "manual" or job.get("deletion")) and job["state"] in {"pending", "running"}:

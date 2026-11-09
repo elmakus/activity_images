@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -305,7 +306,7 @@ async def run():
         folder.mkdir(parents=True)
         await hass.http.async_register_static_paths([StaticPathConfig("/local", str(folder.parent), False)])
         Image.new("RGB", (16, 12), "green").save(folder / "standalone.png")
-        Image.new("RGB", (16, 12), "blue").save(folder / "other.png")
+        Image.new("RGB", (800, 400), "blue").save(folder / "other.png")
         (folder / "corrupt.png").write_bytes(b"corrupt")
         (folder / "escape.png").symlink_to(folder / "standalone.png")
         # Exercise the exact real-HA serializer used by config/options HTTP views.
@@ -328,7 +329,7 @@ async def run():
         assert panel.config["_panel_custom"]["name"] == "activity-images-panel"
         assert panel.config["_panel_custom"]["module_url"] == MODULE_URL
         library_commands = {k for k in hass.data["websocket_api"] if k.startswith("activity_images/library/")}
-        assert len(library_commands) == 16
+        assert len(library_commands) == 17
         resources_before = tuple(hass.http.app.router.resources())
         handlers_before = {k: hass.data["websocket_api"][k][0] for k in library_commands}
         # A real aiohttp test server runs HA's actual bearer authentication middleware,
@@ -363,6 +364,7 @@ async def run():
                 "delete_plan": {"image_ids": ["a" * 32]}, "delete": {"token": "x", "regenerate": False, "confirm": True},
                 "deletions": {}, "delete_retry_plan": {"operation_id": "x"},
                 "delete_retry": {"operation_id": "x", "token": "x", "confirm": True},
+                "delete_abandon": {"operation_id": "x", "confirm": True},
             }.items():
                 denied = await command(user_ws, name, **args)
                 assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
@@ -408,7 +410,13 @@ async def run():
             preview = next(job for job in jobs["result"]["jobs"] if job["id"] == candidate["id"])
             assert preview["image_url"].startswith("/api/activity_images/library/")
             assert preview["image_id"] == image_id
-            assert preview["thumbnail_url"] == preview["image_url"]  # No thumbnail for this fixture.
+            assert preview["thumbnail_url"].endswith("/preview")
+            assert (await client.get(preview["thumbnail_url"])).status == 401
+            assert (await client.get(preview["thumbnail_url"], headers={"Authorization": "Bearer " + user_token})).status == 401
+            response = await client.get(preview["thumbnail_url"], headers={"Authorization": "Bearer " + admin_token})
+            assert response.status == 200 and response.content_type == "image/png"
+            with Image.open(BytesIO(await response.read())) as thumbnail:
+                assert thumbnail.size == (256, 128)
             await entry.runtime_data.cache.async_remember("Stale Candidate", "/local/activity_images/changed.png")
             stale = await command(admin_ws, "accept", job_id=candidate["id"])
             assert stale["error"]["code"] == "conflict", stale
@@ -431,6 +439,29 @@ async def run():
                 raise AssertionError("Public link accepted a symlink")
             await native_write_failures(entry.runtime_data)
             await native_deletion_failures(entry.runtime_data, folder)
+            Image.new("RGB", (16, 12), "red").save(folder / "abandon.png")
+            abandon_id = entry.runtime_data.library.image_id("abandon.png")
+            abandon_plan = await command(admin_ws, "delete_plan", image_ids=[abandon_id])
+            with patch.object(entry.runtime_data.cache, "async_commit_deletion", side_effect=OSError("Synthetic precommit failure")):
+                abandon_op = await command(admin_ws, "delete", token=abandon_plan["result"]["token"], regenerate=False, confirm=True)
+                await entry.runtime_data.deletions._task
+            abandon_op_id = abandon_op["result"]["id"]
+            native_write = write_utf8_file_atomic
+            def fail_abandon_write(filename, *args, **kwargs):
+                if filename == entry.runtime_data.cache._store.path:
+                    raise WriteError("Injected abandonment journal failure")
+                return native_write(filename, *args, **kwargs)
+            with patch.object(ha_storage, "write_utf8_file_atomic", fail_abandon_write):
+                rejected = await command(admin_ws, "delete_abandon", operation_id=abandon_op_id, confirm=True)
+                assert not rejected["success"], rejected
+            assert entry.runtime_data.cache.reserved(url="/local/activity_images/abandon.png")
+            rejected = await command(admin_ws, "delete_abandon", operation_id=abandon_op_id, confirm=False)
+            assert not rejected["success"], rejected
+            abandoned = await command(admin_ws, "delete_abandon", operation_id=abandon_op_id, confirm=True)
+            assert abandoned["success"] and abandoned["result"]["state"] == "abandoned" and not abandoned["result"]["can_abandon"], abandoned
+            assert not entry.runtime_data.cache.reserved(url="/local/activity_images/abandon.png")
+            assert (folder / "abandon.png").exists()
+            assert not (await command(admin_ws, "delete_plan", image_ids=[abandon_id]))["result"]["items"][0]["blocked_reason"]
             Image.new("RGB", (16, 12), "red").save(folder / "delete-me.png")
             Image.new("RGB", (8, 6), "red").save(folder / "delete-me_thumb.webp")
             delete_id = entry.runtime_data.library.image_id("delete-me.png")

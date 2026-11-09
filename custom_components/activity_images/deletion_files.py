@@ -39,9 +39,11 @@ def identity(directory: int, filename: str) -> list:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_IMAGE_BYTES:
             raise ValueError("Invalid or oversized deletion asset")
+        if info.st_nlink != 1:
+            raise ValueError("Hardlinked image assets cannot be permanently deleted")
         digest = hashlib.sha256(stream.read(MAX_IMAGE_BYTES + 1)).hexdigest()
         after = os.fstat(stream.fileno())
-        if (info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        if (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_nlink):
             raise ValueError("Image changed while reading")
         return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, digest]
 

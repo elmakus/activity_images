@@ -47,6 +47,7 @@ _SCHEMAS = {
     "deletions": {},
     "delete_retry_plan": {p.Required("operation_id"): _ID},
     "delete_retry": {p.Required("operation_id"): _ID, p.Required("token"): _ID, p.Required("confirm"): True},
+    "delete_abandon": {p.Required("operation_id"): _ID, p.Required("confirm"): True},
 }
 
 
@@ -86,10 +87,10 @@ async def _dispatch(hass, command: str, args: dict):
                 job.update(image_id=None, image_url=None, thumbnail_url=None, result_unavailable=bool(url))
             else:
                 job.update(image_id=image_id, image_url=f"{IMAGE_API}/{image_id}/master",
-                           thumbnail_url=f"{IMAGE_API}/{image_id}/thumbnail" if "thumbnail" in image["files"] else f"{IMAGE_API}/{image_id}/master")
+                           thumbnail_url=f"{IMAGE_API}/{image_id}/thumbnail" if "thumbnail" in image["files"] else f"{IMAGE_API}/{image_id}/preview")
         response["operations"] = runtime.deletions.operations() if runtime.deletions else []
         return response
-    if command in {"delete_plan", "delete", "deletions", "delete_retry_plan", "delete_retry"}:
+    if command in {"delete_plan", "delete", "deletions", "delete_retry_plan", "delete_retry", "delete_abandon"}:
         deletions = runtime.deletions
         if deletions is None:
             raise HomeAssistantError("Activity Images deletion manager is unavailable")
@@ -101,6 +102,8 @@ async def _dispatch(hass, command: str, args: dict):
             return await deletions.async_delete(**args)
         if command == "delete_retry_plan":
             return await deletions.async_retry_plan(**args)
+        if command == "delete_abandon":
+            return await deletions.async_abandon(**args)
         return await deletions.async_retry(**args)
     if command == "accept":
         result = queue.candidate_url(args["job_id"])

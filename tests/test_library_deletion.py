@@ -738,3 +738,255 @@ async def test_live_deletion_refresh_is_resolve_only_even_when_auto_enabled(ha, 
         await refresh
     assert queue.status()["pending"] == [] and not ha.services.calls
     await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["demand", "identity"])
+async def test_abandon_releases_stale_reservations_retains_paid_candidate_and_survives_restart(ha, configured, monkeypatch, changed):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    url = "/local/activity_images/old.png"
+    await cache.async_remember("Activity", url)
+    deletions = manager(ha, configured, ["Activity"])
+    native = engine.async_generate
+    async def generate(*args, **kwargs):
+        result = await native(*args, **kwargs)
+        if changed == "demand":
+            deletions.calendar.calendar_titles["calendar.test"].append("New consumer")
+        else:
+            picture(ha, "old.png", "blue")
+        return result
+    monkeypatch.setattr(engine, "async_generate", generate)
+    _, operation = await select(deletions, ["old.png"], True)
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "failed" and deletions.operations()[0]["can_abandon"]
+    candidate = deepcopy(cache._deletions[operation["id"]]["items"][0]["candidates"])
+    paid = len(ha.services.calls)
+    assert paid == 1 and deletions.queue._jobs[0]["state"] == "review"
+    blocked = await deletions.async_plan([deletions.library.image_id(old.name)])
+    assert blocked["items"][0]["blocked_reason"]
+    with pytest.raises(ValueError):
+        await deletions.async_abandon(operation["id"], False)
+    result = await deletions.async_abandon(operation["id"], True)
+    assert result["state"] == "abandoned" and not result["can_abandon"]
+    assert cache._deletions[operation["id"]]["items"][0]["candidates"] == candidate
+    assert deletions.queue._jobs[0]["state"] == "abandoned"
+    assert deletions.queue._jobs[0]["result_url"] == candidate["activity"]
+    assert old.exists() and cache.exact("Activity") == url and len(ha.services.calls) == paid
+    assert not cache.reserved("Activity", url) and not deletions.queue._pending
+    fresh_plan = await deletions.async_plan([deletions.library.image_id(old.name)])
+    assert not fresh_plan["items"][0]["blocked_reason"]
+    assert (await deletions.async_abandon(operation["id"], True))["state"] == "abandoned"
+    with pytest.raises(ValueError):
+        await deletions.async_retry_plan(operation["id"])
+    with pytest.raises(ValueError):
+        await deletions.queue.async_retry(job_id=deletions.queue._jobs[0]["id"])
+    await deletions.async_shutdown()
+    await deletions.queue.async_shutdown()
+    fresh_cache = behavior.cache_module.ActivityImageCache(ha)
+    await fresh_cache.async_setup()
+    engine.cache = fresh_cache
+    fresh = manager(ha, (fresh_cache, engine), ["Activity"])
+    await fresh.queue.async_setup()
+    await fresh.async_setup()
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "abandoned"
+    assert fresh.queue._jobs[0]["state"] == "abandoned" and len(ha.services.calls) == paid
+    assert not (await fresh.async_plan([fresh.library.image_id(old.name)]))["items"][0]["blocked_reason"]
+    await fresh_cache.async_link("Another alias", url)
+    assert fresh_cache.exact("Another alias") == url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_store", ["cache", "queue"])
+async def test_abandon_persistence_failure_rolls_back_and_keeps_reservations(ha, configured, monkeypatch, failed_store):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    commit = cache.async_commit_deletion
+    async def failed(*args):
+        raise OSError("synthetic commit failure")
+    monkeypatch.setattr(cache, "async_commit_deletion", failed)
+    _, operation = await select(deletions, ["old.png"], True)
+    await settled(deletions)
+    monkeypatch.setattr(cache, "async_commit_deletion", commit)
+    before_op = deepcopy(cache._deletions[operation["id"]])
+    before_jobs = deepcopy(deletions.queue._jobs)
+    before_saved = deepcopy(ha.saved)
+    store = cache._store if failed_store == "cache" else deletions.queue._store
+    monkeypatch.setattr(store, "async_save", failed)
+    with pytest.raises(OSError):
+        await deletions.async_abandon(operation["id"], True)
+    assert cache._deletions[operation["id"]] == before_op
+    assert deletions.queue._jobs == before_jobs
+    assert ha.saved == before_saved
+    assert cache.reserved("Activity", "/local/activity_images/old.png")
+    assert old.exists() and len(ha.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_abandon_mixed_batch_leaves_committed_cleanup_and_done_untouched(ha, configured, monkeypatch):
+    cache, _ = configured
+    for name in ("failed.png", "cleanup.png", "done.png"):
+        picture(ha, name)
+        await cache.async_remember(name, "/local/activity_images/" + name)
+    deletions = manager(ha, configured)
+    native_replace = deletions._replace
+    async def selective_replace(operation_id, image_id):
+        if deletions._item(operation_id, image_id)["filename"] == "failed.png":
+            raise OSError("precommit failure")
+        return await native_replace(operation_id, image_id)
+    monkeypatch.setattr(deletions, "_replace", selective_replace)
+    import custom_components.activity_images.library_deletion as module
+    native_cleanup = module.cleanup
+    def selective_cleanup(root, quarantine_root, expected, operation_id, image_id):
+        if "cleanup.png" in expected["files"]:
+            raise OSError("cleanup failure")
+        return native_cleanup(root, quarantine_root, expected, operation_id, image_id)
+    monkeypatch.setattr(module, "cleanup", selective_cleanup)
+    _, operation = await select(deletions, ["failed.png", "cleanup.png", "done.png"])
+    await settled(deletions)
+    before = {item["filename"]: deepcopy(item) for item in cache._deletions[operation["id"]]["items"]}
+    result = await deletions.async_abandon(operation["id"], True)
+    assert result["state"] == "cleanup_failed" and not result["can_abandon"]
+    after = {item["filename"]: item for item in cache._deletions[operation["id"]]["items"]}
+    assert after["cleanup.png"] == before["cleanup.png"] and after["done.png"] == before["done.png"]
+    assert after["failed.png"]["state"] == "abandoned"
+    assert cache.exact("failed.png") == "/local/activity_images/failed.png"
+    assert cache.exact("cleanup.png") is None and cache.exact("done.png") is None
+    assert (await deletions.async_retry_plan(operation["id"]))["replacement_requests"] == 0
+    assert not ha.services.calls
+
+
+@pytest.mark.asyncio
+async def test_committed_cleanup_cannot_be_abandoned(ha, configured, monkeypatch):
+    picture(ha, "old.png")
+    deletions = manager(ha, configured)
+    import custom_components.activity_images.library_deletion as module
+    def failed(*args):
+        raise OSError("cleanup failure")
+    monkeypatch.setattr(module, "cleanup", failed)
+    _, operation = await select(deletions, ["old.png"])
+    await settled(deletions)
+    assert not deletions.operations()[0]["can_abandon"]
+    with pytest.raises(MappingConflict, match="committed cleanup"):
+        await deletions.async_abandon(operation["id"], True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overflow", ["titles", "events"])
+async def test_deletion_live_demand_truncation_blocks_without_changing_normal_caps(ha, configured, monkeypatch, overflow):
+    cache, _ = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Protected consumer", "/local/activity_images/old.png")
+    summaries = ([f"Other {index}" for index in range(64)] if overflow == "titles" else ["Other"] * 512) + ["Protected consumer"]
+    events = {"calendar.school": {"events": [{"summary": title} for title in summaries]}}
+    adapter, queue, _ = behavior._calendar_test_setup(ha, configured, monkeypatch, events, enabled=True)
+    deletions = ActivityImageDeletions(ha, ActivityImageLibrary(ha, cache), queue, adapter)
+    before_cache = cache.entries()
+    original = old.read_bytes()
+    plan = await deletions.async_plan([deletions.library.image_id(old.name)])
+    assert "64 distinct titles or 512 events" in plan["items"][0]["blocked_reason"]
+    assert not plan["items"][0]["safe_without_regeneration"]
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(plan["token"], True, True)
+    assert cache.entries() == before_cache and old.read_bytes() == original
+    assert not cache._deletions and not ha.services.calls and not queue.status()["pending"]
+    assert adapter.last_error is None and len(adapter.calendar_titles["calendar.school"]) == (64 if overflow == "titles" else 1)
+    # Normal refresh keeps the preexisting capped display and explicit auto-generation behavior.
+    await adapter.async_refresh()
+    assert len(queue.status()["pending"]) == (64 if overflow == "titles" else 1)
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hardlinked_master_and_derivative_rejected_before_mapping_commit(ha, configured):
+    import os
+    cache, _ = configured
+    old = picture(ha, "old.png")
+    derivative = old.with_name("old_thumb.webp")
+    os.link(old, derivative)
+    await cache.async_remember("Master alias", "/local/activity_images/old.png")
+    await cache.async_remember("Derivative alias", "/local/activity_images/old_thumb.webp")
+    deletions = manager(ha, configured)
+    before = cache.entries()
+    with pytest.raises(ValueError, match="Hardlinked"):
+        deletion_files.snapshot(old.parent, [old.name, derivative.name])
+    plan = await deletions.async_plan([deletions.library.image_id(old.name)])
+    assert "Hardlinked" in plan["items"][0]["blocked_reason"]
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(plan["token"], False, True)
+    assert old.exists() and derivative.exists() and old.stat().st_nlink == 2
+    assert cache.entries() == before and not cache._tombstones and not cache._deletions and not ha.services.calls
+
+
+@pytest.mark.asyncio
+async def test_standalone_queue_preview_is_bounded_without_changing_master(ha, configured):
+    from io import BytesIO
+
+    from PIL import Image
+    old = picture(ha, "standalone.png")
+    Image.new("RGB", (1200, 600), "red").save(old)
+    original = old.read_bytes()
+    library = ActivityImageLibrary(ha, configured[0])
+    data, mime = await library.async_read(library.image_id(old.name), "preview")
+    with Image.open(BytesIO(data)) as preview:
+        assert preview.size == (256, 128)
+    assert mime == "image/png" and old.read_bytes() == original
+    master, _ = await library.async_read(library.image_id(old.name), "master")
+    assert master == original
+
+
+@pytest.mark.asyncio
+async def test_interrupted_abandon_has_no_lingering_paid_requests(ha, configured, monkeypatch):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    monkeypatch.setattr(deletions, "_kick", lambda: None)
+    _, operation = await select(deletions, ["old.png"], True)
+    await deletions.async_shutdown()
+    fresh_cache = behavior.cache_module.ActivityImageCache(ha)
+    await fresh_cache.async_setup()
+    engine.cache = fresh_cache
+    fresh = manager(ha, (fresh_cache, engine), ["Activity"])
+    await fresh.queue.async_setup()
+    await fresh.async_setup()
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "interrupted"
+    abandoned = await fresh.async_abandon(operation["id"], True)
+    assert abandoned["state"] == "abandoned" and not abandoned["can_abandon"]
+    fresh._kick()
+    fresh.queue._kick()
+    await settled(fresh)
+    assert not fresh.queue._pending and not ha.services.calls and old.exists()
+    assert fresh_cache.exact("Activity") == "/local/activity_images/old.png"
+    assert not (await fresh.async_plan([fresh.library.image_id(old.name)]))["items"][0]["blocked_reason"]
+
+
+@pytest.mark.asyncio
+async def test_abandon_rejects_outstanding_managed_work(ha, configured, monkeypatch):
+    cache, _ = configured
+    picture(ha, "old.png")
+    deletions = manager(ha, configured)
+    native = deletions._replace
+    async def failure(*args):
+        raise OSError("precommit failure")
+    monkeypatch.setattr(deletions, "_replace", failure)
+    _, operation = await select(deletions, ["old.png"])
+    await settled(deletions)
+    monkeypatch.setattr(deletions, "_replace", native)
+    item = cache._deletions[operation["id"]]["items"][0]
+    job = deletions.queue._new_job("Synthetic managed title", "manual")
+    job["deletion"] = {"operation_id": operation["id"], "image_id": item["id"], "key": "synthetic managed title"}
+    deletions.queue._jobs.append(job)
+    deletions.queue._pending.append(job["title"])
+    await deletions.queue._save()
+    with pytest.raises(MappingConflict, match="still settling"):
+        await deletions.async_abandon(operation["id"], True)
+    assert cache._deletions[operation["id"]]["items"][0]["state"] == "failed"
+    await deletions.queue.async_cancel([job["title"]])
+    assert (await deletions.async_abandon(operation["id"], True))["state"] == "abandoned"
+    deletions.queue._kick()
+    assert not deletions.queue._pending and not ha.services.calls

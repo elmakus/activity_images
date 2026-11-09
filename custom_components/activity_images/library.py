@@ -231,14 +231,21 @@ class ActivityImageLibrary:
         if image is None:
             await self.async_inventory(refresh=True)
             image = self._images.get(image_id)
-        if image is None or asset not in image["files"]:
+        if image is None or (asset != "preview" and asset not in image["files"]):
             raise ValueError("Image asset not found")
         def read():
-            data = _read_owned(self.root, image["files"][asset])
+            data = _read_owned(self.root, image["files"]["master" if asset == "preview" else asset])
             try:
                 _, _, format_name = _verify(data)
             except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
                 raise ValueError("Invalid image asset") from exc
+            if asset == "preview":
+                with Image.open(BytesIO(data)) as original:
+                    preview = original.convert("RGBA")
+                    preview.thumbnail((256, 256), Image.Resampling.LANCZOS)
+                    output = BytesIO()
+                    preview.save(output, format="PNG")
+                return output.getvalue(), "image/png"
             return data, {"PNG": "image/png", "WEBP": "image/webp", "JPEG": "image/jpeg", "GIF": "image/gif"}[format_name]
         return await self.hass.async_add_executor_job(read)
 
