@@ -328,6 +328,12 @@ async def run():
         assert panel.config is not None
         assert panel.config["_panel_custom"]["name"] == "activity-images-panel"
         assert panel.config["_panel_custom"]["module_url"] == MODULE_URL
+        settings_commands = {k for k in hass.data["websocket_api"] if k.startswith("activity_images/settings/")}
+        assert settings_commands == {
+            "activity_images/settings/get",
+            "activity_images/settings/save",
+            "activity_images/settings/diagnostics",
+        }
         library_commands = {k for k in hass.data["websocket_api"] if k.startswith("activity_images/library/")}
         assert len(library_commands) == 17
         resources_before = tuple(hass.http.app.router.resources())
@@ -368,6 +374,21 @@ async def run():
             }.items():
                 denied = await command(user_ws, name, **args)
                 assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
+            for settings_type, data in (
+                ("get", {}),
+                ("save", {"revision": "0" * 64, "values": {}}),
+                ("diagnostics", {}),
+            ):
+                counter += 1
+                await user_ws.send_json({
+                    "id": counter, "type": "activity_images/settings/" + settings_type, **data,
+                })
+                denied = await asyncio.wait_for(user_ws.receive_json(), 5)
+                assert denied["id"] == counter, denied
+                assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
+            forbidden_preview = "/api/activity_images/settings/reference?media_id=media-source%3A%2F%2Fmedia_source%2Flocal%2Freference.png"
+            assert (await client.get(forbidden_preview)).status == 401
+            assert (await client.get(forbidden_preview, headers={"Authorization": "Bearer " + user_token})).status == 401
             listed = await command(admin_ws, "list", limit=1)
             assert listed["success"], listed
             assert listed["result"]["total"] == 2
