@@ -17,7 +17,7 @@
   };
   const message = (error) => error?.message || String(error);
   const style = `
-    :host { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; color:var(--primary-text-color); font-family:var(--paper-font-body1_-_font-family, sans-serif); background:var(--lovelace-background, var(--primary-background-color)); }
+    :host { display:flex; flex-direction:column; height:100vh; height:100dvh; min-height:0; overflow:hidden; color:var(--primary-text-color); font-family:var(--paper-font-body1_-_font-family, sans-serif); background:var(--lovelace-background, var(--primary-background-color)); }
     * { box-sizing:border-box; } [hidden] { display:none !important; }
     header { display:flex; flex-shrink:0; align-items:center; gap:12px; min-height:64px; padding:8px 16px; background:var(--app-header-background-color, var(--card-background-color)); color:var(--app-header-text-color, var(--primary-text-color)); }
     h1 { font-size:22px; font-weight:500; margin:0; flex:1; } h2 { font-size:20px; font-weight:500; } h3 { font-size:16px; }

@@ -392,6 +392,8 @@ test('active generation outside recorded queue is visible in both views; scroll 
   await panel._loadJobs();
   assert.match(panel._queueStatus.textContent, /Generation idle/);
   const css = panel.shadowRoot.querySelector('style').textContent;
+  // HA's custom-panel parent can have auto height; the panel must bound itself to the viewport.
+  assert.match(css, /:host \{[^}]*height:100vh; height:100dvh;[^}]*overflow:hidden;/);
   assert.match(css, /main \{ flex:1; min-height:0; overflow:auto;/);
   assert.match(css, /header \{ display:flex; flex-shrink:0;/);
   assert.match(css, /object-fit:contain/);
