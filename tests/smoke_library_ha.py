@@ -322,6 +322,8 @@ async def run():
         assert len(view._prepare_result_json(options_form)["data_schema"]) == 7
         assert await async_setup(hass, {})
         entry: Any = Entry()
+        hass.config_entries.async_entries = lambda domain: [entry]
+        hass.config_entries.async_update_entry = lambda item, *, options: setattr(item, "options", options)
         assert await async_setup_entry(hass, entry)
         panel = hass.data[frontend.DATA_PANELS][PANEL_ROUTE]
         assert panel.require_admin
@@ -389,6 +391,26 @@ async def run():
             forbidden_preview = "/api/activity_images/settings/reference?media_id=media-source%3A%2F%2Fmedia_source%2Flocal%2Freference.png"
             assert (await client.get(forbidden_preview)).status == 401
             assert (await client.get(forbidden_preview, headers={"Authorization": "Bearer " + user_token})).status == 401
+            async def settings_command(name, **data):
+                nonlocal counter
+                counter += 1
+                await admin_ws.send_json({"id": counter, "type": "activity_images/settings/" + name, **data})
+                answer = await asyncio.wait_for(admin_ws.receive_json(), 5)
+                assert answer["id"] == counter, answer
+                return answer
+            snapshot = await settings_command("get")
+            assert snapshot["success"], snapshot
+            revision = snapshot["result"]["revision"]
+            assert len(revision) == 64
+            invalid_settings = await settings_command("save", revision=revision, values={"bad_key": "x"})
+            assert invalid_settings["error"]["code"] == "settings_error", invalid_settings
+            saved = await settings_command("save", revision=revision, values={"calendar_lookahead_days": 21})
+            assert saved["success"] and saved["result"]["changed"], saved
+            assert entry.options["calendar_lookahead_days"] == 21
+            stale = await settings_command("save", revision=revision, values={"calendar_lookahead_days": 22})
+            assert stale["error"]["code"] == "settings_conflict", stale
+            diagnostics = await settings_command("diagnostics")
+            assert diagnostics["success"] and diagnostics["result"]["provider"]["status"] == "not_configured"
             listed = await command(admin_ws, "list", limit=1)
             assert listed["success"], listed
             assert listed["result"]["total"] == 2

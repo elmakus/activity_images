@@ -60,3 +60,9 @@ def test_partial_update_and_safe_prompt_rendering():
         "Party {strange}", "Draw {{once}}: {title}"
     )
     assert rendered == "Draw {once}: Party {strange}"
+
+
+def test_title_content_is_not_reinterpreted_as_template():
+    assert prompts.build_activity_image_instructions(
+        "Play {{braced}}", "Make {title} with {{literal}}"
+    ) == "Make Play {{braced}} with {literal}"

@@ -47,6 +47,12 @@ def save_settings(hass, changes: dict, revision: str) -> dict:
     after = validate_settings(changes, before)
     if before == after:
         return {"changed": False, "revision": revision, "reload": "none"}
+    runtimes = getattr(hass, "data", {}).get(DOMAIN, {})
+    runtime = runtimes.get(entry.entry_id) if runtimes else None
+    if runtime is not None and runtime.generator.is_generating:
+        raise HomeAssistantError(
+            "Wait for the current image generation to finish before saving settings"
+        )
     # Existing unrelated options are retained; initial entry.data is never mutated.
     hass.config_entries.async_update_entry(entry, options={**entry.options, **after})
     return {"changed": True, "revision": _revision(after), "reload": "scheduled"}

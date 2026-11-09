@@ -79,3 +79,18 @@ def test_no_config_entry_rejects_request():
     hass = types.SimpleNamespace(config_entries=types.SimpleNamespace(async_entries=lambda _: []))
     with pytest.raises(api.HomeAssistantError):
         api.read_settings(hass)
+
+
+def test_reject_reload_during_active_generation():
+    entries = Entries()
+    entries.entry.entry_id = "current"
+    hass = types.SimpleNamespace(
+        config_entries=entries,
+        data={const.DOMAIN: {"current": types.SimpleNamespace(
+            generator=types.SimpleNamespace(is_generating=True)
+        )}},
+    )
+    revision = api.read_settings(hass)["revision"]
+    with pytest.raises(api.HomeAssistantError, match="generation"):
+        api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 5}, revision)
+    assert entries.updates == []

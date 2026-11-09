@@ -54,4 +54,4 @@ def validate_prompt_template(template: str) -> str:
 def build_activity_image_instructions(title: str, template: str | None = None) -> str:
     """Render one safe user-supplied title without interpreting its braces."""
     selected = validate_prompt_template(template if template is not None else DEFAULT_PROMPT_TEMPLATE)
-    return selected.replace("{title}", title).replace("{{", "{").replace("}}", "}")
+    return selected.format(title=title)
