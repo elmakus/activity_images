@@ -13,7 +13,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
 from .engine import ActivityImageGenerator
-from .image_cache import normalize_title
+from .image_cache import asset_url, normalize_title
 from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ class ActivityImageQueue:
                           "pending", "running", "review", "accepted", "discarded", "failed", "cancelled", "interrupted", "completed",
                       } and not (job["kind"] == "background" and job["state"] in {"pending", "running"})]
         for job in self._jobs:
-            if job["kind"] == "manual" and job["state"] in {"pending", "running"}:
+            if (job["kind"] == "manual" or job.get("deletion")) and job["state"] in {"pending", "running"}:
                 self._set_state(job, "interrupted", "Interrupted; explicitly retry to generate a new candidate")
                 self._pending = [t for t in self._pending if normalize_title(t) != normalize_title(job["title"])]
         self._trim_history()
@@ -132,6 +132,7 @@ class ActivityImageQueue:
                 if (
                     not title or len(title) > 255 or not key
                     or key in known or key in self._failed or key in self._manual_blocked or key in self._retry_blocked
+                    or self.engine.cache.reserved(title)
                 ):
                     continue
                 if await self.engine.cache.async_find(title):
@@ -231,14 +232,16 @@ class ActivityImageQueue:
     def _set_state(job: dict, state: str, error: str | None = None) -> None:
         job.update(state=state, error=error, updated_at=datetime.now(UTC).isoformat())
 
-    @staticmethod
-    def _public_job(job: dict) -> dict:
+    def _public_job(self, job: dict) -> dict:
         from .library import IMAGE_API, ActivityImageLibrary
-        url = job.get("result_url")
+        result_deleted = bool(job.get("result_deleted")) or self.engine.cache.is_deleted(job.get("result_url") or "")
+        url = None if result_deleted else job.get("result_url")
         image_id = ActivityImageLibrary.image_id(url.split("?", 1)[0].rsplit("/", 1)[-1]) if url else None
         return {key: job.get(key) for key in ("id", "title", "kind", "state", "error", "created_at", "updated_at")} | {
             "key": normalize_title(job["title"]),
             "image_id": image_id, "image_url": f"{IMAGE_API}/{image_id}/master" if image_id else None,
+            "result_deleted": result_deleted,
+            "operation_id": job.get("deletion", {}).get("operation_id"),
         }
 
     def _trim_history(self) -> None:
@@ -252,13 +255,19 @@ class ActivityImageQueue:
                 "error": None, "created_at": now, "updated_at": now,
                 "original_url": self.engine.cache.exact(title), "result_url": None}
 
-    async def async_candidate(self, title: str) -> dict:
+    async def async_candidate(self, title: str, *, deletion: dict | None = None, job_id: str | None = None) -> dict:
         from .library import validate_title
         title = validate_title(title)
         async with self._mutation():
             if self._closed:
                 raise ValueError("Activity Images is unloading")
+            if self.engine.cache.reserved(title, operation_id=deletion["operation_id"] if deletion else None):
+                raise ValueError("Title is reserved for permanent deletion")
+            if job_id and any(job["id"] == job_id for job in self._jobs):
+                return self._public_job(self._job(job_id))
             if existing := self._manual(title):
+                if deletion or existing.get("deletion"):
+                    raise ValueError("An outstanding job already exists for this title")
                 return self._public_job(existing)
             if any(normalize_title(t) == normalize_title(title) for t in self._pending):
                 raise ValueError(
@@ -266,6 +275,8 @@ class ActivityImageQueue:
                     "the waiting job before requesting a fresh candidate."
                 )
             job = self._new_job(title, "manual")
+            if deletion:
+                job.update(id=job_id, deletion=deepcopy(deletion))
             self._manual_blocked.add(normalize_title(title))
             self._jobs.append(job)
             self._pending.append(title)
@@ -285,6 +296,8 @@ class ActivityImageQueue:
     async def async_accept(self, job_id: str) -> dict:
         async with self._mutation():
             job = self._job(job_id)
+            if job.get("deletion"):
+                raise ValueError("Replacement candidates are managed by their deletion operation")
             if job["state"] == "accepted":
                 return self._public_job(job)
             if job["state"] != "review":
@@ -310,6 +323,8 @@ class ActivityImageQueue:
     async def async_discard(self, job_id: str) -> dict:
         async with self._mutation():
             job = self._job(job_id)
+            if job.get("deletion"):
+                raise ValueError("Replacement candidates are managed by their deletion operation")
             if job["state"] != "review":
                 raise ValueError("Only a review candidate can be discarded")
             self._set_state(job, "discarded")
@@ -320,6 +335,8 @@ class ActivityImageQueue:
     async def async_retry(self, *, job_id: str | None = None, title: str | None = None) -> dict:
         if job_id:
             job = self._job(job_id)
+            if job.get("deletion"):
+                raise ValueError("Use the deletion operation explicit retry")
             if job["kind"] != "manual" or job["state"] not in {"failed", "interrupted"}:
                 raise ValueError("Only failed or interrupted manual jobs can be retried")
             return await self.async_candidate(job["title"])
@@ -384,7 +401,10 @@ class ActivityImageQueue:
             result = None
             state, error = "review" if manual else "completed", None
             try:
-                result = await self.engine.async_generate(title, force=True, remember=False) if manual else await self.engine.async_generate(title)
+                if manual and job.get("deletion"):
+                    result = await self.engine.async_generate(title, force=True, remember=False, deletion=job["deletion"])
+                else:
+                    result = await self.engine.async_generate(title, force=True, remember=False) if manual else await self.engine.async_generate(title)
             except asyncio.CancelledError:
                 state, error = "interrupted", "Interrupted; explicitly retry to generate a new candidate"
                 raise
@@ -408,6 +428,46 @@ class ActivityImageQueue:
                     # The durable running boundary already requires explicit manual retry.
                     if self.hass.state is not CoreState.stopping:
                         await self._save()
+
+    async def async_supersede_replacements_locked(self, job_ids: list[str]) -> None:
+        """Caller holds queue lock; invalidate only explicitly reviewed missing results."""
+        jobs = [job for job in self._jobs if job["id"] in job_ids and job.get("deletion")]
+        before = deepcopy(jobs)
+        generation = self._save_generation
+        try:
+            for job in jobs:
+                self._set_state(job, "failed", "Persisted replacement unavailable; explicit retry superseded this attempt")
+            if jobs:
+                await self._save()
+        except BaseException:
+            if generation == self._save_generation:
+                for job, values in zip(jobs, before, strict=True):
+                    job.clear()
+                    job.update(values)
+            raise
+
+    async def async_redact_deleted(self, urls: list[str]) -> None:
+        """Persist history redaction before any physical cleanup (separate Store)."""
+        async with self._mutation():
+            for job in self._jobs:
+                if asset_url(job.get("result_url") or "") in urls:
+                    job["result_url"] = None
+                    job["result_deleted"] = True
+                if asset_url(job.get("original_url") or "") in urls:
+                    job["original_url"] = None
+            await self._save()
+
+    async def async_finish_replacements(self, operation_id: str, image_id: str) -> None:
+        async with self._mutation():
+            item = next(item for item in self.engine.cache._deletions[operation_id]["items"] if item["id"] == image_id)
+            for job in self._jobs:
+                context = job.get("deletion", {})
+                key = context.get("key")
+                if (context.get("operation_id") == operation_id and context.get("image_id") == image_id
+                        and item["jobs"].get(key) == job["id"] and key in item["candidates"]):
+                    job["result_url"] = item["candidates"][key]
+                    self._set_state(job, "accepted")
+            await self._save()
 
     async def async_shutdown(self) -> None:
         self._closed = True

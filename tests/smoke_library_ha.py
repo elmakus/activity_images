@@ -141,6 +141,64 @@ async def native_write_failures(runtime):
         assert cache.exact("Durable Alias") == old
 
 
+async def native_deletion_failures(runtime, folder):
+    """New journal, mapping commit, and history redaction reject swallowed WriteError."""
+    cache, deletions = runtime.cache, runtime.deletions
+    path = folder / "native-delete.png"
+    Image.new("RGB", (16, 12), "red").save(path)
+    url = "/local/activity_images/native-delete.png"
+    await cache.async_remember("Native historical alias", url)
+    history = runtime.queue._new_job("Native deleted history", "manual")
+    history.update(state="accepted", result_url=url)
+    runtime.queue._jobs.append(history)
+    await runtime.queue._save()
+    plan = await deletions.async_plan([runtime.library.image_id(path.name)])
+    native = write_utf8_file_atomic
+    failing_paths = set()
+    def fail_native(filename, *args, **kwargs):
+        if filename in failing_paths:
+            raise WriteError("Injected native deletion failure")
+        return native(filename, *args, **kwargs)
+    with patch.object(ha_storage, "write_utf8_file_atomic", fail_native):
+        failing_paths.add(cache._store.path)
+        try:
+            await deletions.async_delete(plan["token"], False, True)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("Undurable journal authorized deletion")
+        assert path.exists() and cache.exact("Native historical alias") == url
+        failing_paths.clear()
+        with patch.object(deletions, "_kick", lambda: None):
+            operation = await deletions.async_delete(plan["token"], False, True)
+        commit = cache.async_commit_deletion
+        async def fail_commit(*args):
+            failing_paths.add(cache._store.path)
+            try:
+                return await commit(*args)
+            finally:
+                failing_paths.clear()
+        with patch.object(cache, "async_commit_deletion", fail_commit):
+            await deletions._run()
+        assert deletions._operation(operation["id"])["state"] == "failed"
+        assert path.exists() and cache.exact("Native historical alias") == url
+        assert not cache.is_deleted(url)
+        retry = await deletions.async_retry_plan(operation["id"])
+        assert retry["replacement_requests"] == 0
+        # Commit succeeds, but job-history Store failure must still prevent unlink.
+        failing_paths.add(runtime.queue._store.path)
+        await deletions.async_retry(operation["id"], retry["token"], True)
+        await deletions._task
+        assert deletions._operation(operation["id"])["state"] == "cleanup_failed"
+        assert path.exists() and cache.exact("Native historical alias") is None and cache.is_deleted(url)
+        failing_paths.clear()
+        retry = await deletions.async_retry_plan(operation["id"])
+        assert retry["replacement_requests"] == 0
+        await deletions.async_retry(operation["id"], retry["token"], True)
+        await deletions._task
+        assert deletions._operation(operation["id"])["state"] == "done" and not path.exists()
+
+
 async def stopping_writes_never_commit_after_reported_failure():
     from custom_components.activity_images.engine import ActivityImageGenerator
     from custom_components.activity_images.image_cache import ActivityImageCache
@@ -267,7 +325,7 @@ async def run():
         assert panel.config["_panel_custom"]["name"] == "activity-images-panel"
         assert panel.config["_panel_custom"]["module_url"] == MODULE_URL
         library_commands = {k for k in hass.data["websocket_api"] if k.startswith("activity_images/library/")}
-        assert len(library_commands) == 11
+        assert len(library_commands) == 16
         resources_before = tuple(hass.http.app.router.resources())
         handlers_before = {k: hass.data["websocket_api"][k][0] for k in library_commands}
         # A real aiohttp test server runs HA's actual bearer authentication middleware,
@@ -299,6 +357,9 @@ async def run():
                 "unlink": {"image_id": "x", "title": "Test"}, "generate": {"title": "Test"},
                 "jobs": {}, "accept": {"job_id": "x"}, "discard": {"job_id": "x"},
                 "cancel": {"titles": ["Test"]}, "retry": {"title": "Test"}, "clear_errors": {},
+                "delete_plan": {"image_ids": ["a" * 32]}, "delete": {"token": "x", "regenerate": False, "confirm": True},
+                "deletions": {}, "delete_retry_plan": {"operation_id": "x"},
+                "delete_retry": {"operation_id": "x", "token": "x", "confirm": True},
             }.items():
                 denied = await command(user_ws, name, **args)
                 assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
@@ -344,6 +405,7 @@ async def run():
             preview = next(job for job in jobs["result"]["jobs"] if job["id"] == candidate["id"])
             assert preview["image_url"].startswith("/api/activity_images/library/")
             assert preview["image_id"] == image_id
+            assert preview["thumbnail_url"] == preview["image_url"]  # No thumbnail for this fixture.
             await entry.runtime_data.cache.async_remember("Stale Candidate", "/local/activity_images/changed.png")
             stale = await command(admin_ws, "accept", job_id=candidate["id"])
             assert stale["error"]["code"] == "conflict", stale
@@ -365,6 +427,35 @@ async def run():
             else:
                 raise AssertionError("Public link accepted a symlink")
             await native_write_failures(entry.runtime_data)
+            await native_deletion_failures(entry.runtime_data, folder)
+            Image.new("RGB", (16, 12), "red").save(folder / "delete-me.png")
+            Image.new("RGB", (8, 6), "red").save(folder / "delete-me_thumb.webp")
+            delete_id = entry.runtime_data.library.image_id("delete-me.png")
+            for args in ({"image_ids": []}, {"image_ids": ["a"] * 65}):
+                invalid = await command(admin_ws, "delete_plan", **args)
+                assert not invalid["success"] and invalid["error"]["code"] == "invalid_format", invalid
+            assert not (await command(admin_ws, "delete_plan", image_ids=["../../private"]))["success"]
+            planned = await command(admin_ws, "delete_plan", image_ids=[delete_id])
+            assert planned["success"] and planned["result"]["replacement_requests"] == 0, planned
+            rejected = await command(admin_ws, "delete", token=planned["result"]["token"], regenerate=False, confirm=False)
+            assert not rejected["success"], rejected
+            with patch("custom_components.activity_images.library_deletion.cleanup", side_effect=OSError("Synthetic cleanup failure")):
+                deleted = await command(admin_ws, "delete", token=planned["result"]["token"], regenerate=False, confirm=True)
+                assert deleted["success"], deleted
+                await entry.runtime_data.deletions._task
+            retry_plan = await command(admin_ws, "delete_retry_plan", operation_id=deleted["result"]["id"])
+            assert retry_plan["success"] and retry_plan["result"]["replacement_requests"] == 0, retry_plan
+            retried = await command(admin_ws, "delete_retry", operation_id=deleted["result"]["id"], token=retry_plan["result"]["token"], confirm=True)
+            assert retried["success"], retried
+            await entry.runtime_data.deletions._task
+            repeated = await command(admin_ws, "delete_retry", operation_id=deleted["result"]["id"], token=retry_plan["result"]["token"], confirm=True)
+            assert repeated["success"] and repeated["result"]["id"] == deleted["result"]["id"]
+            history = await command(admin_ws, "deletions")
+            assert any(op["id"] == deleted["result"]["id"] and op["state"] == "done" for op in history["result"]["operations"])
+            status = await command(admin_ws, "jobs")
+            assert status["result"]["operations"] == history["result"]["operations"]
+            assert not (folder / "delete-me.png").exists() and not (folder / "delete-me_thumb.webp").exists()
+            assert not (await command(admin_ws, "delete_retry_plan", operation_id=deleted["result"]["id"]))["success"]
             # Manager-only clear must preserve legacy paid retry authorization barriers.
             entry.runtime_data.queue._failed["manager legacy failure"] = "old error"
             assert (await command(admin_ws, "clear_errors"))["success"]

@@ -22,6 +22,7 @@ from .engine import ActivityImageGenerator
 from .image_cache import ActivityImageCache, async_get_cache
 from .image_queue import ActivityImageQueue
 from .library import ActivityImageLibrary, _read_owned, _verify, validate_title
+from .library_deletion import ActivityImageDeletions
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class ActivityImagesRuntime:
     cache: ActivityImageCache
     calendar: ActivityCalendarAdapter
     library: ActivityImageLibrary
+    deletions: ActivityImageDeletions | None = None
 
 
 def _get_runtime(hass: HomeAssistant) -> ActivityImagesRuntime:
@@ -194,6 +196,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         generator=generator, queue=queue, cache=cache, calendar=calendar,
         library=ActivityImageLibrary(hass, cache),
     )
+    runtime.deletions = ActivityImageDeletions(hass, runtime.library, queue, calendar)
     entry.runtime_data = runtime
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
     generator.image_saved_callback = calendar.image_saved
@@ -202,6 +205,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await _async_register_manager(hass)
         manager_registered = True
         await queue.async_setup()
+        await runtime.deletions.async_setup()
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "ai_task"])
         await calendar.async_start()
     except Exception:
@@ -209,6 +213,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _async_remove_manager(hass)
         generator.image_saved_callback = None
         await calendar.async_shutdown()
+        await runtime.deletions.async_shutdown()
         await queue.async_shutdown()
         hass.data[DOMAIN].pop(entry.entry_id, None)
         raise
@@ -226,6 +231,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _async_remove_manager(hass)
         runtime.generator.image_saved_callback = None
         await runtime.calendar.async_shutdown()
+        if runtime.deletions is not None:
+            await runtime.deletions.async_shutdown()
         await runtime.queue.async_shutdown()
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return True

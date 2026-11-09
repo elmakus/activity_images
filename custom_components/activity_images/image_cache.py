@@ -12,7 +12,7 @@ from copy import deepcopy
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -68,6 +68,14 @@ def _canonical_url(image_url: str) -> str:
     return image_url.split("?", 1)[0]
 
 
+def asset_url(image_url: str) -> str:
+    """Canonical owned asset identity, including percent-encoded filenames."""
+    canonical = _canonical_url(image_url)
+    if canonical.startswith(ACTIVITY_IMAGE_PREFIX):
+        return ACTIVITY_IMAGE_PREFIX + quote(unquote(canonical[len(ACTIVITY_IMAGE_PREFIX):]), safe="")
+    return canonical
+
+
 class MappingConflict(ValueError):
     """An exact association changed or replacement was not confirmed."""
 
@@ -78,12 +86,14 @@ def _transaction(method):
     async def wrapped(self, *args, **kwargs):
         async with self._write_lock:
             entries, metadata = deepcopy(self._entries), deepcopy(self._metadata)
+            deletions, tombstones = deepcopy(self._deletions), set(self._tombstones)
             generation = self._save_generation
             try:
                 return await method(self, *args, **kwargs)
             except BaseException as exc:
                 if not isinstance(exc, asyncio.CancelledError) or generation == self._save_generation:
                     self._entries, self._metadata = entries, metadata
+                    self._deletions, self._tombstones = deletions, tombstones
                     self._rebuild_token_index()
                 raise
     return wrapped
@@ -104,6 +114,8 @@ class ActivityImageCache:
         self._metadata: dict[str, dict] = {}
         self.image_revision = 0
         self._save_generation = 0
+        self._deletions: dict[str, dict] = {}
+        self._tombstones: set[str] = set()
 
     async def async_setup(self) -> None:
         """Load the lightweight title index once."""
@@ -113,6 +125,8 @@ class ActivityImageCache:
             if self._loaded:
                 return
             data = await self._store.async_load() or {}
+            self._deletions = data.get("deletions", {})
+            self._tombstones = set(data.get("tombstones", []))
             raw_metadata = data.get("images", {})
             self._metadata = {
                 url: metadata for url, metadata in raw_metadata.items()
@@ -292,6 +306,7 @@ class ActivityImageCache:
     async def async_remember(self, title: str, image_url: str) -> None:
         """Remember one mapping without evicting any other association."""
         key = normalize_title(title)
+        self.check_mapping(title, image_url)
         if not key or not image_url:
             return
         old = self._entries.get(key)
@@ -322,7 +337,7 @@ class ActivityImageCache:
             title = (task.get("title") or "").strip()
             image_url = task.get("image_url")
             key = normalize_title(title)
-            if not key or not image_url:
+            if not key or not image_url or self.is_deleted(image_url) or self.reserved(title, image_url):
                 continue
             current = self._entries.get(key)
             if current and current.get("image_url") == image_url:
@@ -338,7 +353,7 @@ class ActivityImageCache:
             self._rebuild_token_index()
             await self._async_save()
 
-    async def async_find(self, title: str, *, touch: bool = True, similar: bool = True) -> str | None:
+    async def async_find(self, title: str, *, touch: bool = True, similar: bool = True, prune: bool = True) -> str | None:
         """Find an exact or conservatively similar cached title locally."""
         key = normalize_title(title)
         if not key:
@@ -349,7 +364,7 @@ class ActivityImageCache:
             if touch:
                 await self._async_touch_url(exact["image_url"])
             return exact["image_url"]
-        if exact:
+        if exact and prune:
             await self._async_forget_keys({key}, expected_url=exact["image_url"])
 
         if not similar:
@@ -383,7 +398,8 @@ class ActivityImageCache:
             return None
         image_url = self._entries[best_key]["image_url"]
         if not await self._async_url_exists(image_url):
-            await self._async_forget_keys({best_key}, expected_url=image_url)
+            if prune:
+                await self._async_forget_keys({best_key}, expected_url=image_url)
             return None
 
         # A fuzzy lookup updates the canonical image's recency without creating
@@ -425,6 +441,7 @@ class ActivityImageCache:
     async def _async_forget_keys(self, keys: set[str], *, expected_url: str | None = None) -> None:
         if expected_url is not None:
             keys = {key for key in keys if self._entries.get(key, {}).get("image_url") == expected_url}
+        keys = {key for key in keys if not self.reserved(key, self._entries.get(key, {}).get("image_url", ""))}
         if not keys:
             return
         for key in keys:
@@ -450,6 +467,8 @@ class ActivityImageCache:
             await self._async_save()
 
     async def _async_url_exists(self, image_url: str) -> bool:
+        if self.is_deleted(image_url):
+            return False
         path = _canonical_url(image_url)
         location = next(
             (
@@ -483,6 +502,8 @@ class ActivityImageCache:
             if (title and key == normalize_title(title))
             or (url and _canonical_url(entry["image_url"]) == _canonical_url(url))
         }
+        if any(self.reserved(key, self._entries[key]["image_url"]) for key in keys):
+            raise MappingConflict("Associations are reserved for permanent deletion")
         if keys:
             for key in keys:
                 self._entries.pop(key)
@@ -503,6 +524,7 @@ class ActivityImageCache:
 
     @_transaction
     async def async_record_image(self, url: str, metadata: dict) -> None:
+        self.check_mapping("", url)
         self._metadata[_canonical_url(url)] = deepcopy(metadata)
         await self._async_save()
         self.image_revision += 1
@@ -512,6 +534,7 @@ class ActivityImageCache:
         self, title: str, url: str, *, replace: bool = False,
         expected: str | None = None, compare: bool = False,
     ) -> None:
+        self.check_mapping(title, url)
         key = normalize_title(title)
         if not key or not title.strip() or len(title.strip()) > 255:
             raise ValueError("Activity title must contain 1–255 characters and a letter or number")
@@ -529,6 +552,7 @@ class ActivityImageCache:
 
     @_transaction
     async def async_unlink(self, title: str, url: str, *, expected: str | None = None, compare: bool = False) -> None:
+        self.check_mapping(title, url)
         current = self.exact(title)
         if compare and current != expected:
             raise MappingConflict("The title mapping changed; refresh before accepting")
@@ -538,12 +562,89 @@ class ActivityImageCache:
         self._rebuild_token_index()
         await self._async_save()
 
+    @staticmethod
+    def mapping_identity(entries: dict) -> dict:
+        return {key: (entry["title"], entry["image_url"]) for key, entry in entries.items()}
+
+    def is_deleted(self, url: str) -> bool:
+        return asset_url(url) in self._tombstones
+
+    def reserved(self, title: str = "", url: str = "", *, operation_id: str | None = None) -> bool:
+        key = normalize_title(title)
+        for operation in self._deletions.values():
+            if operation["id"] == operation_id or operation["state"] == "done":
+                continue
+            for item in operation["items"]:
+                if item["state"] == "done":
+                    continue
+                if asset_url(url) in item["urls"] or key in item["reserved_titles"]:
+                    return True
+        return False
+
+    def check_mapping(self, title: str, url: str) -> None:
+        if self.is_deleted(url) or self.reserved(title, url):
+            raise MappingConflict("Image or title is reserved for permanent deletion; refresh the library")
+
+    @_transaction
+    async def async_journal(self, operation: dict, *, expected_entries: dict | None = None) -> None:
+        if expected_entries is not None and self.mapping_identity(self._entries) != self.mapping_identity(expected_entries):
+            raise MappingConflict("Library associations changed; review a fresh deletion plan")
+        self._deletions[operation["id"]] = deepcopy(operation)
+        await self._async_save()
+
+    @_transaction
+    async def async_record_candidate(self, url: str, metadata: dict, context: dict) -> None:
+        operation = self._deletions[context["operation_id"]]
+        item = next(item for item in operation["items"] if item["id"] == context["image_id"])
+        if item["state"] != "running":
+            raise MappingConflict("Deletion operation is no longer running")
+        from .deletion_files import snapshot
+        filename = unquote(asset_url(url)[len(ACTIVITY_IMAGE_PREFIX):])
+        stem = filename[:-4]
+        root = Path(self.hass.config.path("www", "activity_images"))
+        evidence = await self.hass.async_add_executor_job(snapshot, root, [stem + suffix for suffix in (".png", "_thumb.webp", "_qa.webp")])
+        item.setdefault("candidate_identities", {})[context["key"]] = evidence
+        item["candidates"][context["key"]] = url
+        self._metadata[asset_url(url)] = deepcopy(metadata)
+        await self._async_save()
+        self.image_revision += 1
+
+    @_transaction
+    async def async_commit_deletion(self, operation_id: str, image_id: str) -> None:
+        operation = self._deletions[operation_id]
+        item = next(item for item in operation["items"] if item["id"] == image_id)
+        current = {key: entry for key, entry in self._entries.items() if asset_url(entry["image_url"]) in item["urls"]}
+        # Recency may legitimately change during reads; associations may not.
+        if self.mapping_identity(current) != self.mapping_identity(item["mappings"]):
+            raise MappingConflict("Image associations changed; original files retained")
+        for title in item["needed_titles"]:
+            key = normalize_title(title)
+            if key not in item["candidates"]:
+                raise MappingConflict("Not all replacements are durable")
+            if self._entries.get(key, {}).get("image_url") != item["expected_titles"][key]:
+                raise MappingConflict("Replacement title changed; original files retained")
+        for key in current:
+            self._entries.pop(key)
+        for title in item["needed_titles"]:
+            key = normalize_title(title)
+            self._entries[key] = {"title": title, "image_url": item["candidates"][key],
+                                  "tokens": sorted(_title_tokens(key)), "last_used_at": time.time()}
+        for url in item["urls"]:
+            self._metadata.pop(url, None)
+            self._tombstones.add(url)
+        item["state"] = "cleanup"
+        self._rebuild_token_index()
+        await self._async_save()
+        self.image_revision += 1
+
     async def _async_save(self) -> None:
         write = asyncio.create_task(async_save_verified(self.hass, self._store,
             {
                 "entries": deepcopy(self._entries),
                 "images": deepcopy(self._metadata),
                 "canvas_normalization_version": self._canvas_normalization_version,
+                "deletions": deepcopy(self._deletions),
+                "tombstones": sorted(self._tombstones),
             }
         ))
         cancelled = False

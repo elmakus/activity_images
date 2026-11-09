@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote
 
 import probatio as p
 from aiohttp import web
@@ -41,6 +42,11 @@ _SCHEMAS = {
     "cancel": {p.Required("titles"): p.All([_TITLE], p.Length(min=1, max=64))},
     "retry": {p.Optional("job_id"): _ID, p.Optional("title"): _TITLE},
     "clear_errors": {},
+    "delete_plan": {p.Required("image_ids"): p.All([_ID], p.Length(min=1, max=64))},
+    "delete": {p.Required("token"): _ID, p.Required("regenerate"): bool, p.Required("confirm"): True},
+    "deletions": {},
+    "delete_retry_plan": {p.Required("operation_id"): _ID},
+    "delete_retry": {p.Required("operation_id"): _ID, p.Required("token"): _ID, p.Required("confirm"): True},
 }
 
 
@@ -70,7 +76,32 @@ async def _dispatch(hass, command: str, args: dict):
     if command == "generate":
         return await library.async_generate(queue, **args)
     if command == "jobs":
-        return queue.status()
+        response = queue.status()
+        await library.async_inventory()
+        for job in response["jobs"]:
+            url = queue.candidate_url(job["id"])
+            image_id = library.image_id(unquote(url.split("?", 1)[0].rsplit("/", 1)[-1])) if url else None
+            image = library._images.get(image_id)
+            if image is None or runtime.cache.is_deleted(url or ""):
+                job.update(image_id=None, image_url=None, thumbnail_url=None, result_unavailable=bool(url))
+            else:
+                job.update(image_id=image_id, image_url=f"{IMAGE_API}/{image_id}/master",
+                           thumbnail_url=f"{IMAGE_API}/{image_id}/thumbnail" if "thumbnail" in image["files"] else f"{IMAGE_API}/{image_id}/master")
+        response["operations"] = runtime.deletions.operations() if runtime.deletions else []
+        return response
+    if command in {"delete_plan", "delete", "deletions", "delete_retry_plan", "delete_retry"}:
+        deletions = runtime.deletions
+        if deletions is None:
+            raise HomeAssistantError("Activity Images deletion manager is unavailable")
+        if command == "deletions":
+            return {"operations": deletions.operations()}
+        if command == "delete_plan":
+            return await deletions.async_plan(**args)
+        if command == "delete":
+            return await deletions.async_delete(**args)
+        if command == "delete_retry_plan":
+            return await deletions.async_retry_plan(**args)
+        return await deletions.async_retry(**args)
     if command == "accept":
         result = queue.candidate_url(args["job_id"])
         if result:

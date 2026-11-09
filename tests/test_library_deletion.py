@@ -1,0 +1,605 @@
+"""Synthetic permanent-deletion safety and recovery regressions (no paid calls)."""
+from __future__ import annotations
+
+import asyncio
+import json
+from copy import deepcopy
+from types import SimpleNamespace
+
+import pytest
+import test_behavior as behavior
+from test_library import picture
+
+from custom_components.activity_images import deletion_files
+from custom_components.activity_images.image_cache import (
+    MappingConflict,
+    normalize_title,
+)
+from custom_components.activity_images.library import ActivityImageLibrary
+from custom_components.activity_images.library_deletion import ActivityImageDeletions
+
+ha = behavior.ha
+configured = behavior.configured
+
+
+def manager(ha, configured, titles=()):
+    cache, engine = configured
+    queue = behavior.queue_module.ActivityImageQueue(ha, engine)
+    calendar = SimpleNamespace(_lock=asyncio.Lock(), calendar_titles={"calendar.test": list(titles)},
+                               calendars=(), last_scan="now", last_error=None)
+    async def reconcile():
+        calendar.images = {title: await cache.async_find(title, touch=False) for title in titles}
+    calendar.async_reconcile = reconcile
+    return ActivityImageDeletions(ha, ActivityImageLibrary(ha, cache), queue, calendar)
+
+
+async def settled(deletions):
+    for _ in range(1000):
+        task = deletions._task
+        if task and task.done():
+            await task
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("Deletion operation did not settle")
+
+
+async def select(deletions, names, regenerate=False):
+    plan = await deletions.async_plan([deletions.library.image_id(name) for name in names])
+    return plan, await deletions.async_delete(plan["token"], regenerate, True)
+
+
+@pytest.mark.asyncio
+async def test_plan_all_variants_exact_aliases_fuzzy_consumers_no_mutation(ha, configured):
+    cache, _ = configured
+    for name in ("old.png", "old_thumb.webp", "old_qa.webp"):
+        picture(ha, name)
+    await cache.async_remember("Clean the room", "/local/activity_images/old.png?v=1")
+    await cache.async_remember("Historical", "/local/activity_images/old_thumb.webp")
+    await cache.async_remember("QA alias", "/local/activity_images/old_qa.webp?v=2")
+    deletions = manager(ha, configured, ["Clean the room!", "clean the room", "Clean a room"])
+    before = deepcopy(ha.saved)
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert ha.saved == before and ha.services.calls == []
+    item = plan["items"][0]
+    assert item["files"] == ["old.png", "old_qa.webp", "old_thumb.webp"]
+    assert item["titles"] == ["Clean the room", "Historical", "QA alias"]
+    assert len({normalize_title(title) for title in item["needed_titles"]}) == len(item["needed_titles"])
+    assert "Clean the room!" in item["needed_titles"] or "clean the room" in item["needed_titles"]
+    assert plan["replacement_requests"] == len(item["needed_titles"])
+    assert plan["max_provider_attempts"] == 3 * plan["replacement_requests"]
+    assert "unknown" in plan["external_warning"] and not item["safe_without_regeneration"]
+    with pytest.raises(ValueError, match="authorization"):
+        await deletions.async_delete(plan["token"], False, True)
+
+
+@pytest.mark.asyncio
+async def test_plain_delete_tombstones_redacts_and_never_touches_home_tasks(ha, configured):
+    cache, _ = configured
+    for name in ("old.png", "old_thumb.webp", "old_qa.webp"):
+        picture(ha, name)
+    foreign = ha.base / "www/home_tasks/old.png"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(b"Home Tasks copy")
+    await cache.async_remember("Historical", "/local/activity_images/old_thumb.webp")
+    deletions = manager(ha, configured)
+    job = deletions.queue._new_job("Previous", "manual")
+    job.update(state="accepted", result_url="/local/activity_images/old.png?v=1", original_url="/local/activity_images/old_qa.webp")
+    deletions.queue._jobs.append(job)
+    await deletions.queue._save()
+    plan, operation = await select(deletions, ["old.png"])
+    assert plan["items"][0]["safe_without_regeneration"]
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "done"
+    assert not list((ha.base / "www/activity_images").glob("old*"))
+    assert foreign.read_bytes() == b"Home Tasks copy" and not cache.entries()
+    assert cache.is_deleted("/local/activity_images/old_thumb.webp?v=10")
+    saved_job = ha.saved[deletions.queue._store.key]["jobs"][0]
+    assert saved_job["result_url"] is None and saved_job["result_deleted"] and saved_job["original_url"] is None
+    assert (await deletions.async_delete(plan["token"], False, True))["id"] == operation["id"]
+    picture(ha, "old.png", "blue")  # A stale public link must not resurrect a tombstoned name.
+    for mutation in (cache.async_link("New", "/local/activity_images/old.png"),
+                     cache.async_remember("New", "/local/activity_images/%6Fld.png?v=2")):
+        with pytest.raises(MappingConflict):
+            await mutation
+    await cache.async_remember_many([{"title": "New", "image_url": "/local/activity_images/old.png"}])
+    assert not cache.entries()
+    assert (await deletions.library.async_list(refresh=True))["total"] == 0
+    assert ha.services.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["file", "mapping", "demand", "variant"])
+async def test_stale_plan_fails_without_mutation_or_provider(ha, configured, change):
+    cache, _ = configured
+    original = picture(ha, "old.png")
+    deletions = manager(ha, configured)
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    if change == "file":
+        picture(ha, "old.png", "blue")
+    elif change == "mapping":
+        await cache.async_remember("New association", "/local/activity_images/old.png")
+    elif change == "demand":
+        deletions.calendar.calendar_titles["calendar.test"] = ["New event"]
+    else:
+        picture(ha, "old_thumb.webp")
+    before = cache.entries()
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(plan["token"], True, True)
+    assert original.exists() and cache.entries() == before and not cache._deletions and ha.services.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[], ["../../private"], ["g" * 32], ["a" * 32] * 2, ["a" * 32] * 65])
+async def test_validate_opaque_selection(ha, configured, ids):
+    with pytest.raises(ValueError):
+        await manager(ha, configured).async_plan(ids)
+
+
+@pytest.mark.asyncio
+async def test_style_reference_derivative_and_review_are_blocked(ha, configured):
+    cache, engine = configured
+    for name in ("activity-icons-style-board-v1.png", "reference.png", "candidate.png", "orphan_qa.webp", "orphan_thumb.webp"):
+        picture(ha, name)
+    engine.settings["reference_media_content_id"] = "media-source://media_source/local/reference.png"
+    deletions = manager(ha, configured)
+    job = deletions.queue._new_job("Review", "manual")
+    job.update(state="review", result_url="/local/activity_images/candidate.png")
+    deletions.queue._jobs.append(job)
+    for name in ("activity-icons-style-board-v1.png", "reference.png", "candidate.png"):
+        plan = await deletions.async_plan([deletions.library.image_id(name)])
+        assert plan["items"][0]["blocked_reason"]
+        with pytest.raises(MappingConflict):
+            await deletions.async_delete(plan["token"], True, True)
+    await cache.async_remember("Derivative alias", "/local/activity_images/orphan_thumb.webp")
+    plan, _ = await select(deletions, ["orphan_qa.webp"])
+    assert plan["items"][0]["files"] == ["orphan_qa.webp", "orphan_thumb.webp"]
+    assert plan["items"][0]["titles"] == ["Derivative alias"]
+    await settled(deletions)
+    assert cache.exact("Derivative alias") is None
+
+
+@pytest.mark.asyncio
+async def test_corrupt_derivative_is_included_symlink_variant_blocks(ha, configured):
+    picture(ha, "old.png")
+    folder = ha.base / "www/activity_images"
+    (folder / "old_thumb.webp").write_bytes(b"corrupt")
+    deletions = manager(ha, configured)
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert plan["items"][0]["files"] == ["old.png", "old_thumb.webp"]
+    (folder / "old_qa.webp").symlink_to(folder / "old.png")
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert plan["items"][0]["blocked_reason"]
+
+
+@pytest.mark.asyncio
+async def test_all_replacements_durable_before_old_is_committed(ha, configured, monkeypatch):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    url = "/local/activity_images/old.png?v=1"
+    for title in ("One activity", "Two activity", "Historical alias"):
+        await cache.async_remember(title, url)
+    deletions = manager(ha, configured, ["One activity", "Two activity"])
+    original = engine.async_generate
+    calls = []
+    async def generate(title, **kwargs):
+        calls.append(title)
+        assert old.exists() and cache.exact("One activity") == url and cache.exact("Two activity") == url
+        if title == "Two activity":
+            raise RuntimeError("synthetic provider failure")
+        return await original(title, **kwargs)
+    monkeypatch.setattr(engine, "async_generate", generate)
+    plan, operation = await select(deletions, ["old.png"], True)
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "failed"
+    assert old.exists() and all(cache.exact(title) == url for title in ("One activity", "Two activity", "Historical alias"))
+    item = cache._deletions[operation["id"]]["items"][0]
+    first = item["candidates"][normalize_title("One activity")]
+    assert len(calls) == 2
+    retry = await deletions.async_retry_plan(operation["id"])
+    assert retry["replacement_requests"] == 1 and retry["max_provider_attempts"] == 3
+    assert retry["items"][0]["needed_titles"] == ["Two activity"]
+    monkeypatch.setattr(engine, "async_generate", original)
+    resumed = await deletions.async_retry(operation["id"], retry["token"], True)
+    assert (await deletions.async_retry(operation["id"], retry["token"], True))["id"] == resumed["id"]
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "done" and not old.exists()
+    assert cache.exact("One activity") == first and cache.exact("Two activity") != url
+    assert cache.exact("Historical alias") is None and len(ha.services.calls) == 2
+    assert len({job["id"] for job in deletions.queue._jobs}) == 3
+
+
+@pytest.mark.asyncio
+async def test_journal_failure_before_generation_retains_everything(ha, configured, monkeypatch):
+    cache, _ = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    async def failure(*args):
+        raise OSError("disk failure")
+    monkeypatch.setattr(cache._store, "async_save", failure)
+    with pytest.raises(OSError):
+        await deletions.async_delete(plan["token"], True, True)
+    assert old.exists() and cache.exact("Activity") == "/local/activity_images/old.png"
+    assert not cache._deletions and not ha.services.calls
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_reuses_persisted_candidate_without_paid_retry(ha, configured, monkeypatch):
+    cache, _ = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    save = cache._store.async_save
+    async def fail_commit(data):
+        if data["tombstones"]:
+            raise OSError("commit failed")
+        await save(data)
+    monkeypatch.setattr(cache._store, "async_save", fail_commit)
+    _, operation = await select(deletions, ["old.png"], True)
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "failed"
+    assert old.exists() and cache.exact("Activity") == "/local/activity_images/old.png" and not cache._tombstones
+    assert len(ha.services.calls) == 1
+    monkeypatch.setattr(cache._store, "async_save", save)
+    retry = await deletions.async_retry_plan(operation["id"])
+    assert retry["replacement_requests"] == 0
+    await deletions.async_retry(operation["id"], retry["token"], True)
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "done" and len(ha.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_observable_zero_paid_retry_and_restart(ha, configured, monkeypatch):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Historical", "/local/activity_images/old.png")
+    deletions = manager(ha, configured)
+    native = deletion_files.os.unlink
+    def fail_unlink(*args, **kwargs):
+        raise OSError("synthetic unlink failure")
+    monkeypatch.setattr(deletion_files.os, "unlink", fail_unlink)
+    _, operation = await select(deletions, ["old.png"])
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "cleanup_failed"
+    assert cache.exact("Historical") is None and not old.exists()
+    assert list((old.parent / ".deletions").iterdir())
+    retry = await deletions.async_retry_plan(operation["id"])
+    assert retry["replacement_requests"] == 0
+    monkeypatch.setattr(deletion_files.os, "unlink", native)
+    await deletions.async_shutdown()
+    fresh_cache = behavior.cache_module.ActivityImageCache(ha)
+    await fresh_cache.async_setup()
+    engine.cache = fresh_cache
+    fresh = manager(ha, (fresh_cache, engine))
+    await fresh.queue.async_setup()
+    await fresh.async_setup()
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "cleanup_failed"  # Explicit retry, not failed-cleanup GC.
+    retry = await fresh.async_retry_plan(operation["id"])
+    await fresh.async_retry(operation["id"], retry["token"], True)
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "done" and not list((old.parent / ".deletions").iterdir())
+    assert ha.services.calls == []
+
+
+@pytest.mark.asyncio
+async def test_restart_interrupted_replacements_never_replay_and_reservations_block(ha, configured, monkeypatch):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    url = "/local/activity_images/old.png"
+    await cache.async_remember("Activity", url)
+    deletions = manager(ha, configured, ["Activity"])
+    monkeypatch.setattr(deletions, "_kick", lambda: None)
+    plan, operation = await select(deletions, ["old.png"], True)
+    for action in (cache.async_link("New alias", url), cache.async_remember("New alias", url),
+                   cache.async_unlink("Activity", url), cache.async_forget(title="Activity"),
+                   engine.async_generate("Activity", force=True), deletions.queue.async_candidate("Activity")):
+        with pytest.raises(ValueError):
+            await action
+    assert await deletions.queue.async_enqueue(["Activity"]) == []
+    await cache.async_remember_many([{"title": "New alias", "image_url": url}])
+    assert cache.exact("New alias") is None
+    await deletions.async_shutdown()
+    fresh_cache = behavior.cache_module.ActivityImageCache(ha)
+    await fresh_cache.async_setup()
+    engine.cache = fresh_cache
+    fresh = manager(ha, (fresh_cache, engine), ["Activity"])
+    await fresh.queue.async_setup()
+    await fresh.async_setup()
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "interrupted" and old.exists() and ha.services.calls == []
+    assert (await fresh.async_delete(plan["token"], True, True))["id"] == operation["id"]
+    await settled(fresh)
+    assert ha.services.calls == []
+    retry = await fresh.async_retry_plan(operation["id"])
+    assert retry["replacement_requests"] == 1
+    await fresh.async_retry(operation["id"], retry["token"], True)
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "done" and len(ha.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_item_failure_does_not_prevent_other_image_completion(ha, configured, monkeypatch):
+    cache, _ = configured
+    one, two = picture(ha, "one.png"), picture(ha, "two.png")
+    await cache.async_remember("One", "/local/activity_images/one.png")
+    await cache.async_remember("Two", "/local/activity_images/two.png")
+    deletions = manager(ha, configured)
+    native = deletion_files.cleanup
+    import custom_components.activity_images.library_deletion as module
+    def selective(root, expected, operation_id, image_id):
+        if "one.png" in expected["files"]:
+            raise OSError("one cleanup failed")
+        return native(root, expected, operation_id, image_id)
+    monkeypatch.setattr(module, "cleanup", selective)
+    await select(deletions, ["one.png", "two.png"])
+    await settled(deletions)
+    assert one.exists() and not two.exists()
+    assert sorted(item["state"] for item in deletions.operations()[0]["items"]) == ["cleanup_failed", "done"]
+
+
+@pytest.mark.parametrize("name", ["../old.png", "/outside/old.png", "x\\old.png", ".private", "x\0.png"])
+def test_filename_boundary(name):
+    with pytest.raises(ValueError):
+        deletion_files.validate_filename(name)
+
+
+def test_symlink_root_parent_and_stale_identity_never_delete(tmp_path):
+    root = tmp_path / "owned"
+    root.mkdir()
+    target = root / "old.png"
+    target.write_bytes(b"original")
+    expected = deletion_files.snapshot(root, ["old.png"])
+    link = tmp_path / "linked"
+    link.symlink_to(root, target_is_directory=True)
+    for path in (link, link / "nested"):
+        with pytest.raises(OSError):
+            deletion_files.snapshot(path, ["old.png"])
+    target.write_bytes(b"unrelated")
+    with pytest.raises(ValueError, match="identity"):
+        deletion_files.cleanup(root, expected, "operation", "image")
+    assert target.read_bytes() == b"unrelated"
+    assert json.loads(json.dumps(expected)) == expected
+
+
+def test_compare_to_rename_race_never_unlinks_unrelated(tmp_path, monkeypatch):
+    root = tmp_path / "owned"
+    root.mkdir()
+    target = root / "old.png"
+    target.write_bytes(b"original")
+    expected = deletion_files.snapshot(root, ["old.png"])
+    native = deletion_files._rename_no_replace
+    def raced(source, name, directory, quarantine):
+        target.unlink()
+        target.write_bytes(b"unrelated")
+        native(source, name, directory, quarantine)
+    monkeypatch.setattr(deletion_files, "_rename_no_replace", raced)
+    with pytest.raises(ValueError, match="raced"):
+        deletion_files.cleanup(root, expected, "operation", "image")
+    assert target.read_bytes() == b"unrelated"
+    assert any(path.read_bytes() == b"unrelated" for path in (root / ".deletions").iterdir())
+
+
+def test_cleanup_missing_variants_and_repeated_calls_are_idempotent(tmp_path):
+    root = tmp_path / "owned"
+    root.mkdir()
+    target = root / "old.png"
+    target.write_bytes(b"original")
+    expected = deletion_files.snapshot(root, ["old.png"])
+    deletion_files.cleanup(root, expected, "operation", "image")
+    deletion_files.cleanup(root, expected, "operation", "image")
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_candidate_metadata_failure_reuses_complete_files_with_zero_requests(ha, configured, monkeypatch):
+    cache, _ = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    native = cache.async_record_candidate
+    async def failed(*args):
+        raise OSError("metadata persistence failed after file save")
+    monkeypatch.setattr(cache, "async_record_candidate", failed)
+    _, operation = await select(deletions, ["old.png"], True)
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "failed" and old.exists()
+    assert len(ha.services.calls) == 1
+    monkeypatch.setattr(cache, "async_record_candidate", native)
+    retry = await deletions.async_retry_plan(operation["id"])
+    assert retry["replacement_requests"] == 0
+    await deletions.async_retry(operation["id"], retry["token"], True)
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "done" and len(ha.services.calls) == 1
+    assert len(deletions.queue._jobs) == 1
+    assert deletions.queue._jobs[0]["state"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_missing_persisted_candidate_retry_counts_one_new_request(ha, configured, monkeypatch):
+    cache, _ = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    native = cache.async_commit_deletion
+    async def failed(*args):
+        raise OSError("commit failed")
+    monkeypatch.setattr(cache, "async_commit_deletion", failed)
+    _, operation = await select(deletions, ["old.png"], True)
+    await settled(deletions)
+    item = cache._deletions[operation["id"]]["items"][0]
+    filename = item["candidates"]["activity"].split("?", 1)[0].rsplit("/", 1)[-1]
+    (old.parent / filename).unlink()
+    monkeypatch.setattr(cache, "async_commit_deletion", native)
+    retry = await deletions.async_retry_plan(operation["id"])
+    assert retry["replacement_requests"] == 1
+    await deletions.async_retry(operation["id"], retry["token"], True)
+    await settled(deletions)
+    assert deletions.operations()[0]["state"] == "done" and len(ha.services.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_variants_mapping_is_reviewed_removed_and_tombstoned(ha, configured):
+    cache, _ = configured
+    picture(ha, "old.png")
+    await cache.async_remember("Missing historical QA", "/local/activity_images/old_qa.webp")
+    deletions = manager(ha, configured)
+    plan, _ = await select(deletions, ["old.png"])
+    assert plan["items"][0]["files"] == ["old.png"]
+    assert plan["items"][0]["titles"] == ["Missing historical QA"]
+    await settled(deletions)
+    assert cache.exact("Missing historical QA") is None
+    assert cache.is_deleted("/local/activity_images/old_qa.webp")
+
+
+@pytest.mark.asyncio
+async def test_queue_history_failure_never_removes_physical_file(ha, configured, monkeypatch):
+    cache, _ = configured
+    old = picture(ha, "old.png")
+    deletions = manager(ha, configured)
+    job = deletions.queue._new_job("Old result", "manual")
+    job.update(state="accepted", result_url="/local/activity_images/old.png")
+    deletions.queue._jobs.append(job)
+    await deletions.queue._save()
+    native = deletions.queue._store.async_save
+    async def failed(*args):
+        raise OSError("history persistence failed")
+    monkeypatch.setattr(deletions.queue._store, "async_save", failed)
+    _, operation = await select(deletions, ["old.png"])
+    await settled(deletions)
+    assert old.exists() and cache.is_deleted("/local/activity_images/old.png")
+    assert deletions.operations()[0]["state"] == "cleanup_failed"
+    status = deletions.queue.status()["jobs"][0]
+    assert status["result_deleted"] and status["image_url"] is None
+    monkeypatch.setattr(deletions.queue._store, "async_save", native)
+    retry = await deletions.async_retry_plan(operation["id"])
+    await deletions.async_retry(operation["id"], retry["token"], True)
+    await settled(deletions)
+    assert not old.exists()
+
+
+@pytest.mark.asyncio
+async def test_unload_cancels_no_provider_replay_and_drains_paid_persistence(ha, configured, monkeypatch):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    started, release = asyncio.Event(), asyncio.Event()
+    import custom_components.activity_images.engine as module
+    native = module.async_save_generated_image
+    async def blocked(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return await native(*args, **kwargs)
+    monkeypatch.setattr(module, "async_save_generated_image", blocked)
+    _, operation = await select(deletions, ["old.png"], True)
+    await started.wait()
+    await deletions.async_shutdown()
+    stopping = asyncio.create_task(deletions.queue.async_shutdown())
+    await asyncio.sleep(0.02)
+    assert not stopping.done()
+    release.set()
+    await stopping
+    assert old.exists() and cache.exact("Activity") == "/local/activity_images/old.png"
+    assert len(ha.services.calls) == 1
+    fresh_cache = behavior.cache_module.ActivityImageCache(ha)
+    await fresh_cache.async_setup()
+    engine.cache = fresh_cache
+    fresh = manager(ha, (fresh_cache, engine), ["Activity"])
+    await fresh.queue.async_setup()
+    await fresh.async_setup()
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "interrupted"
+    retry = await fresh.async_retry_plan(operation["id"])
+    assert retry["replacement_requests"] == 0
+    await fresh.async_retry(operation["id"], retry["token"], True)
+    await settled(fresh)
+    assert fresh.operations()[0]["state"] == "done" and len(ha.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cleanup_is_drained_before_shutdown_returns(ha, configured, monkeypatch):
+    import threading
+
+    import custom_components.activity_images.library_deletion as module
+    picture(ha, "old.png")
+    deletions = manager(ha, configured)
+    started, release = threading.Event(), threading.Event()
+    native = module.cleanup
+    def blocked(*args):
+        started.set()
+        assert release.wait(5)
+        return native(*args)
+    monkeypatch.setattr(module, "cleanup", blocked)
+    await select(deletions, ["old.png"])
+    assert await asyncio.to_thread(started.wait, 5)
+    stopping = asyncio.create_task(deletions.async_shutdown())
+    await asyncio.sleep(0.02)
+    assert not stopping.done()
+    release.set()
+    await stopping
+    assert deletions.operations()[0]["state"] == "done"
+    with pytest.raises(ValueError, match="unloading"):
+        await deletions.async_plan([deletions.library.image_id("old.png")])
+
+
+@pytest.mark.asyncio
+async def test_retry_plan_stale_demand_blocks_without_new_paid_request(ha, configured, monkeypatch):
+    cache, engine = configured
+    picture(ha, "old.png")
+    await cache.async_remember("Activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured, ["Activity"])
+    native = engine.async_generate
+    async def failed(*args, **kwargs):
+        raise RuntimeError("synthetic failure")
+    monkeypatch.setattr(engine, "async_generate", failed)
+    _, operation = await select(deletions, ["old.png"], True)
+    await settled(deletions)
+    retry = await deletions.async_retry_plan(operation["id"])
+    deletions.calendar.calendar_titles["calendar.test"] = ["Changed activity"]
+    monkeypatch.setattr(engine, "async_generate", native)
+    with pytest.raises(MappingConflict):
+        await deletions.async_retry(operation["id"], retry["token"], True)
+    new_plan = await deletions.async_retry_plan(operation["id"])
+    assert new_plan["items"][0]["blocked_reason"]
+    with pytest.raises(MappingConflict):
+        await deletions.async_retry(operation["id"], new_plan["token"], True)
+    assert not ha.services.calls
+
+
+def test_quarantine_symlink_and_root_replacement_are_rejected(tmp_path):
+    root = tmp_path / "owned"
+    root.mkdir()
+    (root / "old.png").write_bytes(b"original")
+    expected = deletion_files.snapshot(root, ["old.png"])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / ".deletions").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        deletion_files.cleanup(root, expected, "operation", "image")
+    assert (root / "old.png").read_bytes() == b"original" and not list(outside.iterdir())
+    (root / ".deletions").unlink()
+    root.rename(tmp_path / "original-directory")
+    root.mkdir()
+    (root / "old.png").write_bytes(b"unrelated")
+    with pytest.raises(ValueError, match="directory changed"):
+        deletion_files.cleanup(root, expected, "operation", "image")
+    assert (root / "old.png").read_bytes() == b"unrelated"
+
+
+def test_quarantine_atomic_no_replace_preserves_raced_destination(tmp_path, monkeypatch):
+    root = tmp_path / "owned"
+    root.mkdir()
+    target = root / "old.png"
+    target.write_bytes(b"original")
+    expected = deletion_files.snapshot(root, ["old.png"])
+    native = deletion_files._rename_no_replace
+    def raced(source, name, directory, quarantine):
+        (root / ".deletions" / name).write_bytes(b"unrelated quarantine file")
+        native(source, name, directory, quarantine)
+    monkeypatch.setattr(deletion_files, "_rename_no_replace", raced)
+    with pytest.raises(FileExistsError):
+        deletion_files.cleanup(root, expected, "operation", "image")
+    assert target.read_bytes() == b"original"
+    assert next((root / ".deletions").iterdir()).read_bytes() == b"unrelated quarantine file"
