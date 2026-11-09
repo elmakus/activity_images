@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -15,6 +15,7 @@ from .const import (
     CONF_AI_ENTITY,
     CONF_LUCIDA_URL,
     CONF_REFERENCE_MEDIA_ID,
+    CONF_PROMPT_TEMPLATE,
 )
 from .generated_image import async_save_generated_image
 from .image_cache import ActivityImageCache, normalize_title
@@ -29,7 +30,7 @@ def generation_stem(title: str, nonce: str) -> str:
 
 
 class ActivityImageGenerator:
-    def __init__(self, hass: HomeAssistant, cache: ActivityImageCache, settings: dict) -> None:
+    def __init__(self, hass: HomeAssistant, cache: ActivityImageCache, settings: Mapping) -> None:
         self.hass = hass
         self.cache = cache
         self.settings = settings
@@ -52,6 +53,9 @@ class ActivityImageGenerator:
         if not title or len(title) > 255:
             raise ValueError("Activity title must contain 1–255 characters")
         async with self._lock:
+            # One request, its retries and post-processing use one configuration.
+            settings = dict(self.settings)
+            instructions = build_activity_image_instructions(title, settings.get(CONF_PROMPT_TEMPLATE))
             if self.cache.reserved(title, operation_id=deletion["operation_id"] if deletion else None):
                 raise ValueError("Title is reserved for permanent deletion")
             if not force:
@@ -59,9 +63,9 @@ class ActivityImageGenerator:
                 if cached:
                     return {
                         "title": title, "image_url": cached, "reused": True,
-                        "background_status": "cached",
+                        "background_status": "cached", "revised_prompt": instructions,
                     }
-            entity_id = self.settings.get(CONF_AI_ENTITY)
+            entity_id = settings.get(CONF_AI_ENTITY)
             if not entity_id:
                 raise ValueError("Configure an ai_task entity in Activity Images")
             signature = normalize_title(title)
@@ -70,15 +74,13 @@ class ActivityImageGenerator:
             suffix = generation_stem(title, deletion["job_id"] if deletion else uuid4().hex)
             payload = {
                 "task_name": f"activity_image_{task_id}",
-                "instructions": build_activity_image_instructions(title),
+                "instructions": instructions,
                 "entity_id": entity_id,
             }
-            reference = self.settings.get(CONF_REFERENCE_MEDIA_ID)
+            reference = settings.get(CONF_REFERENCE_MEDIA_ID)
             if reference:
-                payload["attachments"] = [{
-                    "media_content_id": reference,
-                    "media_content_type": "image/png",
-                }]
+                # Native media resolution supplies the actual MIME, including JPEG/WebP.
+                payload["attachments"] = [{"media_content_id": reference}]
             async def request_image():
                 return await self.hass.services.async_call(
                     "ai_task", "generate_image", payload,
@@ -97,7 +99,7 @@ class ActivityImageGenerator:
             async def persist_result():
                 saved = await async_save_generated_image(
                     self.hass, source, suffix,
-                    lucida_url=self.settings.get(CONF_LUCIDA_URL) or None,
+                    lucida_url=settings.get(CONF_LUCIDA_URL) or None,
                 )
                 url = f"{saved.image_url}?v={time.time_ns()}"
                 metadata = {"origin": "generated", "created_at": datetime.now(UTC).isoformat()}
@@ -133,4 +135,5 @@ class ActivityImageGenerator:
                 "title": title, "image_url": image_url, "reused": False,
                 "background_status": saved.background_status,
                 "qa_url": saved.qa_url,
+                "revised_prompt": instructions,
             }

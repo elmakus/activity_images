@@ -165,16 +165,27 @@ async def async_register_manager(hass) -> None:
     """Durable routes resolve the current runtime; the panel is entry-owned."""
     registered = hass.data.setdefault(_REGISTRATION, set())
     if "static" not in registered:
-        await hass.http.async_register_static_paths([StaticPathConfig(
-            MODULE_URL, str(Path(__file__).parent / "frontend" / "activity-images-panel.js"), False,
-        )])
+        await hass.http.async_register_static_paths([
+            StaticPathConfig(
+                MODULE_URL, str(Path(__file__).parent / "frontend" / "activity-images-panel.js"), False,
+            ),
+            StaticPathConfig(
+                "/activity_images/settings",
+                str(Path(__file__).parent / "frontend" / "settings"),
+                False,
+            ),
+        ])
         registered.add("static")
     if "http" not in registered:
         hass.http.register_view(LibraryImageView())
+        from .settings_media import ReferencePreviewView
+        hass.http.register_view(ReferencePreviewView())
         registered.add("http")
     if "ws" not in registered:
         for command, fields in _SCHEMAS.items():
             websocket_api.async_register_command(hass, _handler(command, fields))
+        from .settings_api import async_register_settings
+        async_register_settings(hass)
         registered.add("ws")
     await panel_custom.async_register_panel(
         hass, frontend_url_path=PANEL_ROUTE, webcomponent_name="activity-images-panel",

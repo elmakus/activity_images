@@ -1014,7 +1014,8 @@ def _calendar_test_setup(ha, configured, monkeypatch, events, *,
         const_module.CONF_LOOKAHEAD_DAYS: 30,
         const_module.CONF_AUTO_GENERATE: enabled,
     }
-    adapter = ActivityCalendarAdapter(ha, cache, queue, settings)
+    engine.settings.update(settings)
+    adapter = ActivityCalendarAdapter(ha, cache, queue, engine.settings)
     return adapter, queue, integration
 
 
@@ -1264,7 +1265,7 @@ async def test_existing_png_can_be_linked_without_provider(ha, monkeypatch):
     ha.services.async_register("calendar", "get_events", get_events)
     await integration.async_setup_entry(ha, entry)
     await entry.runtime_data.calendar.async_refresh()
-    assert entry.runtime_data.generator.settings.get(const_module.CONF_AI_ENTITY) is None
+    assert not entry.runtime_data.generator.settings.get(const_module.CONF_AI_ENTITY)
     assert entry.runtime_data.calendar.images == {}
 
     file = ha.base / "www" / "activity_images" / "existing.png"
@@ -1427,7 +1428,7 @@ async def test_wrapper_unavailable_without_provider_and_recursion_guard(ha):
     assert not entity.available
     with pytest.raises(wrapper_module.HomeAssistantError, match="real AI Task"):
         await entity._async_generate_image(task, chat)
-    entry.runtime_data.generator.settings[const_module.CONF_AI_ENTITY] = "ai_task.activity_images"
+    entry.options[const_module.CONF_AI_ENTITY] = "ai_task.activity_images"
     entry.options[const_module.CONF_AI_ENTITY] = "ai_task.activity_images"
     assert not entity.available
     with pytest.raises(wrapper_module.HomeAssistantError, match="cannot use itself"):
@@ -1508,3 +1509,11 @@ async def test_ai_task_platform_exports_exactly_one_stable_entity(ha):
     assert found[0]._attr_unique_id == f"{entry.entry_id}_ai_task"
     assert found[0]._attr_name == "Activity Images"
     assert found[0]._attr_supported_features == ai.AITaskEntityFeature.GENERATE_IMAGE
+
+@pytest.mark.asyncio
+async def test_custom_prompt_reaches_provider_with_literal_title(ha, configured):
+    """Only rendered instructions change; provider and image pipeline are shared."""
+    _cache, generator = configured
+    generator.settings[const_module.CONF_PROMPT_TEMPLATE] = "Icon of {title}"
+    await generator.async_generate("Craft {party}", force=True)
+    assert ha.services.calls[-1][2]["instructions"] == "Icon of Craft {party}"

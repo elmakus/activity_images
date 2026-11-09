@@ -90,6 +90,7 @@
         this._bindConnection(previous, false);
         if (this.isConnected) this._bindConnection(value?.connection, true);
       }
+      if (this._settingsView) this._settingsView.hass = value;
       if (this.isConnected && !this._started) this._start();
     }
     get hass() { return this._hass; }
@@ -150,7 +151,8 @@
       tabs.setAttribute("aria-label", "Library views");
       this._galleryTab = button("Library", () => this._showTab(false));
       this._queueTab = button("Queue & history", () => this._showTab(true));
-      tabs.append(this._galleryTab, this._queueTab);
+      this._settingsTab = button("Settings", () => this._openSettings());
+      tabs.append(this._galleryTab, this._queueTab, this._settingsTab);
       this._queueStatus = el("p", "Generation status: loading…", "muted");
       this._queueStatus.setAttribute("role", "status");
       this._status = el("div", "", "notice");
@@ -199,7 +201,9 @@
       this._gallery.append(toolbar, this._selection, this._stats, this._listStatus, this._grid, this._pager);
       this._queue = el("section");
       this._queue.hidden = true;
-      main.append(tabs, this._queueStatus, this._status, this._gallery, this._queue);
+      this._settings = el("section");
+      this._settings.hidden = true;
+      main.append(tabs, this._queueStatus, this._status, this._gallery, this._queue, this._settings);
       this._dialog = el("dialog");
       this._dialog.setAttribute("aria-labelledby", "dialog-title");
       this._dialog.addEventListener("cancel", (event) => { if (this._busy) event.preventDefault(); });
@@ -211,7 +215,29 @@
       this.shadowRoot.append(sheet, header, main, this._dialog);
       this._showTab(false);
     }
+    async _openSettings() {
+      this._queue.hidden = true;
+      this._gallery.hidden = true;
+      this._settings.hidden = false;
+      this._clearImages("jobs");
+      this._settingsTab.setAttribute("aria-pressed", "true");
+      this._galleryTab.setAttribute("aria-pressed", "false");
+      this._queueTab.setAttribute("aria-pressed", "false");
+      if (this._settingsView) return;
+      this._settings.textContent = "Loading Settings…";
+      try {
+        if (!customElements.get("activity-images-settings")) await import("./settings/settings-view.mjs");
+        if (!this.isConnected) return;
+        this._settingsView = el("activity-images-settings");
+        this._settings.replaceChildren(this._settingsView);
+        this._settingsView.hass = this._hass;
+      } catch (error) {
+        this._settings.textContent = "Unable to load Settings: " + message(error);
+      }
+    }
     _showTab(queue) {
+      this._settings.hidden = true;
+      this._settingsTab.setAttribute("aria-pressed", "false");
       this._queue.hidden = !queue;
       this._gallery.hidden = queue;
       this._queueTab.setAttribute("aria-pressed", String(queue));

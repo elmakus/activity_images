@@ -11,7 +11,12 @@ from pathlib import Path
 from urllib.parse import quote, unquote
 from uuid import uuid4
 
-from .const import CONF_REFERENCE_MEDIA_ID
+from .const import (
+    CONF_CALENDARS,
+    CONF_LOOKAHEAD_DAYS,
+    CONF_REFERENCE_MEDIA_ID,
+    DEFAULT_LOOKAHEAD_DAYS,
+)
 from .deletion_files import cleanup, group_files, snapshot
 from .engine import generation_stem
 from .image_cache import (
@@ -73,6 +78,27 @@ class ActivityImageDeletions:
     def _demand(self) -> list[str]:
         return sorted({title for titles in self.calendar.calendar_titles.values() for title in titles})
 
+    def _demand_error(self) -> str | None:
+        if self._calendar_error:
+            return self._calendar_error
+        settings = self.queue.engine.settings
+        if (tuple(settings.get(CONF_CALENDARS) or ()) != self.calendar.calendars
+                or settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS) != self.calendar.lookahead_days
+                or self.calendar.calendars and (self.calendar.last_error or not self.calendar.last_scan)):
+            return "Current calendar settings require a successful refresh before deletion"
+        return self._calendar_error
+
+    def validate_reference(self, media_id: str) -> None:
+        """Do not let a Settings save select an original reserved for deletion."""
+        reference = unquote(media_id)
+        if reference and any(
+            filename in reference
+            for operation in self.cache._deletions.values()
+            for item in operation["items"] if item["state"] not in {"done", "abandoned"}
+            for filename in item["files"]
+        ):
+            raise ValueError("Reference image is reserved for permanent deletion")
+
     async def _snapshot_plan(self, image_ids: list[str], *, own_operation: str | None = None) -> dict:
         if (not isinstance(image_ids, list) or not 1 <= len(image_ids) <= 64
                 or any(not isinstance(value, str) or not _ID.fullmatch(value) for value in image_ids)
@@ -103,7 +129,8 @@ class ActivityImageDeletions:
                     needed.setdefault(normalize_title(title), title)
             needed_titles = sorted(needed.values(), key=str.casefold)
             reserved_titles = sorted(set(mappings) | set(needed))
-            reasons = [self._calendar_error] if self._calendar_error else []
+            demand_error = self._demand_error()
+            reasons = [demand_error] if demand_error else []
             reference = unquote(self.queue.engine.settings.get(CONF_REFERENCE_MEDIA_ID) or "")
             if any(filename in CANVAS_NORMALIZATION_EXCLUDED_FILES or filename in reference for filename in variants):
                 reasons.append("Shared style/reference asset is protected")
@@ -233,8 +260,9 @@ class ActivityImageDeletions:
         return recovered
 
     async def _validate_original(self, operation: dict, item: dict) -> None:
-        if self._calendar_error:
-            raise MappingConflict(self._calendar_error)
+        demand_error = self._demand_error()
+        if demand_error:
+            raise MappingConflict(demand_error)
         if self._demand() != operation["demand"]:
             raise MappingConflict("Calendar demand changed; original files and mappings retained")
         entries = self.cache.entries()
@@ -247,6 +275,9 @@ class ActivityImageDeletions:
         current_identity = await self.hass.async_add_executor_job(snapshot, self.library.root, current_files)
         if current_identity != item["identity"]:
             raise MappingConflict("Original image changed; no files deleted")
+        reference = unquote(self.queue.engine.settings.get(CONF_REFERENCE_MEDIA_ID) or "")
+        if reference and any(filename in reference for filename in item["files"]):
+            raise MappingConflict("Shared style/reference asset is protected")
 
     async def async_retry_plan(self, operation_id: str) -> dict:
         await self._refresh_demand()

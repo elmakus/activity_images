@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from homeassistant.auth import auth_manager_from_config  # noqa: E402
 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER  # noqa: E402
-from homeassistant.components import frontend, websocket_api  # noqa: E402
+from homeassistant.components import frontend, media_source, websocket_api  # noqa: E402
 from homeassistant.components.http import StaticPathConfig  # noqa: E402
 from homeassistant.components.http.server import HomeAssistantHTTP  # noqa: E402
 from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE, __version__  # noqa: E402
@@ -290,6 +290,14 @@ async def run():
     with tempfile.TemporaryDirectory(prefix="activity-library-smoke-") as directory:
         hass: Any = HomeAssistant(directory)
         await prepare_http(hass)
+        media_folder = Path(directory) / "media"
+        media_folder.mkdir()
+        hass.config.media_dirs = {"local":str(media_folder)}
+        await media_source.async_setup(hass, {})
+        hass.config.components.add("media_source")
+        for extension in ("png", "jpg", "webp"):
+            Image.new("RGB", (16, 12), "green").save(media_folder / f"reference.{extension}")
+        (media_folder / "invalid.png").write_bytes(b"not an image")
         async def no_forward(*args):
             pass
         async def no_unload(*args):
@@ -315,19 +323,29 @@ async def run():
         form = await config_flow.async_step_user()
         flow_manager: Any = SimpleNamespace()
         view = _BaseFlowManagerView[Any, Any](flow_manager)
-        assert len(view._prepare_result_json(form)["data_schema"]) == 6
-        options_flow = ActivityImagesOptionsFlow(Entry())
+        assert len(view._prepare_result_json(form)["data_schema"]) == 7
+        entry: Any = Entry()
+        hass.config_entries.async_get_known_entry = lambda _: entry
+        options_flow = ActivityImagesOptionsFlow()
+        options_flow.handler = entry.entry_id
         options_flow.hass = hass
         options_form = await options_flow.async_step_init()
-        assert len(view._prepare_result_json(options_form)["data_schema"]) == 6
+        assert len(view._prepare_result_json(options_form)["data_schema"]) == 7
         assert await async_setup(hass, {})
-        entry: Any = Entry()
+        hass.config_entries.async_entries = lambda domain: [entry]
+        hass.config_entries.async_update_entry = lambda item, *, options: setattr(item, "options", options)
         assert await async_setup_entry(hass, entry)
         panel = hass.data[frontend.DATA_PANELS][PANEL_ROUTE]
         assert panel.require_admin
         assert panel.config is not None
         assert panel.config["_panel_custom"]["name"] == "activity-images-panel"
         assert panel.config["_panel_custom"]["module_url"] == MODULE_URL
+        settings_commands = {k for k in hass.data["websocket_api"] if k.startswith("activity_images/settings/")}
+        assert settings_commands == {
+            "activity_images/settings/get",
+            "activity_images/settings/save",
+            "activity_images/settings/diagnostics",
+        }
         library_commands = {k for k in hass.data["websocket_api"] if k.startswith("activity_images/library/")}
         assert len(library_commands) == 17
         resources_before = tuple(hass.http.app.router.resources())
@@ -348,6 +366,10 @@ async def run():
             await anonymous.close()
             admin_ws = await connect(admin_token)
             user_ws = await connect(user_token)
+            module_response = await client.get("/activity_images/settings/settings-view.mjs")
+            assert module_response.status == 200, module_response.status
+            assert "javascript" in module_response.content_type
+            assert b"ActivityImagesSettings" in await module_response.read()
             counter = 0
             async def command(ws, name, **kwargs):
                 nonlocal counter
@@ -368,6 +390,68 @@ async def run():
             }.items():
                 denied = await command(user_ws, name, **args)
                 assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
+            for settings_type, data in (
+                ("get", {}),
+                ("save", {"revision": "0" * 64, "values": {}}),
+                ("diagnostics", {}),
+            ):
+                counter += 1
+                await user_ws.send_json({
+                    "id": counter, "type": "activity_images/settings/" + settings_type, **data,
+                })
+                denied = await asyncio.wait_for(user_ws.receive_json(), 5)
+                assert denied["id"] == counter, denied
+                assert not denied["success"] and denied["error"]["code"] == "unauthorized", denied
+            forbidden_preview = "/api/activity_images/settings/reference?media_id=media-source%3A%2F%2Fmedia_source%2Flocal%2Freference.png"
+            assert (await client.get(forbidden_preview)).status == 401
+            assert (await client.get(forbidden_preview, headers={"Authorization": "Bearer " + user_token})).status == 401
+            for extension, content_type in (("png","image/png"),("jpg","image/jpeg"),("webp","image/webp")):
+                response = await client.get("/api/activity_images/settings/reference", params={
+                    "media_id":f"media-source://media_source/local/reference.{extension}"},
+                    headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 200 and response.content_type == content_type, (response.status, await response.text())
+                assert response.headers["Cache-Control"] == "private, no-store"
+                assert await response.read() == (media_folder / f"reference.{extension}").read_bytes()
+            for media_id in ("media-source://media_source/missing/reference.png",
+                             "media-source://media_source/local/missing.png",
+                             "media-source://media_source/local/invalid.png",
+                             "media-source://media_source/local/no_extension",
+                             "media-source://media_source/local/../reference.png"):
+                response = await client.get("/api/activity_images/settings/reference", params={"media_id":media_id},
+                                            headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 400, (media_id, response.status)
+            with patch.object(Image, "MAX_IMAGE_PIXELS", 1):
+                response = await client.get("/api/activity_images/settings/reference", params={
+                    "media_id":"media-source://media_source/local/reference.png"},
+                    headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 400  # Pillow decompression bombs are controlled errors.
+            with patch("custom_components.activity_images.settings_media.async_resolve_media", new_callable=AsyncMock) as resolver:
+                response = await client.get("/api/activity_images/settings/reference", params={
+                    "media_id":"media-source://external/example.png"}, headers={"Authorization":"Bearer " + admin_token})
+                assert response.status == 400
+                resolver.assert_not_called()  # Preview cannot invoke arbitrary provider resolvers.
+            async def settings_command(name, **data):
+                nonlocal counter
+                counter += 1
+                await admin_ws.send_json({"id": counter, "type": "activity_images/settings/" + name, **data})
+                answer = await asyncio.wait_for(admin_ws.receive_json(), 5)
+                assert answer["id"] == counter, answer
+                return answer
+            snapshot = await settings_command("get")
+            assert snapshot["success"], snapshot
+            revision = snapshot["result"]["revision"]
+            assert len(revision) == 64
+            invalid_settings = await settings_command("save", revision=revision, values={"bad_key": "x"})
+            assert invalid_settings["error"]["code"] == "settings_error", invalid_settings
+            saved = await settings_command("save", revision=revision, values={"calendar_lookahead_days": 21})
+            assert saved["success"] and saved["result"]["changed"], saved
+            assert entry.options["calendar_lookahead_days"] == 21
+            # This transport harness bypasses ConfigEntries; native listener tests are separate.
+            await entry.runtime_data.calendar.async_update_settings(entry.runtime_data.generator.settings)
+            stale = await settings_command("save", revision=revision, values={"calendar_lookahead_days": 22})
+            assert stale["error"]["code"] == "settings_conflict", stale
+            diagnostics = await settings_command("diagnostics")
+            assert diagnostics["success"] and diagnostics["result"]["provider"]["status"] == "not_configured"
             listed = await command(admin_ws, "list", limit=1)
             assert listed["success"], listed
             assert listed["result"]["total"] == 2

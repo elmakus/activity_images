@@ -4,14 +4,14 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stable version: 0.3.0.** This release adds focused library deletion, replacement, selection, and preview improvements without redesigning the manager. See [release notes](docs/RELEASE_NOTES_v0.3.0.md), [permanent deletion and recovery](docs/LIBRARY_DELETION.md), and [validation results](docs/LIBRARY_IMPROVEMENTS_VALIDATION.md).
+**Stable version: 0.4.0.** This release adds the administrator-only Settings tab, a configurable shared AI prompt, reference previews and passive diagnostics. See [release notes](docs/RELEASE_NOTES_v0.4.0.md), [Settings architecture](docs/SETTINGS_ARCHITECTURE.md), and [independent validation](docs/SETTINGS_REVIEW.md). Previous [v0.3.0 library improvements](docs/RELEASE_NOTES_v0.3.0.md) and their recovery guidance remain applicable.
 
 Existing entity IDs, actions, prompt, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
 
 ## Capabilities
 
 - Generate images through the standard `ai_task.generate_image` service
-- **Exact original full tactile 3D activity-icon prompt**, shared globally; no room/isometric prompt and no per-source customization
+- **Original full tactile 3D activity-icon prompt by default**, with an optional global Settings template. No room/isometric or per-source prompt.
 - Optional `media-source://` reference image passed as an AI Task attachment
 - Optional **Lucida** background removal using a user-configured trusted endpoint; deterministic Pillow-based fallback
 - Output normalized transparent PNG masters, WebP thumbnails, and light/dark QA previews
@@ -31,11 +31,11 @@ Existing entity IDs, actions, prompt, reference-image behavior, fuzzy title matc
 
 On Home Assistant **2026.11.0 or later**, add `elmakus/activity_images` as a custom **Integration** in **Settings → Marketplace** and install the stable release. Restart Home Assistant when prompted, then add **Activity Images** in **Settings → Devices & services**. See [installation, updates and recovery](docs/INSTALLATION_AND_RELEASE.md) for manual installation and existing development builds.
 
-An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt is fixed and intentionally uneditable. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
+An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt remains the default; the Settings tab supports an optional global override. Calendar scanning is opt-in (select calendars), and calendar auto-generation is a separate global switch, off by default.
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
 
-For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.2.0 to 0.3.0 changes runtime code and requires the normal installer restart. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
+For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.3.0 to 0.4.0 changes runtime code and requires the normal installer restart. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
 
 ## Image library manager
 
@@ -49,13 +49,49 @@ Open **Activity Images** in the Home Assistant sidebar as an administrator, or n
 - **Delete permanently / Delete selected:** review the exact files, aliases, current calendar consumers, and external-reference warning before confirming. If replacements are necessary, **Delete & Regenerate** requires separate paid authorization and preserves each original until its replacements are durable. Batch items can finish independently. Failed/interrupted precommit operations support explicit retry or **Keep originals…**. See [deletion behavior, safety, and rollback](docs/LIBRARY_DELETION.md).
 - **Queue & history:** inspect running/pending jobs, failures, candidates, deletion operations, and the last 100 terminal generation records. Small authenticated previews show real available results without cropping; missing/deleted results have clear placeholders. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted manual requests are not replayed after restart; pending legacy background work remains persistent.
 
-The manager's **Clear recorded errors** only clears displayed errors; it retains a persisted retry barrier and does not authorize another paid attempt. The existing public `activity_images.clear_errors` action retains its original clear-and-requeue behavior for legacy background jobs. Existing automatic-generation options are not enabled or changed by the panel.
+The manager's **Clear recorded errors** only clears displayed errors; it retains a persisted retry barrier and does not authorize another paid attempt. The existing public `activity_images.clear_errors` action retains its original clear-and-requeue behavior for legacy background jobs. Library and Queue controls do not change automatic generation; the Settings tab can update that option explicitly.
 
 The library supports at least **4,000 unique images**, not a deletion threshold. There is no LRU eviction of associations or automatic garbage collection. Physical deletion requires its own explicit confirmation. Gallery pages contain at most 96 records (the panel uses 48), with lazy authenticated previews. The inventory checks image headers/structure without decoding the entire collection; previews and linking perform full decoding. Files over **20 MiB** or **25 million pixels**, unsupported formats, corrupt files, and symlinks are excluded or rejected. Supported standalone formats are PNG, WebP, JPEG, and GIF. Inventory refreshes on demand, after generated assets, or after its short cache expires. Offset pagination reflects the current collection, not an immutable snapshot.
 
 The unchanged Home Tasks AI Task interface receives PNG bytes. Reusing a linked WebP/JPEG/GIF converts that result to PNG in memory, without changing its library source file or contacting AI. Existing PNG bytes remain unchanged; animated formats use their first frame.
 
 Regeneration in Activity Images does **not** replace copies previously saved by Home Tasks. See [future synchronization options and limits](docs/LIBRARY_MANAGER_DESIGN.md#future-home-tasks-synchronization).
+
+## Settings
+
+The administrator-only **Settings** tab in the Activity Images sidebar offers four sections:
+**General** (AI Task provider, calendars, lookahead, automatic generation, Lucida URL),
+**Prompt** (editable global template with required `{title}` token and text-only preview),
+**Reference** (manual `media-source://` ID with authenticated preview, plus HA's media
+picker when already loaded), and **Diagnostics** (passive provider capabilities,
+Lucida configuration and calendar status).
+
+Native **Settings → Devices & services → Activity Images → Configure** provides the
+supported HA media picker. The sidebar links there when `ha-selector` is not already
+registered; it does not load private HA frontend bundles or require a custom card.
+Both editors retain the existing string reference ID in settings, not the selector object.
+
+Settings are validated in the backend and written only to native `ConfigEntry.options`.
+Changes apply without reloading the integration or interrupting generation. Each running
+request keeps its configuration; waiting work uses the settings current when it starts.
+Disabling automatic generation stops new calendar jobs, not already accepted work.
+Cancel waiting work explicitly in **Queue & history**. A save can wait for an ongoing
+calendar scan or deletion boundary. No-op saves do not notify update listeners.
+Both the panel and native **Configure** reject stale editors rather than overwrite changes.
+If a save result is unknown, explicitly discard edits and reload saved settings before retrying.
+
+**The Settings Diagnostics view does not test real AI generation or Lucida connectivity.**
+It checks provider state, registered services and advertised image-generation/attachment
+feature bits; an available status is not proof a request will succeed or be free.
+Reference previews accept only HA's local `media-source://media_source/` source and
+regular PNG, JPEG or WebP files up to **8 MiB** and **32 million pixels**. External
+source resolvers are not invoked. Unsupported, missing or invalid media fails with a
+controlled error; previews never save images into the library. These are preview limits,
+not new restrictions on the existing generation attachment pipeline.
+Visit [Settings architecture](docs/SETTINGS_ARCHITECTURE.md) and the
+[Settings review](docs/SETTINGS_REVIEW.md) for verified results and limitations,
+including the outstanding full-browser check. The feature was independently reviewed for v0.4.0; full authenticated
+desktop/mobile browser validation remains an important post-install check.
 
 ## Public actions
 

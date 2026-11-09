@@ -10,12 +10,13 @@
           "lucida_url": "Lucida background-removal URL",
           "calendar_entity_ids": "Calendars to watch (optional)",
           "calendar_lookahead_days": "Upcoming calendar days (1–60)",
-          "generate_missing_calendar_images": "Automatically generate icons for calendar events"
+          "generate_missing_calendar_images": "Automatically generate icons for calendar events",
+          "prompt_template": "Activity image prompt template (exactly one {title})"
         }
       }
     },
     "error": {
-      "invalid_settings": "Check selected calendars, reference image, Lucida URL and AI provider when automatic generation is enabled."
+      "invalid_settings": "Check calendars, the prompt template, reference image, trusted HTTP(S) Lucida URL and AI provider. Automatic generation requires a provider."
     }
   },
   "options": {
@@ -28,12 +29,15 @@
           "lucida_url": "Lucida background-removal URL",
           "calendar_entity_ids": "Calendars to watch (optional)",
           "calendar_lookahead_days": "Upcoming calendar days (1–60)",
-          "generate_missing_calendar_images": "Automatically generate icons for calendar events"
-        }
+          "generate_missing_calendar_images": "Automatically generate icons for calendar events",
+          "prompt_template": "Activity image prompt template (exactly one {title})"
+        },
+        "description": "Settings apply without reloading the integration. Running generation keeps its settings; waiting work uses the settings selected when it starts. Disabling automatic generation does not cancel accepted jobs."
       }
     },
     "error": {
-      "invalid_settings": "Check selected calendars, reference image, Lucida URL and AI provider when automatic generation is enabled."
+      "invalid_settings": "Check calendars, the prompt template, reference image, trusted HTTP(S) Lucida URL and AI provider. Automatic generation requires a provider.",
+      "settings_conflict": "Settings changed elsewhere. Close and reopen Configure before saving."
     }
   }
 }

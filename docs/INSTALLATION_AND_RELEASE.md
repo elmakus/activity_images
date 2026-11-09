@@ -1,9 +1,9 @@
 # Installation, updates and recovery
 
-Version **0.3.0** is the stable library-manager release. See the
-[release notes](RELEASE_NOTES_v0.3.0.md) for changes and known limits.
+Version **0.4.0** is the stable Settings release. See the
+[release notes](RELEASE_NOTES_v0.4.0.md) and [independent Settings review](SETTINGS_REVIEW.md) for changes and known limits.
 Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before installing.
-The manifest-only 0.2.0 promotion described below is historical; updating from 0.2.0 to 0.3.0 changes runtime code and needs the normal installer restart.
+Versions 0.2.0 and 0.3.0 described below are historical; updating from 0.3.0 to 0.4.0 changes runtime code and needs the normal installer restart.
 Historical `STAGE*` reports describe earlier migration and validation work;
 they are not current installation instructions.
 
@@ -47,7 +47,7 @@ request a refresh.
 To enable generation, select a real image-capable `ai_task.*` provider in
 **Settings → Devices & services → Activity Images → Configure**. Never
 select `ai_task.activity_images` as its own backend. Optional reference
-images use `media-source://` URLs. The original shared prompt is fixed.
+images use `media-source://` URLs. The full original shared prompt is the default; an optional global template is editable in the administrator-only Settings tab.
 
 For unmodified Home Tasks, select `ai_task.activity_images` as its image
 provider and leave Home Tasks `prompt_prefix` empty. Existing Home Tasks

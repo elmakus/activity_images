@@ -26,7 +26,7 @@ def manager(ha, configured, titles=()):
     cache, engine = configured
     queue = behavior.queue_module.ActivityImageQueue(ha, engine)
     calendar = SimpleNamespace(_lock=asyncio.Lock(), calendar_titles={"calendar.test": list(titles)},
-                               calendars=(), last_scan="now", last_error=None)
+                               calendars=(), lookahead_days=30, last_scan="now", last_error=None)
     async def reconcile():
         calendar.images = {title: await cache.async_find(title, touch=False) for title in titles}
     calendar.async_reconcile = reconcile
@@ -156,6 +156,54 @@ async def test_style_reference_derivative_and_review_are_blocked(ha, configured)
     assert plan["items"][0]["titles"] == ["Derivative alias"]
     await settled(deletions)
     assert cache.exact("Derivative alias") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["pending", "running", "failed", "interrupted", "cleanup", "cleanup_failed"])
+async def test_settings_cannot_select_a_reserved_deletion_reference(ha, configured, monkeypatch, state):
+    picture(ha, "reserved.png")
+    deletions = manager(ha, configured)
+    monkeypatch.setattr(deletions, "_kick", lambda: None)
+    _, operation = await select(deletions, ["reserved.png"])
+    item = deletions.cache._deletions[operation["id"]]["items"][0]
+    item["state"] = state
+    with pytest.raises(ValueError, match="reserved"):
+        deletions.validate_reference("media-source://media_source/local/%72eserved.png")
+    deletions.validate_reference("")
+    deletions.validate_reference("media-source://media_source/local/another.png")
+
+
+@pytest.mark.asyncio
+async def test_a_new_reference_is_rechecked_before_deletion_commit(ha, configured, monkeypatch):
+    cache, engine = configured
+    original = picture(ha, "original.png")
+    await cache.async_remember("Needed", "/local/activity_images/original.png")
+    deletions = manager(ha, configured, ["Needed"])
+    native = engine.async_generate
+    async def generate(*args, **kwargs):
+        result = await native(*args, **kwargs)
+        engine.settings["reference_media_content_id"] = "media-source://media_source/local/original.png"
+        return result
+    monkeypatch.setattr(engine, "async_generate", generate)
+    await select(deletions, ["original.png"], True)
+    await settled(deletions)
+    operation = deletions.operations()[0]
+    assert operation["state"] == "failed"
+    assert "reference asset is protected" in operation["items"][0]["error"]
+    assert original.exists() and cache.exact("Needed") == "/local/activity_images/original.png"
+    assert len(ha.services.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unapplied_calendar_options_block_a_stale_deletion_plan(ha, configured):
+    _, engine = configured
+    original = picture(ha, "original.png")
+    deletions = manager(ha, configured)
+    plan = await deletions.async_plan([deletions.library.image_id("original.png")])
+    engine.settings["calendar_entity_ids"] = ["calendar.new"]
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(plan["token"], False, True)
+    assert original.exists() and not ha.services.calls
 
 
 @pytest.mark.asyncio
@@ -649,6 +697,7 @@ def test_quarantine_atomic_no_replace_preserves_raced_destination(tmp_path, monk
 def live_demand(deletions, titles):
     calendar = deletions.calendar
     calendar.calendars = ("calendar.test",)
+    deletions.queue.engine.settings["calendar_entity_ids"] = list(calendar.calendars)
     scans = []
     async def refresh():
         assert not calendar._lock.locked()

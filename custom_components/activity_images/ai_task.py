@@ -20,7 +20,6 @@ from PIL import Image
 from .const import CONF_AI_ENTITY
 from .image_cache import ACTIVITY_IMAGE_PREFIX
 from .library import _read_owned, _verify
-from .prompts import build_activity_image_instructions
 
 # Current upstream Home Tasks passes the title in instructions, then this
 # aspect-ratio suffix. Its task_name contains a hash, NOT the readable title.
@@ -88,6 +87,13 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
         )
         return bool(provider) and provider != self.entity_id
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self._entry.add_update_listener(self._async_settings_updated))
+
+    async def _async_settings_updated(self, hass, entry) -> None:
+        self.async_write_ha_state()
+
     async def _async_generate_image(
         self,
         task: ai_task.GenImageTask,
@@ -140,5 +146,5 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
             mime_type="image/png",
             width=width,
             height=height,
-            revised_prompt=build_activity_image_instructions(title),
+            revised_prompt=result.get("revised_prompt"),
         )

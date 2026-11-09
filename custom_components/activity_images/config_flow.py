@@ -4,6 +4,7 @@ from __future__ import annotations
 import probatio as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
 
 from .const import (
@@ -13,10 +14,13 @@ from .const import (
     CONF_LOOKAHEAD_DAYS,
     CONF_LUCIDA_URL,
     CONF_REFERENCE_MEDIA_ID,
+    CONF_PROMPT_TEMPLATE,
     DEFAULT_LOOKAHEAD_DAYS,
     DOMAIN,
-    MAX_CALENDARS,
 )
+from .prompts import DEFAULT_PROMPT_TEMPLATE
+from .settings import StaleSettingsError, options_for_update, revision, settings_lock
+from .settings_schema import effective_settings, validate_settings
 
 
 def schema(settings: dict | None = None) -> vol.Schema:
@@ -25,18 +29,25 @@ def schema(settings: dict | None = None) -> vol.Schema:
     # An empty EntitySelector is invalid on current Home Assistant releases.
     provider = settings.get(CONF_AI_ENTITY)
     provider_key = (
-        vol.Optional(CONF_AI_ENTITY, default=provider)
+        vol.Optional(CONF_AI_ENTITY, description={"suggested_value": provider})
         if provider else vol.Optional(CONF_AI_ENTITY)
+    )
+    reference = settings.get(CONF_REFERENCE_MEDIA_ID)
+    if isinstance(reference, str) and reference:
+        reference = {"media_content_id":reference, "media_content_type":"image"}
+    reference_key = (
+        vol.Optional(CONF_REFERENCE_MEDIA_ID, description={"suggested_value":reference})
+        if reference else vol.Optional(CONF_REFERENCE_MEDIA_ID)
     )
     return vol.Schema({
         provider_key: selector.EntitySelector(selector.EntitySelectorConfig(domain="ai_task")),
-        vol.Optional(
-            CONF_REFERENCE_MEDIA_ID,
-            default=settings.get(CONF_REFERENCE_MEDIA_ID, ""),
-        ): selector.TextSelector(),
+        reference_key: selector.MediaSelector(selector.MediaSelectorConfig(accept=["image/*"])),
         vol.Optional(
             CONF_LUCIDA_URL, default=settings.get(CONF_LUCIDA_URL, "")
         ): selector.TextSelector(),
+        vol.Optional(
+            CONF_PROMPT_TEMPLATE, default=settings.get(CONF_PROMPT_TEMPLATE, DEFAULT_PROMPT_TEMPLATE),
+        ): selector.TextSelector(selector.TextSelectorConfig(multiline=True)),
         vol.Optional(
             CONF_CALENDARS, default=settings.get(CONF_CALENDARS, [])
         ): selector.EntitySelector(selector.EntitySelectorConfig(domain="calendar", multiple=True)),
@@ -51,27 +62,13 @@ def schema(settings: dict | None = None) -> vol.Schema:
     })
 
 
-def _valid(data: dict) -> bool:
-    calendars = data.get(CONF_CALENDARS, [])
-    if not isinstance(calendars, list) or len(calendars) > MAX_CALENDARS:
-        return False
-    if len(calendars) != len(set(calendars)):
-        return False
-    # Prevent automatic paid generation when no valid image provider is set.
-    if data.get(CONF_AUTO_GENERATE) and not data.get(CONF_AI_ENTITY):
-        return False
-    if not all(isinstance(item, str) and item.startswith("calendar.") for item in calendars):
-        return False
-    return (
-        (
-            not data.get(CONF_LUCIDA_URL)
-            or data[CONF_LUCIDA_URL].startswith(("http://", "https://"))
-        )
-        and (
-            not data.get(CONF_REFERENCE_MEDIA_ID)
-            or data[CONF_REFERENCE_MEDIA_ID].startswith("media-source://")
-        )
-    )
+def _form_settings(data: dict) -> dict:
+    """Adapt native media-selector objects to the unchanged persisted string ID."""
+    values = dict(data)
+    reference = values.get(CONF_REFERENCE_MEDIA_ID)
+    if isinstance(reference, dict):
+        values[CONF_REFERENCE_MEDIA_ID] = reference.get("media_content_id", "")
+    return validate_settings(values)
 
 
 class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -80,33 +77,44 @@ class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         errors = {}
         if user_input is not None:
-            if not _valid(user_input):
+            try:
+                values = _form_settings(user_input)
+            except ValueError:
                 errors["base"] = "invalid_settings"
             else:
                 await self.async_set_unique_id(DOMAIN)
                 self._abort_if_unique_id_configured()
-                return self.async_create_entry(title="Activity Images", data=user_input)
-        return self.async_show_form(step_id="user", data_schema=schema(), errors=errors)
+                return self.async_create_entry(title="Activity Images", data=values)
+        return self.async_show_form(step_id="user", data_schema=schema(user_input), errors=errors)
 
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return ActivityImagesOptionsFlow(config_entry)
+        return ActivityImagesOptionsFlow()
 
 
 class ActivityImagesOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, config_entry):
-        self._source_entry = config_entry
+    def __init__(self):
+        self._revision = None
 
     async def async_step_init(self, user_input=None):
+        entry = self.config_entry
+        if self._revision is None:
+            self._revision = revision(entry)
         errors = {}
         if user_input is not None:
-            if not _valid(user_input):
+            try:
+                async with settings_lock(entry):
+                    # The full native form can omit a cleared optional provider.
+                    values = _form_settings(user_input)
+                    options = options_for_update(entry, values, self._revision)
+                    # HA's flow manager persists this result without another await.
+                    return self.async_create_entry(title="", data=options)
+            except StaleSettingsError:
+                errors["base"] = "settings_conflict"
+            except (ValueError, HomeAssistantError):
                 errors["base"] = "invalid_settings"
-            else:
-                return self.async_create_entry(title="", data=user_input)
-        current = dict(self._source_entry.data)
-        current.update(self._source_entry.options)
         return self.async_show_form(
-            step_id="init", data_schema=schema(current), errors=errors
+            step_id="init", data_schema=schema(user_input if user_input is not None else effective_settings(entry)),
+            errors=errors,
         )

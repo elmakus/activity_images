@@ -23,6 +23,7 @@ from .image_cache import ActivityImageCache, async_get_cache
 from .image_queue import ActivityImageQueue
 from .library import ActivityImageLibrary, _read_owned, _verify, validate_title
 from .library_deletion import ActivityImageDeletions
+from .settings_schema import ConfigEntrySettings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,14 +181,16 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
-async def _reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Keep paid work and runtime identities intact when native options change."""
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is not None:
+        await runtime.calendar.async_update_settings(runtime.generator.settings)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Load the one independent image generator and its persistent queue."""
-    settings = dict(entry.data)
-    settings.update(entry.options)
+    settings = ConfigEntrySettings(entry)
     cache = await async_get_cache(hass)
     generator = ActivityImageGenerator(hass, cache, settings)
     queue = ActivityImageQueue(hass, generator)
@@ -217,7 +220,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await queue.async_shutdown()
         hass.data[DOMAIN].pop(entry.entry_id, None)
         raise
-    entry.async_on_unload(entry.add_update_listener(_reload_entry))
+    entry.async_on_unload(entry.add_update_listener(_async_update_options))
     _LOGGER.info("Activity Images standalone generator and calendar library initialized")
     return True
 

@@ -1,7 +1,8 @@
-"""Original, unabridged Home Tasks tactile 3D activity-icon prompt.
+"""Configurable tactile 3D activity icon prompt, preserving the original default."""
+from __future__ import annotations
 
-Room/isometric variant intentionally removed by user decision.
-"""
+from string import Formatter
+
 DEFAULT_PROMPT_PREFIX = (
     "Create one compact, colorful, tactile 3D activity icon with one immediately "
     "recognizable dominant subject for:"
@@ -32,8 +33,25 @@ background, with no texture, gradient or cast shadow on the background. Keep a
 clear margin around the subject. Return a square 1:1 PNG.
 """.strip()
 
+DEFAULT_PROMPT_TEMPLATE = f"{DEFAULT_PROMPT_PREFIX} {{title}}\n\n{PROMPT_STYLE_SUFFIX}"
+MAX_PROMPT_LENGTH = 16000
 
 
-def build_activity_image_instructions(title: str) -> str:
-    """The exact original normal-activity prompt for all titles."""
-    return f"{DEFAULT_PROMPT_PREFIX} {title}\n\n{PROMPT_STYLE_SUFFIX}"
+def validate_prompt_template(template: str) -> str:
+    """Allow exactly one named {title} placeholder; reject format expressions."""
+    if not isinstance(template, str) or not 1 <= len(template) <= MAX_PROMPT_LENGTH:
+        raise ValueError("Prompt template must contain 1–16000 characters")
+    try:
+        fields = [(name, spec, conversion) for _, name, spec, conversion
+                  in Formatter().parse(template) if name is not None]
+    except ValueError as exc:
+        raise ValueError("Invalid prompt braces") from exc
+    if fields != [("title", "", None)]:
+        raise ValueError("Prompt must contain exactly one {title} placeholder")
+    return template
+
+
+def build_activity_image_instructions(title: str, template: str | None = None) -> str:
+    """Render one safe user-supplied title without interpreting its braces."""
+    selected = validate_prompt_template(template if template is not None else DEFAULT_PROMPT_TEMPLATE)
+    return selected.format(title=title)
