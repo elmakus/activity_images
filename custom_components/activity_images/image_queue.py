@@ -8,7 +8,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
@@ -404,7 +404,9 @@ class ActivityImageQueue:
                             self._failed.pop(normalize_title(title), None)
                     self._current = None
                     self._trim_history()
-                    await self._save()
+                    # The durable running boundary already requires explicit manual retry.
+                    if self.hass.state is not CoreState.stopping:
+                        await self._save()
 
     async def async_shutdown(self) -> None:
         self._closed = True
@@ -413,5 +415,6 @@ class ActivityImageQueue:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._worker
         async with self._lock:
-            if self._loaded:
+            # Pending/running work was persisted before any provider request.
+            if self._loaded and self.hass.state is not CoreState.stopping:
                 await self._save()

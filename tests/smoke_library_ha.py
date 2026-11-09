@@ -22,13 +22,14 @@ from homeassistant.auth import auth_manager_from_config  # noqa: E402
 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER  # noqa: E402
 from homeassistant.components import frontend, websocket_api  # noqa: E402
 from homeassistant.components.http.server import HomeAssistantHTTP  # noqa: E402
-from homeassistant.const import __version__  # noqa: E402
-from homeassistant.core import HomeAssistant  # noqa: E402
+from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE, __version__  # noqa: E402
+from homeassistant.core import CoreState, HomeAssistant  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from homeassistant.helpers import device_registry as dr  # noqa: E402
 from homeassistant.helpers import storage as ha_storage  # noqa: E402
 from homeassistant.helpers.data_entry_flow import _BaseFlowManagerView  # noqa: E402
-from homeassistant.util.file import WriteError  # noqa: E402
+from homeassistant.helpers.storage import Store  # noqa: E402
+from homeassistant.util.file import WriteError, write_utf8_file_atomic  # noqa: E402
 from homeassistant.util.ssl import SSLProfile  # noqa: E402
 
 from custom_components.activity_images import (  # noqa: E402
@@ -79,7 +80,7 @@ async def native_write_failures(runtime):
     await cache.async_remember("Durable Alias", old)
     cache_before = cache.entries()
     cache_generation = cache._save_generation
-    native = ha_storage.write_utf8_file_atomic
+    native = write_utf8_file_atomic
     failing_paths = set()
     def fail_native(filename, *args, **kwargs):
         if filename in failing_paths:
@@ -140,8 +141,91 @@ async def native_write_failures(runtime):
         assert cache.exact("Durable Alias") == old
 
 
+async def stopping_writes_never_commit_after_reported_failure():
+    from custom_components.activity_images.engine import ActivityImageGenerator
+    from custom_components.activity_images.image_cache import ActivityImageCache
+    from custom_components.activity_images.image_queue import ActivityImageQueue
+    with tempfile.TemporaryDirectory(prefix="activity-stopping-smoke-") as directory:
+        hass = HomeAssistant(directory)
+        cache = ActivityImageCache(hass)
+        await cache.async_setup()
+        old, new = "/local/activity_images/old.png", "/local/activity_images/new.png"
+        await cache.async_remember("Selected", old)
+        engine = ActivityImageGenerator(hass, cache, {})
+        queue = ActivityImageQueue(hass, engine)
+        await queue.async_setup()
+        candidate = queue._new_job("Selected", "manual")
+        candidate.update(state="review", result_url=new)
+        queue._jobs.append(candidate)
+        await queue._save()
+        cache_generation, queue_generation = cache._save_generation, queue._save_generation
+        hass.set_state(CoreState.stopping)
+        operations = (
+            cache.async_link("Selected", new, replace=True),
+            cache.async_record_image(new, {"origin": "generated"}),
+            queue.async_candidate("Rejected During Stop"),
+            queue.async_accept(candidate["id"]),
+        )
+        for operation in operations:
+            try:
+                await operation
+            except OSError as exc:
+                assert "is stopping" in str(exc)
+            else:
+                raise AssertionError("Stopping mutation must fail before Store retains data")
+        assert cache.exact("Selected") == old
+        assert cache.image_metadata(new) == {}
+        assert queue._job(candidate["id"])["state"] == "review"
+        assert cache._save_generation == cache_generation
+        assert queue._save_generation == queue_generation
+        await queue.async_shutdown()  # No false unload error or deferred shutdown write.
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+        await hass.async_block_till_done()
+        fresh_cache = Store(hass, 1, "activity_images_image_cache", atomic_writes=True)
+        data = await fresh_cache.async_load()
+        assert data is not None
+        assert data["entries"]["selected"]["image_url"] == old
+        assert new not in data["images"]
+        fresh_queue = Store(hass, 1, "activity_images_jobs", atomic_writes=True)
+        data = await fresh_queue.async_load()
+        assert data is not None
+        assert data["pending"] == [] and data["jobs"][-1]["state"] == "review"
+
+        # Graceful stop cancels running work without saving through deferred Store.
+        hass.set_state(CoreState.running)
+        resumed = ActivityImageQueue(hass, engine)
+        await resumed.async_setup()
+        started = asyncio.Event()
+        async def blocked_provider(*args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+        with patch.object(engine, "async_generate", side_effect=blocked_provider) as provider:
+            running = await resumed.async_candidate("Running At Stop")
+            await started.wait()
+            generation = resumed._save_generation
+            hass.set_state(CoreState.stopping)
+            await resumed.async_shutdown()
+            assert resumed._save_generation == generation
+            assert resumed._job(running["id"])["state"] == "interrupted"
+            hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+            await hass.async_block_till_done()
+            data = await Store(hass, 1, "activity_images_jobs").async_load()
+            assert data is not None
+            assert data["jobs"][-1]["state"] == "running"
+            hass.set_state(CoreState.running)
+            restarted = ActivityImageQueue(hass, engine)
+            await restarted.async_setup()
+            assert restarted._job(running["id"])["state"] == "interrupted"
+            assert restarted.status()["pending"] == []
+            assert provider.call_count == 1  # No automatic paid replay.
+            await restarted.async_shutdown()
+        hass.set_state(CoreState.not_running)
+        await hass.async_stop()
+
+
 async def run():
     assert __version__ == "2026.11.0", __version__
+    await stopping_writes_never_commit_after_reported_failure()
     with tempfile.TemporaryDirectory(prefix="activity-library-smoke-") as directory:
         hass: Any = HomeAssistant(directory)
         await prepare_http(hass)

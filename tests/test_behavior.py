@@ -131,6 +131,7 @@ class FakeServices:
         return {"media_source_id": "media-source://generated/test"}
 
 
+sys.modules["homeassistant.core"].CoreState = SimpleNamespace(running="running", stopping="stopping")
 sys.modules["homeassistant.core"].HomeAssistant = MockHA
 sys.modules["homeassistant.helpers.storage"].Store = MemoryStore
 sys.modules["homeassistant.components.media_source"].async_resolve_media = fake_resolve_media
@@ -794,7 +795,6 @@ def _load_integration_entrypoint():
     core = sys.modules["homeassistant.core"]
     core.ServiceCall = SimpleNamespace
     core.callback = lambda func: func
-    core.CoreState = SimpleNamespace(running="running")
     if "homeassistant.helpers.start" not in sys.modules:
         _package("homeassistant.helpers.start")
 
