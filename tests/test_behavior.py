@@ -254,6 +254,8 @@ async def test_force_regeneration(ha, configured):
     assert cache.exact("Alias") == first["image_url"]
     assert cache.exact("Odkurzanie") == result["image_url"]
     assert len(ha.services.calls) == 2
+    assert ha.services.calls[0][2]["task_name"] == ha.services.calls[1][2]["task_name"]
+    assert len(ha.services.calls[0][2]["task_name"].removeprefix("activity_image_")) == 16
 
 
 @pytest.mark.asyncio

@@ -59,10 +59,11 @@ class ActivityImageGenerator:
             if not entity_id:
                 raise ValueError("Configure an ai_task entity in Activity Images")
             signature = normalize_title(title)
-            # Never overwrite a previously published master or its variants.
-            suffix = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16] + "_" + uuid4().hex
+            task_id = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
+            # Keep the provider task name stable but never overwrite published files.
+            suffix = task_id + "_" + uuid4().hex
             payload = {
-                "task_name": f"activity_image_{suffix}",
+                "task_name": f"activity_image_{task_id}",
                 "instructions": build_activity_image_instructions(title),
                 "entity_id": entity_id,
             }
