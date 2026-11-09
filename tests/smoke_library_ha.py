@@ -356,6 +356,10 @@ async def run():
             await anonymous.close()
             admin_ws = await connect(admin_token)
             user_ws = await connect(user_token)
+            module_response = await client.get("/activity_images/settings/settings-view.mjs")
+            assert module_response.status == 200, module_response.status
+            assert "javascript" in module_response.content_type
+            assert b"ActivityImagesSettings" in await module_response.read()
             counter = 0
             async def command(ws, name, **kwargs):
                 nonlocal counter

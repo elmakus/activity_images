@@ -826,3 +826,27 @@ test('keeping originals is explicit, sends no AI authorization and never offers 
   panel._renderJobs();
   assert.ok(![...panel._queue.querySelectorAll('button')].some((b) => b.textContent === 'Keep originals…'));
 });
+
+test('Settings tab navigates without disturbing the Library and Queue tabs', async (t) => {
+  const {panel, window} = setup(t);
+  window.customElements.define('activity-images-settings', class extends window.HTMLElement {
+    set hass(value) { this._hass = value; }
+    get hass() { return this._hass; }
+  });
+  await tick();
+  findButton(panel.shadowRoot, 'Settings').click();
+  await tick();
+  assert.equal(panel._settings.hidden, false);
+  assert.equal(panel._gallery.hidden, true);
+  assert.equal(panel._queue.hidden, true);
+  assert.ok(panel._settingsView);
+  assert.equal(panel._settingsView.hass, panel.hass);
+  findButton(panel.shadowRoot, 'Library').click();
+  assert.equal(panel._settings.hidden, true);
+  assert.equal(panel._gallery.hidden, false);
+  findButton(panel.shadowRoot, 'Queue & history').click();
+  assert.equal(panel._queue.hidden, false);
+  assert.equal(panel._settings.hidden, true);
+  findButton(panel.shadowRoot, 'Settings').click();
+  assert.equal(panel._settingsView.hass, panel.hass);
+});

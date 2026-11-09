@@ -63,3 +63,42 @@ test("Calendar parsing and prompt preview treat braces and HTML as inert text", 
   assert.match(root.querySelector("pre").textContent, /<img src=x/);
   window.happyDOM.abort();
 });
+
+
+test("Reference preview fetches with HA auth and revokes the object URL", async () => {
+  const window = new Window();
+  global.document = window.document;
+  const {renderReference} = await import(location("reference-view.mjs"));
+  const oldCreate = URL.createObjectURL;
+  const oldRevoke = URL.revokeObjectURL;
+  const revoked = [];
+  const requests = [];
+  URL.createObjectURL = () => "blob:reference-test";
+  URL.revokeObjectURL = (url) => revoked.push(url);
+  try {
+    const root = window.document.createElement("section");
+    window.document.body.append(root);
+    const dispose = renderReference(root, {reference_media_content_id:"media-source://media_source/local/reference.png"},
+      () => {}, {
+        fetchWithAuth: async (url, init) => {
+          requests.push({url, init});
+          return {ok:true, blob:async () => new window.Blob(["fake"], {type:"image/png"})};
+        },
+      });
+    const button = [...root.querySelectorAll("button")].find((x) => x.textContent === "Preview selected image");
+    assert.ok(button);
+    button.click();
+    await tick();
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /^\/api\/activity_images\/settings\/reference\?media_id=/);
+    assert.ok(requests[0].init.signal);
+    assert.equal(root.querySelector(".reference-preview img").src, "blob:reference-test");
+    dispose();
+    assert.deepEqual(revoked, ["blob:reference-test"]);
+    assert.equal(root.querySelector(".reference-preview img"), null);
+  } finally {
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+    window.happyDOM.abort();
+  }
+});
