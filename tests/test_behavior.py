@@ -70,6 +70,8 @@ class MockHA:
             async_unload_platforms=self._unload_platforms,
         )
         self.forwarded = []
+        self.state = "running"
+        self.states = SimpleNamespace(get=lambda entity: SimpleNamespace(state="off"))
 
     async def _forward_platforms(self, entry, platforms):
         self.forwarded.append(("load", tuple(platforms)))
@@ -787,6 +789,15 @@ def _load_integration_entrypoint():
     core = sys.modules["homeassistant.core"]
     core.ServiceCall = SimpleNamespace
     core.callback = lambda func: func
+    core.CoreState = SimpleNamespace(running="running")
+    if "homeassistant.helpers.start" not in sys.modules:
+        _package("homeassistant.helpers.start")
+
+    def at_started(hass, listener):
+        listener(hass)
+        return lambda: None
+
+    sys.modules["homeassistant.helpers.start"].async_at_started = at_started
     if "homeassistant.helpers.event" not in sys.modules:
         _package("homeassistant.helpers.event")
     sys.modules["homeassistant.helpers.event"].async_track_state_change_event = (
@@ -794,6 +805,11 @@ def _load_integration_entrypoint():
     )
     sys.modules["homeassistant.helpers.event"].async_track_time_interval = (
         lambda hass, listener, interval: lambda: None
+    )
+    sys.modules["homeassistant.helpers.event"].async_call_later = (
+        lambda hass, delay, listener: asyncio.get_running_loop().call_later(
+            delay, listener, None
+        ).cancel
     )
     if "homeassistant.util" not in sys.modules:
         _package("homeassistant.util")
@@ -1156,6 +1172,7 @@ async def test_calendar_start_tracks_state_and_periodic_scan(ha, configured, mon
     monkeypatch.setattr(adapter_module, "async_track_state_change_event", fake_track_state)
     monkeypatch.setattr(adapter_module, "async_track_time_interval", fake_track_time)
     await adapter.async_start()
+    await adapter.async_refresh()
     assert ("state", ("calendar.school",)) in tracked
     assert ("time", 15 * 60) in tracked
     assert adapter.calendar_titles["calendar.school"] == ["An event"]
@@ -1205,6 +1222,7 @@ async def test_integration_calendar_service_and_platform_lifecycle(ha, monkeypat
     ha.services.async_register("calendar", "get_events", get_events)
     assert await integration.async_setup_entry(ha, entry)
     assert ("load", ("sensor", "ai_task")) in ha.forwarded
+    await entry.runtime_data.calendar.async_refresh()
     assert entry.runtime_data.calendar.calendar_titles["calendar.school"] == ["New event"]
     assert len(ha.services.registered) == 9  # Eight activity actions + calendar service.
     result = await ha.services.async_call("activity_images", "refresh_calendars", {})
@@ -1229,6 +1247,7 @@ async def test_existing_png_can_be_linked_without_provider(ha, monkeypatch):
 
     ha.services.async_register("calendar", "get_events", get_events)
     await integration.async_setup_entry(ha, entry)
+    await entry.runtime_data.calendar.async_refresh()
     assert entry.runtime_data.generator.settings.get(const_module.CONF_AI_ENTITY) is None
     assert entry.runtime_data.calendar.images == {}
 
