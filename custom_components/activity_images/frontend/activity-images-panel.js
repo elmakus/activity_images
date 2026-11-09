@@ -341,8 +341,8 @@
       try {
         const result = await this._ws(command, data);
         if (!this.isConnected || lifecycle !== this._lifecycle) return;
-        this._busy = false;
         await done?.(result);
+        if (!this.isConnected || lifecycle !== this._lifecycle) return;
         this._status.textContent = "Changes saved. Files are never deleted; Home Tasks copies are not synchronized.";
         this._loadList();
         this._loadJobs();

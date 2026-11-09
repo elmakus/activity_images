@@ -397,3 +397,78 @@ test('active generation outside recorded queue is visible in both views; scroll 
   assert.match(css, /object-fit:contain/);
   assert.ok(!css.includes('object-fit:cover'));
 });
+
+test('link completion keeps controls locked through delayed detail loading before another paid request', async (t) => {
+  const detail = deferred();
+  const generation = deferred();
+  const { panel, commands } = setup(t, (r) => {
+    if (r.type.endsWith('/get')) return detail.promise;
+    if (r.type.endsWith('/generate')) return generation.promise;
+  });
+  await tick();
+  panel._linkDialog(item());
+  panel._dialog.querySelector('input').value = 'Read';
+  findButton(panel._dialog, 'Assign').click();
+  await tick();
+  assert.equal(commands('get').length, 1);
+  assert.equal(panel._busy, true);
+  const close = findButton(panel._dialog, 'Close');
+  assert.ok(close.disabled);
+  close.click();
+  assert.ok(panel._dialog.open);
+  findButton(panel._gallery, 'Generate new image').click();
+  assert.match(panel._dialog.textContent, /Loading image details/);
+  assert.equal(commands('generate').length, 0);
+  detail.resolve({ ...item(), assets: { master: item().image_url } });
+  await tick();
+  assert.equal(panel._busy, false);
+  findButton(panel._dialog, 'Close').click();
+  findButton(panel._gallery, 'Generate new image').click();
+  panel._dialog.querySelector('input').value = 'Walk';
+  panel._dialog.querySelector('[type=checkbox]').checked = true;
+  const submit = findButton(panel._dialog, 'Generate paid candidate');
+  submit.click();
+  await tick();
+  assert.equal(panel._busy, true);
+  assert.ok(submit.disabled);
+  submit.click();
+  assert.equal(commands('generate').length, 1);
+  generation.resolve({ id: 'paid-job' });
+  await tick();
+});
+
+test('old awaited completion cannot refresh or unlock a newer lifecycle paid mutation', async (t) => {
+  const detail = deferred();
+  const generation = deferred();
+  const { panel, window, commands } = setup(t, (r) => {
+    if (r.type.endsWith('/get')) return detail.promise;
+    if (r.type.endsWith('/generate')) return generation.promise;
+  });
+  await tick();
+  panel._linkDialog(item());
+  panel._dialog.querySelector('input').value = 'Read';
+  findButton(panel._dialog, 'Assign').click();
+  await tick();
+  panel.remove();
+  window.document.body.append(panel);
+  await tick();
+  panel._generateDialog();
+  panel._dialog.querySelector('input').value = 'Walk';
+  panel._dialog.querySelector('[type=checkbox]').checked = true;
+  const submit = findButton(panel._dialog, 'Generate paid candidate');
+  submit.click();
+  const listCount = commands('list').length;
+  const jobsCount = commands('jobs').length;
+  const status = panel._status.textContent;
+  detail.resolve({ ...item(), assets: { master: item().image_url } });
+  await tick();
+  assert.equal(panel._busy, true);
+  assert.ok(submit.disabled);
+  assert.equal(commands('list').length, listCount);
+  assert.equal(commands('jobs').length, jobsCount);
+  assert.equal(panel._status.textContent, status);
+  submit.click();
+  assert.equal(commands('generate').length, 1);
+  generation.resolve({ id: 'paid-job' });
+  await tick();
+});
