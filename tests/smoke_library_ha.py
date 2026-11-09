@@ -315,7 +315,7 @@ async def run():
         form = await config_flow.async_step_user()
         flow_manager: Any = SimpleNamespace()
         view = _BaseFlowManagerView[Any, Any](flow_manager)
-        assert len(view._prepare_result_json(form)["data_schema"]) == 6
+        assert len(view._prepare_result_json(form)["data_schema"]) == 7
         options_flow = ActivityImagesOptionsFlow(Entry())
         options_flow.hass = hass
         options_form = await options_flow.async_step_init()

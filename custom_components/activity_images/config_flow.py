@@ -16,7 +16,6 @@ from .const import (
     CONF_PROMPT_TEMPLATE,
     DEFAULT_LOOKAHEAD_DAYS,
     DOMAIN,
-    MAX_CALENDARS,
 )
 from .prompts import DEFAULT_PROMPT_TEMPLATE
 from .settings_schema import validate_settings
