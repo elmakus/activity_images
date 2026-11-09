@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from homeassistant.auth import auth_manager_from_config  # noqa: E402
 from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_USER  # noqa: E402
 from homeassistant.components import frontend, websocket_api  # noqa: E402
+from homeassistant.components.http import StaticPathConfig  # noqa: E402
 from homeassistant.components.http.server import HomeAssistantHTTP  # noqa: E402
 from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE, __version__  # noqa: E402
 from homeassistant.core import CoreState, HomeAssistant  # noqa: E402
@@ -36,6 +37,7 @@ from custom_components.activity_images import (  # noqa: E402
     async_setup,
     async_setup_entry,
     async_unload_entry,
+    deletion_files,  # noqa: E402
 )
 from custom_components.activity_images.config_flow import (  # noqa: E402
     ActivityImagesConfigFlow,
@@ -301,6 +303,7 @@ async def run():
         admin_token, user_token = await token(admin), await token(regular)
         folder = Path(directory) / "www/activity_images"
         folder.mkdir(parents=True)
+        await hass.http.async_register_static_paths([StaticPathConfig("/local", str(folder.parent), False)])
         Image.new("RGB", (16, 12), "green").save(folder / "standalone.png")
         Image.new("RGB", (16, 12), "blue").save(folder / "other.png")
         (folder / "corrupt.png").write_bytes(b"corrupt")
@@ -456,6 +459,33 @@ async def run():
             assert status["result"]["operations"] == history["result"]["operations"]
             assert not (folder / "delete-me.png").exists() and not (folder / "delete-me_thumb.webp").exists()
             assert not (await command(admin_ws, "delete_retry_plan", operation_id=deleted["result"]["id"]))["success"]
+            Image.new("RGB", (16, 12), "yellow").save(folder / "private-cleanup.png")
+            public_path = "/local/activity_images/private-cleanup.png"
+            assert (await client.get(public_path)).status == 200
+            private_plan = await command(admin_ws, "delete_plan", image_ids=[entry.runtime_data.library.image_id("private-cleanup.png")])
+            native_unlink = deletion_files.os.unlink
+            def leave_quarantined(path, *args, **kwargs):
+                if isinstance(path, str) and len(path) == 64 and "dir_fd" in kwargs:
+                    raise OSError("Synthetic unlink failure after private rename")
+                return native_unlink(path, *args, **kwargs)
+            with patch.object(deletion_files.os, "unlink", leave_quarantined):
+                private_op = await command(admin_ws, "delete", token=private_plan["result"]["token"], regenerate=False, confirm=True)
+                assert private_op["success"], private_op
+                await entry.runtime_data.deletions._task
+            private_root = Path(directory) / ".storage/activity_images_deletions"
+            retained = list(private_root.iterdir())
+            assert retained and (await client.get(public_path)).status == 404
+            for path in (f"/local/activity_images/.deletions/{retained[0].name}",
+                         f"/local/activity_images_deletions/{retained[0].name}",
+                         f"/.storage/activity_images_deletions/{retained[0].name}",
+                         f"/local/../.storage/activity_images_deletions/{retained[0].name}"):
+                assert (await client.get(path)).status == 404, path
+            assert not (folder / ".deletions").exists()
+            retry_plan = await command(admin_ws, "delete_retry_plan", operation_id=private_op["result"]["id"])
+            assert retry_plan["result"]["replacement_requests"] == 0
+            assert (await command(admin_ws, "delete_retry", operation_id=private_op["result"]["id"], token=retry_plan["result"]["token"], confirm=True))["success"]
+            await entry.runtime_data.deletions._task
+            assert not list(private_root.iterdir())
             # Manager-only clear must preserve legacy paid retry authorization barriers.
             entry.runtime_data.queue._failed["manager legacy failure"] = "old error"
             assert (await command(admin_ws, "clear_errors"))["success"]

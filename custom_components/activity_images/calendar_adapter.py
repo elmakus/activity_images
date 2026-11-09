@@ -73,6 +73,7 @@ class ActivityCalendarAdapter:
         self._reconcile_task: asyncio.Task | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._rescan_needed = False
+        self._generation_suppressed = 0
         self._reconcile_needed = False
         self._closed = False
         self._start_registered = False
@@ -221,6 +222,25 @@ class ActivityCalendarAdapter:
             await asyncio.shield(self._scan_task)
         return self.status()
 
+    async def async_refresh_for_deletion(self) -> dict:
+        """Verify live demand without authorizing automatic missing-image jobs."""
+        self._generation_suppressed += 1
+        refresh = asyncio.create_task(self.async_refresh())
+        cancelled = False
+        try:
+            # A cancelled admin request must not leave its scan free to enqueue.
+            while not refresh.done():
+                try:
+                    await asyncio.shield(refresh)
+                except asyncio.CancelledError:
+                    cancelled = True
+            result = await refresh
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+        finally:
+            self._generation_suppressed -= 1
+
     async def _async_refresh_once(self) -> dict:
         """Read a 30-day by-default window, group by calendar, resolve, then queue."""
         async with self._lock:
@@ -280,7 +300,13 @@ class ActivityCalendarAdapter:
                 wanted = list(dict.fromkeys(
                     title for titles in parsed.values() for title in titles
                 ))
-                images = await self.cache.async_find_many(wanted)
+                if self._generation_suppressed:
+                    images = {}
+                    for title in wanted:
+                        if url := await self.cache.async_find(title, touch=False, prune=False):
+                            images[title] = url
+                else:
+                    images = await self.cache.async_find_many(wanted)
                 if self._closed:
                     return self.status()
                 self._snapshot_task = self.hass.async_create_task(async_save_verified(self.hass, self._store, parsed))
@@ -294,7 +320,7 @@ class ActivityCalendarAdapter:
                 self.last_scan = now.isoformat()
                 self.last_error = None
                 self._notify()
-                if self.auto_generate and not self._closed:
+                if self.auto_generate and not self._closed and not self._generation_suppressed:
                     missing = [title for title in wanted if title not in images]
                     await self.queue.async_enqueue(missing)
             except asyncio.CancelledError:

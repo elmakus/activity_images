@@ -263,7 +263,7 @@ async def test_cleanup_failure_observable_zero_paid_retry_and_restart(ha, config
     await settled(deletions)
     assert deletions.operations()[0]["state"] == "cleanup_failed"
     assert cache.exact("Historical") is None and not old.exists()
-    assert list((old.parent / ".deletions").iterdir())
+    assert list((ha.base / ".storage/activity_images_deletions").iterdir())
     retry = await deletions.async_retry_plan(operation["id"])
     assert retry["replacement_requests"] == 0
     monkeypatch.setattr(deletion_files.os, "unlink", native)
@@ -279,7 +279,7 @@ async def test_cleanup_failure_observable_zero_paid_retry_and_restart(ha, config
     retry = await fresh.async_retry_plan(operation["id"])
     await fresh.async_retry(operation["id"], retry["token"], True)
     await settled(fresh)
-    assert fresh.operations()[0]["state"] == "done" and not list((old.parent / ".deletions").iterdir())
+    assert fresh.operations()[0]["state"] == "done" and not list((ha.base / ".storage/activity_images_deletions").iterdir())
     assert ha.services.calls == []
 
 
@@ -328,10 +328,10 @@ async def test_bulk_item_failure_does_not_prevent_other_image_completion(ha, con
     deletions = manager(ha, configured)
     native = deletion_files.cleanup
     import custom_components.activity_images.library_deletion as module
-    def selective(root, expected, operation_id, image_id):
+    def selective(root, quarantine_root, expected, operation_id, image_id):
         if "one.png" in expected["files"]:
             raise OSError("one cleanup failed")
-        return native(root, expected, operation_id, image_id)
+        return native(root, quarantine_root, expected, operation_id, image_id)
     monkeypatch.setattr(module, "cleanup", selective)
     await select(deletions, ["one.png", "two.png"])
     await settled(deletions)
@@ -358,7 +358,7 @@ def test_symlink_root_parent_and_stale_identity_never_delete(tmp_path):
             deletion_files.snapshot(path, ["old.png"])
     target.write_bytes(b"unrelated")
     with pytest.raises(ValueError, match="identity"):
-        deletion_files.cleanup(root, expected, "operation", "image")
+        deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
     assert target.read_bytes() == b"unrelated"
     assert json.loads(json.dumps(expected)) == expected
 
@@ -371,14 +371,15 @@ def test_compare_to_rename_race_never_unlinks_unrelated(tmp_path, monkeypatch):
     expected = deletion_files.snapshot(root, ["old.png"])
     native = deletion_files._rename_no_replace
     def raced(source, name, directory, quarantine):
-        target.unlink()
-        target.write_bytes(b"unrelated")
+        if source == target.name:
+            target.unlink()
+            target.write_bytes(b"unrelated")
         native(source, name, directory, quarantine)
     monkeypatch.setattr(deletion_files, "_rename_no_replace", raced)
     with pytest.raises(ValueError, match="raced"):
-        deletion_files.cleanup(root, expected, "operation", "image")
+        deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
     assert target.read_bytes() == b"unrelated"
-    assert any(path.read_bytes() == b"unrelated" for path in (root / ".deletions").iterdir())
+    assert not list((tmp_path / ".storage/activity_images_deletions").iterdir())
 
 
 def test_cleanup_missing_variants_and_repeated_calls_are_idempotent(tmp_path):
@@ -387,8 +388,8 @@ def test_cleanup_missing_variants_and_repeated_calls_are_idempotent(tmp_path):
     target = root / "old.png"
     target.write_bytes(b"original")
     expected = deletion_files.snapshot(root, ["old.png"])
-    deletion_files.cleanup(root, expected, "operation", "image")
-    deletion_files.cleanup(root, expected, "operation", "image")
+    deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
+    deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
     assert not target.exists()
 
 
@@ -575,16 +576,18 @@ def test_quarantine_symlink_and_root_replacement_are_rejected(tmp_path):
     expected = deletion_files.snapshot(root, ["old.png"])
     outside = tmp_path / "outside"
     outside.mkdir()
-    (root / ".deletions").symlink_to(outside, target_is_directory=True)
+    private = tmp_path / ".storage/activity_images_deletions"
+    private.parent.mkdir()
+    private.symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError):
-        deletion_files.cleanup(root, expected, "operation", "image")
+        deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
     assert (root / "old.png").read_bytes() == b"original" and not list(outside.iterdir())
-    (root / ".deletions").unlink()
+    private.unlink()
     root.rename(tmp_path / "original-directory")
     root.mkdir()
     (root / "old.png").write_bytes(b"unrelated")
     with pytest.raises(ValueError, match="directory changed"):
-        deletion_files.cleanup(root, expected, "operation", "image")
+        deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
     assert (root / "old.png").read_bytes() == b"unrelated"
 
 
@@ -596,10 +599,142 @@ def test_quarantine_atomic_no_replace_preserves_raced_destination(tmp_path, monk
     expected = deletion_files.snapshot(root, ["old.png"])
     native = deletion_files._rename_no_replace
     def raced(source, name, directory, quarantine):
-        (root / ".deletions" / name).write_bytes(b"unrelated quarantine file")
+        (tmp_path / ".storage/activity_images_deletions" / name).write_bytes(b"unrelated quarantine file")
         native(source, name, directory, quarantine)
     monkeypatch.setattr(deletion_files, "_rename_no_replace", raced)
     with pytest.raises(FileExistsError):
-        deletion_files.cleanup(root, expected, "operation", "image")
+        deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
     assert target.read_bytes() == b"original"
-    assert next((root / ".deletions").iterdir()).read_bytes() == b"unrelated quarantine file"
+    assert next((tmp_path / ".storage/activity_images_deletions").iterdir()).read_bytes() == b"unrelated quarantine file"
+
+
+def live_demand(deletions, titles):
+    calendar = deletions.calendar
+    calendar.calendars = ("calendar.test",)
+    scans = []
+    async def refresh():
+        assert not calendar._lock.locked()
+        async with calendar._lock:
+            calendar.calendar_titles = {"calendar.test": list(titles)}
+            calendar.last_scan = str(len(scans))
+            calendar.last_error = None
+            scans.append(list(titles))
+    calendar.async_refresh_for_deletion = refresh
+    return scans
+
+
+@pytest.mark.asyncio
+async def test_plan_refreshes_missed_calendar_demand_and_blocks_unavailable(ha, configured):
+    cache, _ = configured
+    picture(ha, "old.png")
+    await cache.async_remember("Missed activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured)
+    scans = live_demand(deletions, ["Missed activity!"])
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert scans == [["Missed activity!"]]
+    assert plan["replacement_requests"] == 1 and not plan["items"][0]["safe_without_regeneration"]
+    async def failed():
+        deletions.calendar.last_error = "Calendar is unavailable"
+    deletions.calendar.async_refresh_for_deletion = failed
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(plan["token"], True, True)
+    blocked = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert "could not be verified" in blocked["items"][0]["blocked_reason"]
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(blocked["token"], True, True)
+    assert not ha.services.calls
+
+
+@pytest.mark.asyncio
+async def test_commit_refresh_rejects_new_calendar_consumers_without_more_paid_work(ha, configured, monkeypatch):
+    cache, engine = configured
+    old = picture(ha, "old.png")
+    await cache.async_remember("Known activity", "/local/activity_images/old.png")
+    await cache.async_remember("New activity", "/local/activity_images/old.png")
+    deletions = manager(ha, configured)
+    titles = ["Known activity"]
+    scans = live_demand(deletions, titles)
+    native = engine.async_generate
+    async def generate(*args, **kwargs):
+        result = await native(*args, **kwargs)
+        titles.append("New activity")
+        return result
+    monkeypatch.setattr(engine, "async_generate", generate)
+    plan, _ = await select(deletions, ["old.png"], True)
+    assert plan["replacement_requests"] == 1
+    await settled(deletions)
+    assert len(scans) >= 4 and deletions.operations()[0]["state"] == "failed"
+    assert old.exists() and cache.exact("Known activity") == "/local/activity_images/old.png"
+    assert cache.exact("New activity") == "/local/activity_images/old.png" and len(ha.services.calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_raced_symlink_or_special_file_is_restored_without_following(tmp_path, monkeypatch, kind):
+    import os
+    root = tmp_path / "owned"
+    root.mkdir()
+    target = root / "old.png"
+    target.write_bytes(b"original")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"do not touch")
+    expected = deletion_files.snapshot(root, ["old.png"])
+    native = deletion_files._rename_no_replace
+    def raced(source, name, directory, quarantine):
+        if source == target.name:
+            target.unlink()
+            if kind == "symlink":
+                target.symlink_to(outside)
+            else:
+                os.mkfifo(target)
+        native(source, name, directory, quarantine)
+    monkeypatch.setattr(deletion_files, "_rename_no_replace", raced)
+    with pytest.raises((ValueError, OSError)):
+        deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
+    assert target.is_symlink() if kind == "symlink" else target.is_fifo()
+    assert outside.read_bytes() == b"do not touch"
+    assert not list((tmp_path / ".storage/activity_images_deletions").iterdir())
+
+
+def test_private_quarantine_cross_device_failure_retains_original(tmp_path, monkeypatch):
+    import errno
+    root = tmp_path / "owned"
+    root.mkdir()
+    target = root / "old.png"
+    target.write_bytes(b"original")
+    expected = deletion_files.snapshot(root, ["old.png"])
+    def cross_device(*args):
+        raise OSError(errno.EXDEV, "Cross-device link")
+    monkeypatch.setattr(deletion_files, "_rename_no_replace", cross_device)
+    with pytest.raises(OSError) as error:
+        deletion_files.cleanup(root, tmp_path / ".storage/activity_images_deletions", expected, "operation", "image")
+    assert error.value.errno == errno.EXDEV and target.read_bytes() == b"original"
+
+
+@pytest.mark.asyncio
+async def test_live_deletion_refresh_is_resolve_only_even_when_auto_enabled(ha, configured, monkeypatch):
+    cache, _ = configured
+    picture(ha, "old.png")
+    await cache.async_remember("Existing activity", "/local/activity_images/old.png")
+    events = {"calendar.school": {"events": [{"summary": "Existing activity"}, {"summary": "Missing activity"}]}}
+    adapter, queue, _ = behavior._calendar_test_setup(ha, configured, monkeypatch, events, enabled=True)
+    deletions = ActivityImageDeletions(ha, ActivityImageLibrary(ha, cache), queue, adapter)
+    before = cache.entries()
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert plan["replacement_requests"] == 1 and cache.entries() == before
+    assert queue.status()["pending"] == [] and not ha.services.calls
+    started, release = asyncio.Event(), asyncio.Event()
+    async def blocked(call):
+        started.set()
+        await release.wait()
+        return events
+    ha.services.async_register("calendar", "get_events", blocked)
+    refresh = asyncio.create_task(adapter.async_refresh_for_deletion())
+    await started.wait()
+    refresh.cancel()
+    await asyncio.sleep(0.01)
+    assert not refresh.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh
+    assert queue.status()["pending"] == [] and not ha.services.calls
+    await adapter.async_shutdown()

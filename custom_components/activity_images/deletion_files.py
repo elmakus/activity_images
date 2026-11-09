@@ -94,7 +94,43 @@ def snapshot(root: Path, files: list[str]) -> dict:
         os.close(directory)
 
 
-def cleanup(root: Path, expected: dict, operation_id: str, image_id: str) -> None:
+def _open_quarantine(root: Path) -> int:
+    """Create only the fixed private directory beneath HA's non-public storage."""
+    if root.name != "activity_images_deletions" or root.parent.name != ".storage":
+        raise ValueError("Invalid private deletion directory")
+    config = open_root(root.parent.parent)
+    storage = None
+    try:
+        info = os.fstat(config)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise ValueError("Unsafe Home Assistant configuration ownership or permissions")
+        with suppress(FileExistsError):
+            os.mkdir(".storage", 0o700, dir_fd=config)
+        storage = os.open(".storage", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=config)
+        info = os.fstat(storage)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise ValueError("Unsafe Home Assistant storage ownership or permissions")
+        with suppress(FileExistsError):
+            os.mkdir(root.name, 0o700, dir_fd=storage)
+        quarantine = os.open(root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=storage)
+        info = os.fstat(quarantine)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            os.close(quarantine)
+            raise ValueError("Unsafe deletion quarantine ownership or permissions")
+        return quarantine
+    finally:
+        if storage is not None:
+            os.close(storage)
+        os.close(config)
+
+
+def _restore(quarantine: int, name: str, directory: int, filename: str) -> None:
+    # Never overwrite a newly published file, including a symlink or special file.
+    with suppress(FileExistsError):
+        _rename_no_replace(name, filename, quarantine, directory)
+
+
+def cleanup(root: Path, quarantine_root: Path, expected: dict, operation_id: str, image_id: str) -> None:
     """Quarantine first: a raced-in unrelated inode is never unlinked."""
     directory = open_root(root)
     quarantine = None
@@ -102,12 +138,9 @@ def cleanup(root: Path, expected: dict, operation_id: str, image_id: str) -> Non
         info = os.fstat(directory)
         if [info.st_dev, info.st_ino] != expected["root"]:
             raise ValueError("Owned image directory changed; cleanup stopped")
-        with suppress(FileExistsError):
-            os.mkdir(".deletions", 0o700, dir_fd=directory)
-        quarantine = os.open(".deletions", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-        qinfo = os.fstat(quarantine)
-        if qinfo.st_uid != os.geteuid() or stat.S_IMODE(qinfo.st_mode) != 0o700:
-            raise ValueError("Unsafe deletion quarantine permissions")
+        quarantine = _open_quarantine(quarantine_root)
+        if os.fstat(quarantine).st_dev != info.st_dev:
+            raise OSError("Deletion quarantine must be on the same filesystem")
         for filename, fingerprint in expected["files"].items():
             validate_filename(filename)
             name = hashlib.sha256(f"{operation_id}:{image_id}:{filename}".encode()).hexdigest()
@@ -121,12 +154,17 @@ def cleanup(root: Path, expected: dict, operation_id: str, image_id: str) -> Non
                 if current != fingerprint:
                     raise ValueError("Image identity changed; unrelated file retained") from None
                 _rename_no_replace(filename, name, directory, quarantine)
-                quarantined = identity(quarantine, name)
+                try:
+                    quarantined = identity(quarantine, name)
+                except (OSError, ValueError):
+                    _restore(quarantine, name, directory, filename)
+                    raise
+            except (OSError, ValueError):
+                _restore(quarantine, name, directory, filename)
+                raise
             # A rename can change ctime. All other identity fields must match.
             if quarantined[:4] + quarantined[5:] != fingerprint[:4] + fingerprint[5:]:
-                # Restore without replacing anything created at the published name.
-                with suppress(FileExistsError):
-                    os.link(name, filename, src_dir_fd=quarantine, dst_dir_fd=directory, follow_symlinks=False)
+                _restore(quarantine, name, directory, filename)
                 raise ValueError("Image raced during quarantine; unrelated file retained")
             os.unlink(name, dir_fd=quarantine)
     finally:
