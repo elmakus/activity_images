@@ -320,3 +320,80 @@ test('image loading is intersection-lazy and rejects non-API paths without crede
   assert.match(target.textContent, /Invalid protected image URL/);
   assert.equal(images.length, count);
 });
+
+test('details expose only available variants and fetch authenticated previews with master metadata', async (t) => {
+  const { panel, images, revoked } = setup(t);
+  await tick();
+  const assets = { master: '/api/activity_images/library/one/master', thumbnail: '/api/activity_images/library/one/thumbnail', qa: '/api/activity_images/library/one/qa' };
+  panel._detail({ ...item(), assets, width: 1536, height: 1024, format: 'PNG' });
+  await tick();
+  const group = panel._dialog.querySelector('[aria-label="Preview variant"]');
+  assert.equal(group.children.length, 3);
+  assert.equal(findButton(group, 'Master').getAttribute('aria-pressed'), 'true');
+  assert.equal(images.at(-1).path, assets.master);
+  assert.equal(panel._dialog.querySelector('.preview img').alt, 'Master preview: Read');
+  assert.match(panel._dialog.querySelector('dl').textContent, /Master dimensions1536 × 1024Master formatPNG/);
+  const masterSignal = images.at(-1).options.signal;
+  const masterUrl = panel._dialog.querySelector('.preview img').src;
+  findButton(group, 'Thumbnail').click();
+  await tick();
+  assert.ok(masterSignal.aborted);
+  assert.ok(revoked.includes(masterUrl));
+  assert.equal(images.at(-1).path, assets.thumbnail);
+  assert.equal(findButton(group, 'Thumbnail').getAttribute('aria-pressed'), 'true');
+  assert.equal(findButton(group, 'Master').getAttribute('aria-pressed'), 'false');
+  assert.equal(panel._dialog.querySelector('.preview img').alt, 'Thumbnail preview: Read');
+  findButton(group, 'QA').click();
+  await tick();
+  assert.equal(images.at(-1).path, assets.qa);
+  assert.equal(panel._dialog.querySelector('.preview img').alt, 'QA preview: Read');
+  const qaSignal = images.at(-1).options.signal;
+  const qaUrl = panel._dialog.querySelector('.preview img').src;
+  panel._dialog.close();
+  assert.ok(qaSignal.aborted);
+  assert.ok(revoked.includes(qaUrl));
+  panel._detail({ ...item(), assets: { master: assets.master } });
+  assert.equal(panel._dialog.querySelector('[aria-label="Preview variant"]').children.length, 1);
+  assert.ok(!panel._dialog.textContent.includes('Thumbnail'));
+  assert.ok(!panel._dialog.textContent.includes('QA'));
+});
+
+test('switching variants aborts stale preview loads before they can replace the selected preview', async (t) => {
+  const { panel, window } = setup(t);
+  await tick();
+  const master = deferred();
+  const paths = [];
+  panel.hass.fetchWithAuth = (path) => {
+    paths.push(path);
+    return path.endsWith('/master') ? master.promise : Promise.resolve({ ok: true, blob: async () => new window.Blob(['thumbnail']) });
+  };
+  panel._detail({ ...item(), assets: { master: '/api/library/master', thumbnail: '/api/library/thumbnail' } });
+  findButton(panel._dialog, 'Thumbnail').click();
+  await tick();
+  assert.equal(panel._dialog.querySelector('.preview img').alt, 'Thumbnail preview: Read');
+  const selected = panel._dialog.querySelector('.preview img').src;
+  master.resolve({ ok: true, blob: async () => new window.Blob(['master']) });
+  await tick();
+  assert.equal(panel._dialog.querySelector('.preview img').src, selected);
+  assert.deepEqual(paths, ['/api/library/master', '/api/library/thumbnail']);
+});
+
+test('active generation outside recorded queue is visible in both views; scroll and contain CSS retained', async (t) => {
+  let active = true;
+  const { panel } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { active }) : undefined);
+  await tick();
+  assert.match(panel._queueStatus.textContent, /Generation active/);
+  assert.equal(panel._queueStatus.hidden, false);
+  assert.equal(panel._gallery.hidden, false);
+  panel._showTab(true);
+  await tick();
+  assert.equal(panel._queueStatus.hidden, false);
+  active = false;
+  await panel._loadJobs();
+  assert.match(panel._queueStatus.textContent, /Generation idle/);
+  const css = panel.shadowRoot.querySelector('style').textContent;
+  assert.match(css, /main \{ flex:1; min-height:0; overflow:auto;/);
+  assert.match(css, /header \{ display:flex; flex-shrink:0;/);
+  assert.match(css, /object-fit:contain/);
+  assert.ok(!css.includes('object-fit:cover'));
+});

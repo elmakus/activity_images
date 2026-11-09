@@ -17,11 +17,11 @@
   };
   const message = (error) => error?.message || String(error);
   const style = `
-    :host { display:block; height:100%; color:var(--primary-text-color); font-family:var(--paper-font-body1_-_font-family, sans-serif); background:var(--lovelace-background, var(--primary-background-color)); }
+    :host { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; color:var(--primary-text-color); font-family:var(--paper-font-body1_-_font-family, sans-serif); background:var(--lovelace-background, var(--primary-background-color)); }
     * { box-sizing:border-box; } [hidden] { display:none !important; }
-    header { display:flex; align-items:center; gap:12px; min-height:64px; padding:8px 16px; background:var(--app-header-background-color, var(--card-background-color)); color:var(--app-header-text-color, var(--primary-text-color)); }
+    header { display:flex; flex-shrink:0; align-items:center; gap:12px; min-height:64px; padding:8px 16px; background:var(--app-header-background-color, var(--card-background-color)); color:var(--app-header-text-color, var(--primary-text-color)); }
     h1 { font-size:22px; font-weight:500; margin:0; flex:1; } h2 { font-size:20px; font-weight:500; } h3 { font-size:16px; }
-    main { max-width:1440px; margin:auto; padding:24px; } .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; } .toolbar { margin:16px 0; } .grow { flex:1; min-width:180px; }
+    main { flex:1; min-height:0; overflow:auto; width:100%; max-width:1440px; margin:0 auto; padding:24px; } .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; } .toolbar { margin:16px 0; } .grow { flex:1; min-width:180px; }
     button, input, select { font:inherit; color:inherit; min-height:44px; border:1px solid var(--divider-color); border-radius:var(--ha-card-border-radius, 12px); background:var(--card-background-color); padding:10px 14px; }
     button { cursor:pointer; } button:hover { border-color:var(--primary-color); } button:disabled { opacity:var(--disabled-opacity, .5); cursor:default; } button.primary { background:var(--primary-color); color:var(--text-primary-color); }
     :focus-visible { outline:3px solid var(--primary-color); outline-offset:3px; }
@@ -31,7 +31,7 @@
     .tile, .job { border:1px solid var(--ha-card-border-color, var(--divider-color)); border-radius:var(--ha-card-border-radius, 16px); background:var(--ha-card-background, var(--card-background-color)); box-shadow:var(--ha-card-box-shadow, none); }
     .tile { padding:0; text-align:start; overflow:hidden; min-width:0; } .tile .caption { padding:12px; } .tile strong, .tile small { display:block; overflow-wrap:anywhere; } .tile small { margin-top:6px; }
     .image { display:grid; place-items:center; aspect-ratio:1; overflow:hidden; background:var(--secondary-background-color); color:var(--secondary-text-color); }
-    img { display:block; width:100%; height:100%; object-fit:contain; } .image img { object-fit:cover; } .preview { width:100%; height:min(52vh,540px); object-fit:contain; background:var(--secondary-background-color); border-radius:12px; }
+    img { display:block; width:100%; height:100%; object-fit:contain; } .preview { width:100%; height:min(52vh,540px); object-fit:contain; background:var(--secondary-background-color); border-radius:12px; }
     .pager { justify-content:center; margin:24px 0; } .job { padding:16px; margin:12px 0; overflow-wrap:anywhere; } .job h3 { margin:0 0 8px; }
     dialog { color:var(--primary-text-color); background:var(--card-background-color); border:1px solid var(--divider-color); border-radius:var(--ha-card-border-radius, 16px); padding:24px; width:min(760px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); overflow:auto; }
     dialog::backdrop { background:var(--dialog-backdrop-color, var(--primary-background-color)); opacity:.8; } dialog h2 { margin-top:0; } .actions { justify-content:flex-end; margin-top:20px; } dl { display:grid; grid-template-columns:auto 1fr; gap:8px 16px; overflow-wrap:anywhere; } dd { margin:0; } .comparison { display:grid; grid-template-columns:1fr 1fr; gap:12px; } .comparison img { height:240px; } .aliases { padding-left:20px; }
@@ -60,6 +60,7 @@
         this._jobsVersion++;
         clearTimeout(this._poll);
         this._syncButtons();
+        this._queueStatus.textContent = "Generation status unknown — connection lost.";
         this._status.textContent = "Connection lost. Refresh job status before another paid request.";
       };
       this._build();
@@ -134,6 +135,8 @@
       this._galleryTab = button("Library", () => this._showTab(false));
       this._queueTab = button("Queue & history", () => this._showTab(true));
       tabs.append(this._galleryTab, this._queueTab);
+      this._queueStatus = el("p", "Generation status: loading…", "muted");
+      this._queueStatus.setAttribute("role", "status");
       this._status = el("div", "", "notice");
       this._status.setAttribute("role", "status");
       this._status.setAttribute("aria-live", "polite");
@@ -168,7 +171,7 @@
       this._gallery.append(toolbar, this._stats, this._listStatus, this._grid, this._pager);
       this._queue = el("section");
       this._queue.hidden = true;
-      main.append(tabs, this._status, this._gallery, this._queue);
+      main.append(tabs, this._queueStatus, this._status, this._gallery, this._queue);
       this._dialog = el("dialog");
       this._dialog.setAttribute("aria-labelledby", "dialog-title");
       this._dialog.addEventListener("cancel", (event) => { if (this._busy) event.preventDefault(); });
@@ -381,10 +384,25 @@
     _detail(item) {
       this._modal(item.title || item.filename);
       const preview = el("div", "Loading preview…", "preview");
-      this._dialog.append(preview);
-      this._image(preview, item.assets.master, item.title || item.filename, "dialog");
+      const variants = el("div", undefined, "row");
+      variants.setAttribute("role", "group");
+      variants.setAttribute("aria-label", "Preview variant");
+      const showVariant = (key, label) => {
+        this._clearImages("dialog");
+        preview.textContent = "Loading preview…";
+        for (const control of variants.children) control.setAttribute("aria-pressed", String(control.dataset.variant === key));
+        this._image(preview, item.assets[key], `${label} preview: ${item.title || item.filename}`, "dialog");
+      };
+      for (const [key, label] of Object.entries({ master: "Master", thumbnail: "Thumbnail", qa: "QA" })) {
+        if (!item.assets[key]) continue;
+        const control = button(label, () => showVariant(key, label));
+        control.dataset.variant = key;
+        variants.append(control);
+      }
+      this._dialog.append(variants, preview);
+      showVariant("master", "Master");
       const info = el("dl");
-      for (const [key, value] of Object.entries({ Filename: item.filename, Dimensions: item.width && item.height ? `${item.width} × ${item.height}` : "Unknown", Format: item.format || "Unknown", "File modified (not creation date)": item.modified_at || "Unknown", Created: item.created_at || "Unknown", Source: item.origin || "Unknown" })) info.append(el("dt", key), el("dd", String(value)));
+      for (const [key, value] of Object.entries({ Filename: item.filename, "Master dimensions": item.width && item.height ? `${item.width} × ${item.height}` : "Unknown", "Master format": item.format || "Unknown", "File modified (not creation date)": item.modified_at || "Unknown", Created: item.created_at || "Unknown", Source: item.origin || "Unknown" })) info.append(el("dt", key), el("dd", String(value)));
       this._dialog.append(info, el("h3", "Linked titles / aliases"));
       const aliases = el("ul", undefined, "aliases");
       for (const title of item.titles) {
@@ -453,6 +471,7 @@
         const jobs = await this._ws("jobs");
         if (version !== this._jobsVersion || !this.isConnected || document.hidden) return;
         this._jobs = jobs;
+        this._queueStatus.textContent = jobs.active ? "Generation active — see Queue & history for recorded jobs." : "Generation idle — no active generation reported.";
         if (this._uncertain) {
           this._status.textContent = "Job status recovered. Review queue and history before starting another paid request.";
           if (!this._busy && this._dialog.open) this._dialog.close();
@@ -468,6 +487,7 @@
         if (jobs.active || jobs.current || jobs.pending.length || jobs.jobs.some((job) => ACTIVE.has(job.state))) this._poll = setTimeout(() => this._loadJobs(), 3000);
       } catch (error) {
         if (version !== this._jobsVersion || !this.isConnected) return;
+        this._queueStatus.textContent = "Generation status unknown — refresh failed.";
         this._status.replaceChildren(el("span", `Cannot refresh job status: ${message(error)} `, "error"), button("Refresh job status", () => this._loadJobs()));
       }
     }
