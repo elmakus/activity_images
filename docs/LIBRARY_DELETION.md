@@ -1,7 +1,7 @@
 # Permanent deletion and replacement
 
-This document describes the **0.3.0.dev0 review build**, not the published 0.2.0 release.
-Production installation, restarts, real-provider tests, and deletion of real images require separate approval.
+This document describes **Activity Images 0.3.0**.
+Installing an update does not authorize deletion or paid generation. Each such operation requires its own explicit confirmation.
 
 ## Review a deletion
 

@@ -1,12 +1,12 @@
 # Library manager deployment and rollback
 
-This checklist describes the published **0.2.0** baseline. For the **0.3.0.dev0 review build**, also follow [deletion-specific preservation and rollback](LIBRARY_DELETION.md#rollback-and-recovery). An old mapping snapshot cannot restore permanently deleted image bytes. Do not roll back with unresolved committed cleanup.
+This checklist describes the published **0.2.0** baseline. For **0.3.0**, also follow [deletion-specific preservation and rollback](LIBRARY_DELETION.md#rollback-and-recovery). An old mapping snapshot cannot restore permanently deleted image bytes. Do not roll back with unresolved committed cleanup.
 
-## Approval boundary
+## Historical 0.2.0 promotion approval boundary
 
 Version **0.2.0** promotes the validated `0.2.0.dev0` runtime without changing its Python, frontend, translations, or storage formats. Its only component-file change from development commit `5a798d0975402f25e0948144d1747aab7928734b` is `manifest.json`'s version. The operator approved the stable release process after accepting the gallery. That approval does not require another deployment or restart. Production replacement, reload/restart, and paid generation still require their own applicable approval. Never overwrite published tags or release contents.
 
-For an existing working development installation, compare the exact release package against installed files before deciding whether to update. If all runtime files match, keep it running. Marketplace can advertise the new stable version independently of the running integration's manifest or its own last-installed version. Do not edit Marketplace storage to reconcile those labels. At the next planned maintenance window, the verified stable version can be installed through Marketplace to align its installation record; preserve current data and expect a normal restart prompt. See [installation and updates](INSTALLATION_AND_RELEASE.md#working-development-installations).
+For an existing working development installation, compare the exact release package against installed files before deciding whether to update. If all runtime files match, keep it running. Marketplace can advertise the new stable version independently of the running integration's manifest or its own last-installed version. Do not edit Marketplace storage to reconcile those labels. At the next planned maintenance window, the verified stable version can be installed through Marketplace to align its installation record; preserve current data and expect a normal restart prompt. See [installation and updates](INSTALLATION_AND_RELEASE.md#historical-development-promotion).
 
 The tested target is Home Assistant Core **2026.11.0** on Python **3.14**, with the native frontend and Home Tasks **2.5.0**. Later HA releases require their own validation. No extra server, container, theme change, custom Lovelace resource, or runtime package is required.
 

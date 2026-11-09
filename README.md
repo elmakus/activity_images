@@ -4,7 +4,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Published stable version: 0.2.0.** This branch prepares **0.3.0.dev0 for review only**: focused library deletion, replacement, selection, and preview improvements. It is not a published update or approval to change production. See [upcoming release notes](docs/RELEASE_NOTES_v0.3.0.md), [permanent deletion and recovery](docs/LIBRARY_DELETION.md), and [new validation results](docs/LIBRARY_IMPROVEMENTS_VALIDATION.md).
+**Stable version: 0.3.0.** This release adds focused library deletion, replacement, selection, and preview improvements without redesigning the manager. See [release notes](docs/RELEASE_NOTES_v0.3.0.md), [permanent deletion and recovery](docs/LIBRARY_DELETION.md), and [validation results](docs/LIBRARY_IMPROVEMENTS_VALIDATION.md).
 
 Existing entity IDs, actions, prompt, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
 
@@ -35,7 +35,7 @@ An `ai_task.*` provider is **optional in library-only mode**; configure it later
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
 
-For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). A working `0.2.0.dev0` installation with identical runtime files does not need an immediate reinstall or restart just to use the stable version label.
+For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.2.0 to 0.3.0 changes runtime code and requires the normal installer restart. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
 
 ## Image library manager
 
@@ -180,7 +180,7 @@ Automatic generation remains an explicit opt-in; publishing or installing a rele
 
 ## Safety and migration
 
-Home Tasks source, `.storage` state, and generated files remain untouched. Activity Images retains its existing `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` envelopes with additive metadata. The existing `.storage/activity_images_calendar_snapshot` stores only bounded titles for selected calendars. Verified atomic saves detect native Store write failures instead of reporting an unpersisted association as saved. The 0.3.0 review build adds deletion journals, reservations, and tombstones to its cache Store, plus private `.storage/activity_images_deletions` quarantine. Only previously confirmed committed cleanup can resume after restart. There is no new migration of the original image collection and no automatic garbage collection.
+Home Tasks source, `.storage` state, and generated files remain untouched. Activity Images retains its existing `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` envelopes with additive metadata. The existing `.storage/activity_images_calendar_snapshot` stores only bounded titles for selected calendars. Verified atomic saves detect native Store write failures instead of reporting an unpersisted association as saved. Version 0.3.0 adds deletion journals, reservations, and tombstones to its cache Store, plus private `.storage/activity_images_deletions` quarantine. Only previously confirmed committed cleanup can resume after restart. There is no new migration of the original image collection and no automatic garbage collection.
 
 The optional Lucida URL is configured locally; no server address or API credential is embedded in this repository. Generated image URLs are not automatically written to external services. Review generated images and QA previews before relying on them for important displays.
 

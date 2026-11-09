@@ -2,10 +2,10 @@
 
 ## Artifact and boundaries
 
-Review build: **0.3.0.dev0**, based on published **v0.2.0** (`d8a49ee`).
-The destructive backend and integrated frontend were independently reviewed.
-The final backend safety fix is `1050dcd`. Review preparation also clarifies paid-budget wording and updates documentation and the manifest version; generation and retry behavior are unchanged.
-This is not approval to merge, publish, deploy, restart production, or delete production images.
+Stable **0.3.0** promotes the independently reviewed **0.3.0.dev0** runtime at `1193f48`, based on **v0.2.0** (`d8a49ee`).
+Only the component manifest version and release documentation change for stable promotion; Python, panel JavaScript, translations, and image/storage behavior are identical.
+The destructive backend and integrated frontend were independently reviewed. The final backend safety fix is `1050dcd`; later paid-budget wording distinguishes AI Task attempts from provider billing.
+The checks below are repeated for the stable candidate. Publishing or installing an update never authorizes real-image deletion or paid-provider tests.
 
 Production inspection was read-only. Source hashes, image hashes, mapping identities, image metadata, configuration, entity records, queue, Home Tasks source, and dashboard/Home Tasks storage were compared before and after development.
 All compared preservation checks passed. Automatic calendar generation remained disabled.

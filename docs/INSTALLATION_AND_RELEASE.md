@@ -1,10 +1,9 @@
 # Installation, updates and recovery
 
-Version **0.2.0** is the stable library-manager release. See the
-[release notes](RELEASE_NOTES_v0.2.0.md) for changes and known limits.
-The current development branch prepares **0.3.0.dev0 for review**, not a published update.
-Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before any approved test installation.
-The manifest-only promotion described below applies only to the historical 0.2.0 release.
+Version **0.3.0** is the stable library-manager release. See the
+[release notes](RELEASE_NOTES_v0.3.0.md) for changes and known limits.
+Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before installing.
+The manifest-only 0.2.0 promotion described below is historical; updating from 0.2.0 to 0.3.0 changes runtime code and needs the normal installer restart.
 Historical `STAGE*` reports describe earlier migration and validation work;
 they are not current installation instructions.
 
@@ -72,7 +71,7 @@ from manually copied files or the manifest loaded by the running process.
 Check actual files when switching installation methods; never edit its
 internal `.storage` records to make a version label look current.
 
-## Working development installations
+## Historical development promotion
 
 For the validated `0.2.0.dev0` build at
 `5a798d0975402f25e0948144d1747aab7928734b`, stable `0.2.0` changes only the
@@ -124,9 +123,9 @@ Marketplace-managed upgrades after the transition.
   `/config/.storage/activity_images_jobs`.
 - Last successful calendar snapshot:
   `/config/.storage/activity_images_calendar_snapshot`.
-- Deletion journal, reservations, and tombstones (0.3.0 review build):
+- Deletion journal, reservations, and tombstones (0.3.0+):
   additive fields in `/config/.storage/activity_images_image_cache`.
-- Private confirmed-cleanup quarantine (0.3.0 review build):
+- Private confirmed-cleanup quarantine (0.3.0+):
   `/config/.storage/activity_images_deletions/`.
 - Optional reference media stays in its configured media location.
 

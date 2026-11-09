@@ -1,8 +1,8 @@
-# Activity Images 0.3.0 — unreleased
+# Activity Images 0.3.0
 
-Review build: **0.3.0.dev0**, based on published **v0.2.0**.
-This is a feature update, not a redesign or production deployment.
-No merge, tag, GitHub release, production file replacement, production restart, or real-image deletion is authorized by this document.
+Stable feature update after **v0.2.0**, promoting the reviewed **0.3.0.dev0** runtime.
+This is a focused library-manager improvement, not a redesign. Stable promotion changes only the component version and release documentation.
+Install through Marketplace and restart Home Assistant when prompted. Installation does not authorize deleting images or paid generation; those actions keep their separate confirmations.
 
 ## Important before installing
 
