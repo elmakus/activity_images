@@ -409,6 +409,55 @@ test("Repaint and disconnect clear coverage previews", async (t) => {
   assert.ok(clears >= 2);
 });
 
+test("Ignore save returns focus to the replacement row action", async (t) => {
+  let ignored = false;
+  const {element} = await coverageFixture(t, (r) => {
+    if (r.type.endsWith("/ignore")) { ignored = true; return {revision: 8, ignored}; }
+    return coverage([item({ignored})]);
+  });
+  const trigger = findButton(cards(element)[0], "Ignore exact title");
+  trigger.focus();
+  trigger.click();
+  findButton(ignoreDialog(element), "Ignore exact title").click();
+  await tick();
+  await tick();
+  assert.ok(element.shadowRoot.activeElement === findButton(cards(element)[0], "Remove ignore"));
+});
+
+test("Coverage filter repaint preserves keyboard focus", async (t) => {
+  const {element} = await coverageFixture(t);
+  const filter = findButton(element.shadowRoot, "Missing (1)");
+  filter.focus();
+  filter.click();
+  await tick();
+  assert.ok(element.shadowRoot.activeElement === findButton(element.shadowRoot, "Missing (1)"));
+  findButton(element.shadowRoot, "Available (1)").focus();
+  await element._refresh();
+  assert.ok(element.shadowRoot.activeElement === findButton(element.shadowRoot, "Available (1)"));
+});
+
+test("Coverage repaint preserves the same action when image status changes", async (t) => {
+  let image = true;
+  const {element} = await coverageFixture(t, () => coverage([
+    image ? available() : item({raw_summary: "Run", title: "Run"}),
+  ]));
+  findButton(cards(element)[0], "Ignore exact title").focus();
+  image = false;
+  await element._refresh();
+  assert.ok(element.shadowRoot.activeElement === findButton(cards(element)[0], "Ignore exact title"));
+});
+
+test("Coverage page repaint moves focus to an enabled pager action", async (t) => {
+  const {element} = await coverageFixture(t, (r) => coverage([missing()], {
+    total: 30, offset: r.offset || 0,
+  }));
+  const next = findButton(element.shadowRoot, "Next");
+  next.focus();
+  next.click();
+  await tick();
+  assert.ok(element.shadowRoot.activeElement === findButton(element.shadowRoot, "Previous"));
+});
+
 test("Scan calendar count handles the contracted array shape", async (t) => {
   const {element} = await coverageFixture(t, () => coverage([missing()], {
     scan: {calendars: ["calendar.a", "calendar.b"], tracked_titles: 1, images: 0, last_scan: null, error: null, automatic_generation: false, complete: true, stale: false},

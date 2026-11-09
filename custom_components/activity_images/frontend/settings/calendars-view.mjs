@@ -26,6 +26,8 @@ export function renderCalendars(root, values, update, hass, hooks = {}) {
   const autoOf = () => new Set(Array.isArray(values.auto_generate_calendar_entity_ids) ? values.auto_generate_calendar_entity_ids : []);
 
   function paint() {
+    const active = root.getRootNode().activeElement;
+    const focusName = list.contains(active) ? active.name : null;
     list.replaceChildren();
     if (!entities) return;
     const monitored = monitoredOf();
@@ -33,6 +35,8 @@ export function renderCalendars(root, values, update, hass, hooks = {}) {
     for (const entity of entities) {
       const id = entity.entity_id;
       const card = element("section");
+      card.setAttribute("role", "group");
+      card.setAttribute("aria-label", entity.name ? `${entity.name} (${id})` : id);
       card.append(element("strong", entity.name || id));
       card.append(element("div", id, "muted"));
       let stateText = `State: ${entity.state || "unknown"}`;
@@ -50,6 +54,7 @@ export function renderCalendars(root, values, update, hass, hooks = {}) {
       const monitorLabel = element("label", "Monitor", "check");
       const monitor = element("input");
       monitor.type = "checkbox";
+      monitor.name = `monitor:${id}`;
       monitor.checked = monitored.has(id);
       monitor.addEventListener("change", () => {
         const next = monitoredOf();
@@ -75,6 +80,7 @@ export function renderCalendars(root, values, update, hass, hooks = {}) {
       const autoLabel = element("label", "Auto-generate missing images", "check");
       const autoBox = element("input");
       autoBox.type = "checkbox";
+      autoBox.name = `auto:${id}`;
       autoBox.checked = auto.has(id);
       autoBox.disabled = !monitored.has(id);
       autoBox.addEventListener("change", () => {
@@ -102,6 +108,7 @@ export function renderCalendars(root, values, update, hass, hooks = {}) {
       card.append(element("div", "May incur AI charges.", "muted"));
       list.append(card);
     }
+    if (focusName) [...list.querySelectorAll("input")].find((input) => input.name === focusName)?.focus();
   }
 
   async function load() {

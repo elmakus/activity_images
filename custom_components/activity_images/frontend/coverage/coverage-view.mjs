@@ -182,6 +182,8 @@ export class ActivityImagesCoverage extends HTMLElement {
   }
 
   _paintControls() {
+    const active = this.shadowRoot.activeElement;
+    const focusedFilter = this._filters.contains(active) ? active.dataset.filter : null;
     this._filters.replaceChildren();
     const stats = this._stats || {};
     const counts = {all: stats.titles ?? 0, missing: stats.missing ?? 0, available: stats.available ?? 0,
@@ -193,7 +195,9 @@ export class ActivityImagesCoverage extends HTMLElement {
         this._load();
       });
       tab.setAttribute("aria-pressed", String(this._filter === value));
+      tab.dataset.filter = value;
       this._filters.append(tab);
+      if (focusedFilter === value) tab.focus();
     }
     this._calendars.replaceChildren();
     const all = element("option", "All calendars");
@@ -231,6 +235,10 @@ export class ActivityImagesCoverage extends HTMLElement {
   }
 
   _paintItems() {
+    const active = this.shadowRoot.activeElement;
+    const focusedCard = active?.closest("article");
+    const focusedTitle = focusedCard?.querySelector(".raw")?.textContent;
+    const focusedAction = focusedCard ? [...focusedCard.querySelectorAll("button")].indexOf(active) : -1;
     // Drop panel-held preview object URLs/fetches before removing their nodes.
     this.clearPreviews?.();
     this._list.replaceChildren();
@@ -301,10 +309,17 @@ export class ActivityImagesCoverage extends HTMLElement {
       tools.append(action(item.ignored ? "Remove ignore" : "Ignore exact title", () => this._ignoreDialog(item)));
       card.append(tools);
       this._list.append(card);
+      if (item.raw_summary === focusedTitle && focusedAction >= 0) {
+        ([...tools.children].find((control) => control.textContent === active.textContent)
+          || tools.children[Math.min(focusedAction, tools.children.length - 1)])?.focus();
+      }
     }
+    if (focusedCard && !this.shadowRoot.activeElement) this._search.focus();
   }
 
   _paintPager(total, offset, limit) {
+    const active = this.shadowRoot.activeElement;
+    const restoreFocus = this._pager.contains(active);
     this._pager.replaceChildren();
     const previous = action("Previous", () => {
       this._offset = Math.max(0, this._offset - PAGE_SIZE);
@@ -319,6 +334,10 @@ export class ActivityImagesCoverage extends HTMLElement {
     this._pager.append(previous,
       element("span", total ? `${offset + 1}–${Math.min(offset + limit, total)} of ${total}` : "0 titles"),
       next);
+    if (restoreFocus) {
+      ([previous, next].find((control) => control.textContent === active.textContent && !control.disabled)
+        || [previous, next].find((control) => !control.disabled) || this._search).focus();
+    }
   }
 
   async _load() {

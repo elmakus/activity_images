@@ -50,6 +50,26 @@ test("Discovery drives calendar rows: off is valid, unavailable flagged, saved m
   window.happyDOM.abort();
 });
 
+test("Calendar policy repaint retains focus and names each calendar group", async (t) => {
+  const {window, element} = await settingsFixture(async (query) => {
+    if (query.type.endsWith("/get")) return {revision: "a".repeat(64), values: settingsValues()};
+    if (query.type === "activity_images/calendar/discover") return discovery();
+    throw new Error("Unexpected " + query.type);
+  });
+  t.after(() => { element.remove(); window.happyDOM.abort(); });
+  const row = () => [...calendarsSection(element).querySelectorAll("section")]
+    .find((entry) => entry.textContent.includes("calendar.b"));
+  for (const index of [0, 1]) {
+    const input = row().querySelectorAll("input")[index];
+    input.focus();
+    input.checked = true;
+    input.dispatchEvent(new window.Event("change"));
+    assert.ok(element.shadowRoot.activeElement === row().querySelectorAll("input")[index]);
+  }
+  assert.equal(row().getAttribute("role"), "group");
+  assert.equal(row().getAttribute("aria-label"), "Spouse (calendar.b)");
+});
+
 test("Monitor and auto-generate are independent; auto needs monitor and unmonitoring clears auto", async () => {
   const {window, element} = await settingsFixture(async (query) => {
     if (query.type.endsWith("/get")) return {revision: "a".repeat(64), values: settingsValues()};
