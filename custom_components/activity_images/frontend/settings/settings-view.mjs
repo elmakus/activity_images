@@ -132,7 +132,7 @@ export class ActivityImagesSettings extends HTMLElement {
       this._values[key] = value;
       this._syncDirty();
     };
-    if (this._tab === "general") renderGeneral(this._content, this._values, update, this._hass);
+    if (this._tab === "general") this._dispose = renderGeneral(this._content, this._values, update, this._hass) || null;
     else if (this._tab === "prompt") renderPrompt(this._content, this._values, update);
     else if (this._tab === "reference") this._dispose = renderReference(this._content, this._values, update, this._hass);
     else if (this._diagnosticError) renderDiagnosticError(this._content, this._diagnosticError, () => this._refreshDiagnostics());
