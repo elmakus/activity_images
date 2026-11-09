@@ -319,7 +319,7 @@ async def run():
         options_flow = ActivityImagesOptionsFlow(Entry())
         options_flow.hass = hass
         options_form = await options_flow.async_step_init()
-        assert len(view._prepare_result_json(options_form)["data_schema"]) == 6
+        assert len(view._prepare_result_json(options_form)["data_schema"]) == 7
         assert await async_setup(hass, {})
         entry: Any = Entry()
         assert await async_setup_entry(hass, entry)

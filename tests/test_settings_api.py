@@ -77,5 +77,5 @@ def test_stale_editor_and_invalid_changes_do_not_persist():
 
 def test_no_config_entry_rejects_request():
     hass = types.SimpleNamespace(config_entries=types.SimpleNamespace(async_entries=lambda _: []))
-    with pytest.raises(exc.HomeAssistantError):
+    with pytest.raises(api.HomeAssistantError):
         api.read_settings(hass)
