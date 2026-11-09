@@ -77,7 +77,7 @@ class ActivityCalendarAdapter:
         self._retry_cancel: Callable[[], None] | None = None
         self._retry_count = 0
         self._warned_error: str | None = None
-        self._store = Store(hass, 1, f"{DOMAIN}_calendar_snapshot")
+        self._store = Store(hass, 1, f"{DOMAIN}_calendar_snapshot", atomic_writes=True)
 
     @callback
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -305,7 +305,7 @@ class ActivityCalendarAdapter:
     @callback
     def image_saved(self, _title: str, _url: str) -> None:
         """Triggered after cache persistence; never rescan calendars for new PNGs."""
-        if self._closed or not self.calendar_titles:
+        if self._closed:
             return
         if self._reconcile_task and not self._reconcile_task.done():
             self._reconcile_needed = True

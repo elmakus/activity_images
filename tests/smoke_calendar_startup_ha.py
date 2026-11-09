@@ -340,6 +340,51 @@ async def shutdown_during_cache_and_start(hass):
     assert subject._unsubscribers == [] and subject._scan_task is None
 
 
+async def image_saved_during_first_snapshot(hass, *, unload=False):
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    cache = Cache()
+    subject = adapter(hass, cache)
+
+    async def service(call):
+        calls.append(call)
+        return {ENTITY: {"events": [{"summary": "New event"}]}}
+
+    register(hass, service)
+    save = subject._store.async_save
+
+    async def blocked_save(data):
+        entered.set()
+        await release.wait()
+        await save(data)
+
+    with patch.object(subject._store, "async_save", blocked_save):
+        refreshing = asyncio.create_task(subject.async_refresh())
+        await entered.wait()  # First lookup found no image; titles aren't committed yet.
+        assert subject.calendar_titles == {} and subject.images == {}
+        cache.images["New event"] = URL  # Generator has persisted its completed result.
+        subject.image_saved("New event", URL)
+        assert subject._reconcile_task is not None
+        await asyncio.sleep(0)  # Reconciliation waits for the scan's lock.
+        assert not subject._reconcile_task.done()
+        if unload:
+            await subject.async_shutdown()
+        release.set()
+        await asyncio.gather(refreshing, return_exceptions=True)
+        await hass.async_block_till_done()
+        assert len(calls) == 1  # Reconciliation never re-queries the calendar provider.
+        if unload:
+            assert subject.images == {} and subject.calendar_titles == {}
+        else:
+            assert subject.images == {"New event": URL}
+            assert subject.calendar_titles == {ENTITY: ["New event"]}
+        assert subject.queue.calls == []
+        await subject.async_shutdown()
+        subject.image_saved("New event", URL)
+        await hass.async_block_till_done()
+        clean(hass, subject, Timers())
+
+
 async def run():
     assert __version__ == "2026.11.0", __version__
     with tempfile.TemporaryDirectory(prefix="ha-calendar-smoke-") as directory:
@@ -348,6 +393,8 @@ async def run():
         await bounded_retries_and_readiness(hass)
         await coalescing_and_shutdown(hass)
         await shutdown_during_cache_and_start(hass)
+        await image_saved_during_first_snapshot(hass)
+        await image_saved_during_first_snapshot(hass, unload=True)
         hass.services.async_remove("calendar", "get_events")
         await persistence_and_prestart_unload(hass)
         await hass.async_block_till_done()
