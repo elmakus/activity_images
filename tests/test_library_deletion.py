@@ -981,9 +981,11 @@ async def test_deletion_live_demand_truncation_blocks_without_changing_normal_ca
     assert cache.entries() == before_cache and old.read_bytes() == original
     assert not cache._deletions and not ha.services.calls and not queue.status()["pending"]
     assert adapter.last_error is None and len(adapter.calendar_titles["calendar.school"]) == (64 if overflow == "titles" else 1)
-    # Normal refresh keeps the preexisting capped display and explicit auto-generation behavior.
+    # Normal refresh keeps the capped display, but incomplete demand cannot authorize paid work.
     await adapter.async_refresh()
-    assert len(queue.status()["pending"]) == (64 if overflow == "titles" else 1)
+    assert queue.status()["pending"] == [] and not ha.services.calls
+    assert adapter.status()["complete"] is False
+    assert old.read_bytes() == original and cache.entries() == before_cache
     await adapter.async_shutdown()
 
 

@@ -89,6 +89,7 @@ test("Edits made during a pending save remain unsaved", async () => {
   const requests = [];
   const {window,element} = await settingsFixture((query) => {
     if (query.type.endsWith("/get")) return Promise.resolve({revision:"a".repeat(64),values:settingsValues()});
+    if (query.type === "activity_images/calendar/discover") return Promise.resolve({entities: []});
     requests.push(JSON.parse(JSON.stringify(query)));
     return saved.promise;
   });
@@ -130,6 +131,7 @@ test("Unknown save outcomes block replay until an explicit reload", async () => 
   let saves = 0;
   const {window,element} = await settingsFixture(async (query) => {
     if (query.type.endsWith("/get")) return {revision:"a".repeat(64),values:settingsValues()};
+    if (query.type === "activity_images/calendar/discover") return {entities: []};
     saves++;
     throw new Error("Connection lost");
   });

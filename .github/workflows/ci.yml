@@ -37,3 +37,4 @@ jobs:
       - run: python tests/smoke_ha_runtime.py
       - run: python tests/smoke_ai_wrapper_ha.py
       - run: python tests/smoke_calendar_startup_ha.py
+      - run: python tests/smoke_calendar_coverage_ha.py

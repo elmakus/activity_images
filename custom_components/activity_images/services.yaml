@@ -42,7 +42,9 @@ link_existing_image:
         text:
 refresh_calendars:
   name: Refresh calendar images
-  description: Read upcoming events from selected calendars and refresh the image-library sensor.
+  description: >-
+    Read upcoming events and refresh the sensor. This normal scan may queue
+    authorized automatic work. Use Calendar Coverage for a no-AI refresh.
 queue_status:
   name: Get queue status
   description: Return pending activities, current activity and failed titles. Failed titles are not retried automatically.
@@ -57,7 +59,9 @@ cancel_queued:
           multiple: true
 clear_errors:
   name: Clear queue failures
-  description: Forget failed activity titles so they can be enqueued again.
+  description: >-
+    Clear recorded errors without authorizing another paid request.
+    Retry barriers remain until an explicitly authorized retry.
 forget_image:
   name: Forget cached image
   description: Forget a title or image URL without deleting the underlying image file.

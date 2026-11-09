@@ -17,13 +17,17 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import atomicwrites  # noqa: E402
+from homeassistant.config_entries import ConfigEntries  # noqa: E402
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, __version__  # noqa: E402
 from homeassistant.core import CoreState, HomeAssistant, SupportsResponse  # noqa: E402
+from homeassistant.helpers import device_registry as dr  # noqa: E402
+from homeassistant.helpers import entity_registry as er  # noqa: E402
 from homeassistant.helpers import storage as ha_storage  # noqa: E402
 from homeassistant.helpers.storage import Store  # noqa: E402
 from homeassistant.util.file import WriteError, write_utf8_file_atomic  # noqa: E402
 
 from custom_components.activity_images import calendar_adapter as module  # noqa: E402
+from custom_components.activity_images.const import CONF_AUTO_CALENDARS  # noqa: E402
 
 ENTITY = "calendar.school"
 URL = "/local/activity_images/existing.png"
@@ -42,12 +46,15 @@ class Cache:
             await self.release.wait()
         return {title: self.images[title] for title in titles if title in self.images}
 
+    async def async_find(self, title, **kwargs):
+        return (await self.async_find_many([title])).get(title)
+
 
 class Queue:
     def __init__(self):
         self.calls = []
 
-    async def async_enqueue(self, titles):
+    async def async_enqueue(self, titles, *, calendar_sources=None):
         self.calls.append(titles)
 
 
@@ -87,9 +94,13 @@ class Warnings(logging.Handler):
 
 
 def adapter(hass, cache=None, queue=None, auto=False) -> Any:
+    registry = er.async_get(hass)
+    entry = registry.async_get(ENTITY) or registry.async_get_or_create(
+        "calendar", "test", "school", suggested_object_id="school",
+    )
     settings = {
-        module.CONF_CALENDARS: [ENTITY], module.CONF_AUTO_GENERATE: auto,
-        module.CONF_LOOKAHEAD_DAYS: 30,
+        module.CONF_CALENDARS: [ENTITY], CONF_AUTO_CALENDARS: [ENTITY] if auto else [],
+        module.CONF_LOOKAHEAD_DAYS: 30, module.CALENDAR_BINDINGS: {ENTITY: entry.id},
     }
     original = copy.deepcopy(settings)
     fake_cache: Any = cache or Cache()
@@ -114,10 +125,10 @@ def clean(hass, subject, timers):
     assert subject._reconcile_task is None or subject._reconcile_task.done()
     assert subject._snapshot_task is None or subject._snapshot_task.done()
     assert EVENT_HOMEASSISTANT_STARTED not in hass.bus.async_listeners()
-    assert "state_changed" not in hass.bus.async_listeners()
+    assert hass.bus.async_listeners().get("state_changed", 0) == hass.data["smoke_registry_state_listeners"]
     assert not any(
         not handle.cancelled()
-        and "_TrackTimeInterval" in repr(handle)
+        and "_TrackTimeInterval" in repr(handle) and "ActivityCalendarAdapter" in repr(handle)
         for handle in hass.loop._scheduled
     )
 
@@ -146,7 +157,7 @@ async def lifecycle_and_recovery(hass):
         assert len(subject._unsubscribers) == 2 and subject._state_unsubscribe is not None
         await hass.async_start()  # Actual HA transition and async_at_started dispatch.
         await hass.async_block_till_done()
-        assert len(calls) == 1
+        assert len(calls) == 1, (calls, subject.status())
         assert subject.images == {"Old event": URL}
         rules = subject.rules
         response = {}  # HA may briefly match none of the requested entities.
@@ -449,7 +460,12 @@ async def snapshot_executor_write_drained_before_reload(hass):
     await reloaded.async_shutdown()
     clean(hass, reloaded, Timers())
     fresh_store = Store(hass, 1, f"{module.DOMAIN}_calendar_snapshot", atomic_writes=True)
-    assert await fresh_store.async_load() == {ENTITY: ["Snapshot B"]}
+    restored = await fresh_store.async_load()
+    assert isinstance(restored, dict)
+    assert restored[ENTITY] == ["Snapshot B"]
+    assert restored["_raw_occurrences"][ENTITY][0]["raw_summary"] == "Snapshot B"
+    binding = er.async_get(hass).async_get(ENTITY)
+    assert binding is not None and restored[module.CALENDAR_BINDINGS][ENTITY] == binding.id
 
 
 async def swallowed_snapshot_write_failure_preserves_last_good(hass):
@@ -464,6 +480,7 @@ async def swallowed_snapshot_write_failure_preserves_last_good(hass):
         await subject.async_refresh()
         previous_titles, previous_images = copy.deepcopy(subject.calendar_titles), dict(subject.images)
         previous_scan = subject.last_scan
+        previous_snapshot = copy.deepcopy(subject._snapshot())
         assert previous_scan and previous_titles == {ENTITY: ["Old event"]}
         response = {ENTITY: {"events": [{"summary": "Uncommitted event"}]}}
         native = write_utf8_file_atomic
@@ -476,9 +493,9 @@ async def swallowed_snapshot_write_failure_preserves_last_good(hass):
         assert subject.calendar_titles == previous_titles
         assert subject.images == previous_images and subject.last_scan == previous_scan
         assert "persistence verification failed" in status["error"]
-        assert subject.queue.calls == [[]]  # No enqueue after the failed commit.
+        assert subject.queue.calls == []  # Cached work and a failed commit never enqueue.
         envelope = await hass.async_add_executor_job(lambda: json.loads(Path(subject._store.path).read_text()))
-        assert envelope["data"] == previous_titles
+        assert envelope["data"] == previous_snapshot
         await subject.async_shutdown()
         clean(hass, subject, timers)
 
@@ -487,6 +504,14 @@ async def run():
     assert __version__ == "2026.11.0", __version__
     with tempfile.TemporaryDirectory(prefix="ha-calendar-smoke-") as directory:
         hass = HomeAssistant(directory)
+        dr.async_setup(hass)
+        await dr.async_load(hass)
+        hass.config_entries = ConfigEntries(hass, {})
+        await hass.config_entries.async_initialize()
+        await er.async_load(hass)
+        registered = er.async_get(hass).async_get_or_create("calendar", "test", "school", suggested_object_id="school")
+        assert registered.entity_id == ENTITY
+        hass.data["smoke_registry_state_listeners"] = hass.bus.async_listeners().get("state_changed", 0)
         await lifecycle_and_recovery(hass)
         await bounded_retries_and_readiness(hass)
         await coalescing_and_shutdown(hass)

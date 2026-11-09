@@ -1,4 +1,4 @@
-"""Regression tests for the agreed three-attempt provider retry policy."""
+"""Retry only explicit rate-limit rejection, not possibly billed unknown outcomes."""
 from __future__ import annotations
 
 import asyncio
@@ -14,6 +14,7 @@ MODULE_PATH = (
     / "custom_components" / "activity_images" / "retry.py"
 )
 spec = spec_from_file_location("activity_images_retry_spec", MODULE_PATH)
+assert spec is not None and spec.loader is not None
 retry = module_from_spec(spec)
 sys.modules[spec.name] = retry
 spec.loader.exec_module(retry)
@@ -86,7 +87,7 @@ async def test_permanent_http_errors_never_retry(status, delays):
 
 @pytest.mark.parametrize("status", [500, 502, 503, 504, 599])
 @pytest.mark.asyncio
-async def test_server_errors_retry(status, delays):
+async def test_server_errors_require_explicit_retry(status, delays):
     count = 0
 
     async def operation():
@@ -96,14 +97,15 @@ async def test_server_errors_retry(status, delays):
             raise ProviderHttpError(status)
         return 123
 
-    assert await retry.async_retry_transient(operation) == 123
-    assert count == 2
-    assert delays == [2.0]
+    with pytest.raises(ProviderHttpError):
+        await retry.async_retry_transient(operation)
+    assert count == 1
+    assert delays == []
 
 
 @pytest.mark.parametrize("exception_type", [TimeoutError, ConnectionError, aiohttp.ClientConnectionError])
 @pytest.mark.asyncio
-async def test_timeout_and_connections_retry(exception_type, delays):
+async def test_timeout_and_connections_never_replay_unknown_work(exception_type, delays):
     count = 0
 
     async def operation():
@@ -113,9 +115,10 @@ async def test_timeout_and_connections_retry(exception_type, delays):
             raise exception_type("lost connection")
         return True
 
-    assert await retry.async_retry_transient(operation)
-    assert count == 3
-    assert delays == [2.0, 4.0]
+    with pytest.raises(exception_type):
+        await retry.async_retry_transient(operation)
+    assert count == 1
+    assert delays == []
 
 
 @pytest.mark.asyncio
@@ -128,7 +131,7 @@ async def test_retry_after_header_is_respected_and_bounded(delays):
         if count == 1:
             raise ProviderHttpError(429, {"Retry-After": "17"})
         if count == 2:
-            raise ProviderHttpError(503, {"Retry-After": "900"})
+            raise ProviderHttpError(429, {"Retry-After": "900"})
         return count
 
     assert await retry.async_retry_transient(operation) == 3

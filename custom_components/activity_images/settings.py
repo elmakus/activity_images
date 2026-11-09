@@ -8,7 +8,13 @@ from contextlib import asynccontextmanager
 
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import CONF_REFERENCE_MEDIA_ID, DOMAIN
+from .const import (
+    CALENDAR_BINDINGS,
+    CONF_AUTO_CALENDARS,
+    CONF_CALENDARS,
+    CONF_REFERENCE_MEDIA_ID,
+    DOMAIN,
+)
 from .settings_schema import effective_settings, validate_settings
 
 
@@ -23,8 +29,25 @@ def get_entry(hass):
     return entries[0]
 
 
+def calendar_identity(hass, entity_id: str) -> str | None:
+    """Entity IDs can be reused; registry IDs identify the selected calendar."""
+    from homeassistant.helpers import entity_registry as er
+    entity = er.async_get(hass).async_get(entity_id)
+    return entity.id if entity is not None else None
+
+
+def migrate_calendar_options(hass, entry) -> None:
+    """Use native options once, before any queue/scanner can authorize work."""
+    values = validate_settings(effective_settings(entry))
+    if CONF_AUTO_CALENDARS not in entry.options and CONF_AUTO_CALENDARS not in entry.data:
+        # Preserve unknown options, and neutralize the old global flag for rollback.
+        bindings = {entity: calendar_identity(hass, entity) for entity in values[CONF_CALENDARS]}
+        hass.config_entries.async_update_entry(entry, options={**entry.options, **values, CALENDAR_BINDINGS: bindings})
+
+
 def revision(entry) -> str:
-    serial = json.dumps([entry.entry_id, effective_settings(entry)], sort_keys=True,
+    serial = json.dumps([entry.entry_id, effective_settings(entry),
+                         entry.options.get(CALENDAR_BINDINGS, entry.data.get(CALENDAR_BINDINGS, {}))], sort_keys=True,
                         separators=(",", ":"))
     return hashlib.sha256(serial.encode("utf-8")).hexdigest()
 
@@ -48,7 +71,7 @@ async def settings_lock(entry):
         yield
 
 
-def options_for_update(entry, changes: dict, expected_revision: str) -> dict:
+def options_for_update(hass, entry, changes: dict, expected_revision: str) -> dict:
     """Validate both editors identically; callers hold settings_lock until commit."""
     if revision(entry) != expected_revision:
         raise StaleSettingsError("Settings changed elsewhere. Reload before saving")
@@ -59,14 +82,25 @@ def options_for_update(entry, changes: dict, expected_revision: str) -> dict:
         runtime.deletions.validate_reference(after[CONF_REFERENCE_MEDIA_ID])
     if before == after:
         return dict(entry.options)
-    return {**entry.options, **after}
+    bindings = entry.options.get(CALENDAR_BINDINGS, entry.data.get(CALENDAR_BINDINGS, {}))
+    bindings = bindings if isinstance(bindings, dict) else {}
+    selected = {
+        entity: bindings[entity] for entity in after[CONF_CALENDARS]
+        if entity in before[CONF_CALENDARS] and entity in bindings
+    }
+    selected.update({entity: calendar_identity(hass, entity) for entity in after[CONF_CALENDARS]
+                     if entity not in before[CONF_CALENDARS]})
+    return {**entry.options, **after, CALENDAR_BINDINGS: selected}
 
 
-async def save_settings(hass, changes: dict, expected_revision: str) -> dict:
+async def save_settings(hass, changes: dict, expected_revision: str, *, confirm_auto: bool = False) -> dict:
     """Persist through HA once; its update listener applies calendar settings live."""
     entry = get_entry(hass)
     async with settings_lock(entry):
-        options = options_for_update(entry, changes, expected_revision)
+        options = options_for_update(hass, entry, changes, expected_revision)
+        added = set(options.get(CONF_AUTO_CALENDARS, [])) - set(effective_settings(entry)[CONF_AUTO_CALENDARS])
+        if added and confirm_auto is not True:
+            raise ValueError("Enabling calendar automatic generation requires explicit paid confirmation")
         changed = options != entry.options
         if changed:
             hass.config_entries.async_update_entry(entry, options=options)

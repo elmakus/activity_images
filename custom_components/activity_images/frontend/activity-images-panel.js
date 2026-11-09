@@ -112,12 +112,14 @@
       clearTimeout(this._debounce);
       this._started = false;
       this._lifecycle++;
+      this._coverageView?.invalidate?.();
       if (this._busy) this._uncertain = true;
       this._busy = false;
       this._listVersion++;
       this._jobsVersion++;
       this._dialogVersion++;
       this._clearImages("gallery");
+      this._clearImages("coverage");
       this._clearImages("dialog");
       this._clearImages("jobs");
       this._jobPreviews.clear();
@@ -131,6 +133,7 @@
     _resume() {
       clearTimeout(this._poll);
       if (!this.isConnected || !this._hass || document.hidden) return;
+      if (!this._coverage.hidden && this._coverageView) this._coverageView.reload();
       this._loadJobs();
       this._loadList();
     }
@@ -148,11 +151,12 @@
       header.append(this._menu, icon, el("h1", "Activity Images"));
       const main = el("main");
       const tabs = el("nav", undefined, "row");
-      tabs.setAttribute("aria-label", "Library views");
+      tabs.setAttribute("aria-label", "Activity Images views");
       this._galleryTab = button("Library", () => this._showTab(false));
       this._queueTab = button("Queue & history", () => this._showTab(true));
+      this._coverageTab = button("Calendar Coverage", () => this._openCoverage());
       this._settingsTab = button("Settings", () => this._openSettings());
-      tabs.append(this._galleryTab, this._queueTab, this._settingsTab);
+      tabs.append(this._galleryTab, this._queueTab, this._coverageTab, this._settingsTab);
       this._queueStatus = el("p", "Generation status: loading…", "muted");
       this._queueStatus.setAttribute("role", "status");
       this._status = el("div", "", "notice");
@@ -201,9 +205,11 @@
       this._gallery.append(toolbar, this._selection, this._stats, this._listStatus, this._grid, this._pager);
       this._queue = el("section");
       this._queue.hidden = true;
+      this._coverage = el("section");
+      this._coverage.hidden = true;
       this._settings = el("section");
       this._settings.hidden = true;
-      main.append(tabs, this._queueStatus, this._status, this._gallery, this._queue, this._settings);
+      main.append(tabs, this._queueStatus, this._status, this._gallery, this._queue, this._coverage, this._settings);
       this._dialog = el("dialog");
       this._dialog.setAttribute("aria-labelledby", "dialog-title");
       this._dialog.addEventListener("cancel", (event) => { if (this._busy) event.preventDefault(); });
@@ -218,11 +224,14 @@
     async _openSettings() {
       this._queue.hidden = true;
       this._gallery.hidden = true;
+      this._coverage.hidden = true;
+      this._clearImages("coverage");
       this._settings.hidden = false;
       this._clearImages("jobs");
       this._settingsTab.setAttribute("aria-pressed", "true");
       this._galleryTab.setAttribute("aria-pressed", "false");
       this._queueTab.setAttribute("aria-pressed", "false");
+      this._coverageTab.setAttribute("aria-pressed", "false");
       if (this._settingsView) return;
       this._settings.textContent = "Loading Settings…";
       try {
@@ -235,9 +244,103 @@
         this._settings.textContent = "Unable to load Settings: " + message(error);
       }
     }
+    async _openCoverage() {
+      this._queue.hidden = true;
+      this._gallery.hidden = true;
+      this._settings.hidden = true;
+      this._settingsTab.setAttribute("aria-pressed", "false");
+      this._queueTab.setAttribute("aria-pressed", "false");
+      this._galleryTab.setAttribute("aria-pressed", "false");
+      this._coverageTab.setAttribute("aria-pressed", "true");
+      this._clearImages("jobs");
+      this._coverage.hidden = false;
+      if (this._coverageView) {
+        this._coverageView.reload();
+        return;
+      }
+      this._coverage.textContent = "Loading Calendar Coverage…";
+      try {
+        if (!customElements.get("activity-images-coverage")) await import("./coverage/coverage-view.mjs");
+        if (!this.isConnected) return;
+        const view = document.createElement("activity-images-coverage");
+        view.hass = this._hass;
+        view.onAssign = (item) => this._coverageAssign(item);
+        view.onGenerate = (item) => this._coverageGenerate(item);
+        view.previewImage = (target, path, alt) => this._image(target, path, alt, "coverage");
+        view.clearPreviews = () => this._clearImages("coverage");
+        this._coverageView = view;
+        this._coverage.replaceChildren(view);
+      } catch (error) {
+        this._coverage.textContent = "Unable to load Calendar Coverage: " + message(error);
+      }
+    }
+    _coverageAssign(item) {
+      const title = item.title.trim();
+      const version = this._modal(`Assign image to \u201c${title}\u201d`);
+      const searchLabel = el("label", "Search library images", "grow");
+      const search = el("input");
+      search.type = "search";
+      search.maxLength = 255;
+      searchLabel.append(search);
+      const hint = el("p", "Select one verified library image to preview before assigning. This sends no AI request.", "muted");
+      const status = el("p", "Loading library images…", "muted");
+      status.setAttribute("role", "status");
+      const results = el("div", undefined, "grid");
+      const previewWrap = el("div");
+      this._dialog.append(searchLabel, hint, status, results, previewWrap);
+      this._actions();
+      let request = 0;
+      const load = async () => {
+        const mine = ++request;
+        status.textContent = "Loading library images…";
+        results.replaceChildren();
+        try {
+          const data = await this._ws("list", {query: search.value, filter: "all", offset: 0, limit: 25});
+          if (version !== this._dialogVersion || mine !== request || !this.isConnected) return;
+          status.textContent = data.items.length ? `${data.total} image(s) found. Select one to preview before assigning.` : "No images found. Try another search.";
+          for (const entry of data.items) {
+            const pick = button("", () => {
+              if (version !== this._dialogVersion) return;
+              previewWrap.replaceChildren();
+              previewWrap.append(el("h3", `Selected: ${entry.title || entry.filename}`));
+              const preview = el("div", "Loading preview…", "preview");
+              previewWrap.append(preview);
+              this._image(preview, entry.image_url, `Candidate image: ${entry.title || entry.filename}`, "dialog");
+              previewWrap.append(el("p", `Assign \u201c${title}\u201d to this image? Other aliases are unchanged. This sends no AI request.`));
+              const confirm = button("Assign", () => this._mutate("link",
+                {image_id: entry.id, title, replace: false},
+                () => { this._dialog.close(); this._coverageView?.reload(); }));
+              previewWrap.append(confirm);
+              confirm.focus();
+            });
+            pick.className = "tile";
+            const thumb = el("div", "Loading preview…", "image");
+            const caption = el("div", undefined, "caption");
+            caption.append(el("strong", entry.title || entry.filename), el("small", entry.filename));
+            pick.append(thumb, caption);
+            results.append(pick);
+            this._image(thumb, entry.thumbnail_url || entry.image_url, entry.title || entry.filename, "dialog", true);
+          }
+        } catch (error) {
+          if (mine === request && version === this._dialogVersion) status.textContent = "Cannot load library images: " + message(error);
+        }
+      };
+      search.addEventListener("input", () => {
+        clearTimeout(this._debounce);
+        this._debounce = setTimeout(load, 300);
+      });
+      load();
+    }
+    _coverageGenerate(item) {
+      // Title preset from Coverage; the existing candidate workflow runs unchanged.
+      this._generateDialog({titles: [item.title]}, {rawSummary: item.raw_summary, stillIgnored: item.ignored});
+    }
     _showTab(queue) {
       this._settings.hidden = true;
       this._settingsTab.setAttribute("aria-pressed", "false");
+      this._coverage.hidden = true;
+      this._coverageTab.setAttribute("aria-pressed", "false");
+      this._clearImages("coverage");
       this._queue.hidden = !queue;
       this._gallery.hidden = queue;
       this._queueTab.setAttribute("aria-pressed", String(queue));
@@ -435,7 +538,7 @@
         if (!this.isConnected || lifecycle !== this._lifecycle) return;
         if (command === "link" && error.code === "conflict") {
           this._busy = false;
-          this._replaceDialog(data);
+          this._replaceDialog(data, done);
           return;
         }
         if (!error.code || error.code === "outcome_unknown") {
@@ -532,10 +635,10 @@
         this._mutate("link", { image_id: item.id, title: input.value }, () => this._openDetail(item.id));
       }));
     }
-    _replaceDialog(data) {
+    _replaceDialog(data, done) {
       this._modal("Replace existing association?");
       this._dialog.append(el("p", `“${data.title}” already refers to another image. Replace only this title's association? No files or other aliases will be removed. Home Tasks copies are not synchronized.`));
-      this._actions(button("Replace association", () => this._mutate("link", { ...data, replace: true }, () => this._openDetail(data.image_id))));
+      this._actions(button("Replace association", () => this._mutate("link", { ...data, replace: true }, done || (() => this._openDetail(data.image_id)))));
     }
     _unlinkDialog(item, title) {
       this._modal("Unlink title?");
@@ -550,10 +653,18 @@
       this._dialog.append(label);
       return checkbox;
     }
-    _generateDialog(item) {
+    _generateDialog(item, options = {}) {
       this._modal(item ? "Regenerate one activity" : "Generate new image");
       const input = this._titleInput(item?.titles.length ? "Choose exactly one linked title" : "Activity title", item?.titles);
+      if (options.rawSummary !== undefined) {
+        this._dialog.append(el("p", "Exact calendar title (shown unchanged; generation uses the trimmed title above):"));
+        const raw = el("pre", options.rawSummary);
+        raw.style.whiteSpace = "pre-wrap";
+        this._dialog.append(raw);
+      }
       this._dialog.append(el("p", "The current mapping stays unchanged until you accept the candidate. Only the selected title changes; other aliases are unaffected. Home Tasks copies are not synchronized."));
+      if (options.stillIgnored) this._dialog.append(el("p", "This title stays ignored; generating does not clear the ignore."));
+      this._dialog.append(el("p", "May incur AI charges. Provider retries and billing are outside the replacement budget; failed or timed-out attempts may still incur charges. If the request outcome is unknown: Request outcome unknown — check Queue & history. Do not repeat it."));
       const check = this._paidCheck();
       this._actions(this._paidButton("Generate paid candidate", () => {
         if (!input.value.trim() || !check.checked) { this._dialogError.textContent = "Enter a title and confirm the paid request."; return; }
@@ -688,8 +799,11 @@
           if (!this._busy && this._dialog.open) this._dialog.close();
           this._queue.hidden = false;
           this._gallery.hidden = true;
+          this._coverage.hidden = true;
+          this._clearImages("coverage");
           this._queueTab.setAttribute("aria-pressed", "true");
           this._galleryTab.setAttribute("aria-pressed", "false");
+          this._coverageTab.setAttribute("aria-pressed", "false");
         }
         this._uncertain = false;
         this._syncButtons();

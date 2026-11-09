@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -12,7 +13,7 @@ from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
-from .engine import ActivityImageGenerator
+from .engine import ActivityImageGenerator, GenerationSuppressed
 from .image_cache import asset_url, normalize_title
 from .storage import async_save_verified
 
@@ -35,6 +36,7 @@ class ActivityImageQueue:
         self._jobs: list[dict] = []
         self._manual_blocked: set[str] = set()
         self._retry_blocked: set[str] = set()
+        self.calendar_authorizer: Callable[[str, list[dict]], Awaitable[None]] | None = None
 
     async def async_setup(self) -> None:
         data = await self._store.async_load() or {}
@@ -60,11 +62,22 @@ class ActivityImageQueue:
                       and job.get("kind") in {"manual", "background"} and isinstance(job.get("id"), str)
                       and isinstance(job.get("title"), str) and job.get("state") in {
                           "pending", "running", "review", "accepted", "discarded", "failed", "cancelled", "interrupted", "completed", "abandoned",
-                      } and not (job["kind"] == "background" and job["state"] in {"pending", "running"})]
+                      }]
         for job in self._jobs:
-            if (job["kind"] == "manual" or job.get("deletion")) and job["state"] in {"pending", "running"}:
-                self._set_state(job, "interrupted", "Interrupted; explicitly retry to generate a new candidate")
+            if job["state"] in {"running", "interrupted"} or (job["kind"] == "manual" and job["state"] == "pending"):
+                self._set_state(job, "interrupted", "Request outcome unknown — explicitly retry after checking Queue & history")
+                self._retry_blocked.add(normalize_title(job["title"]))
                 self._pending = [t for t in self._pending if normalize_title(t) != normalize_title(job["title"])]
+        for title in list(self._pending):
+            job = self._background(title)
+            if job is None or job.get("origin") not in {"explicit", "calendar"} or (
+                    job.get("origin") == "calendar" and not self._valid_sources(job.get("sources"))):
+                if job is None:
+                    job = self._new_job(title, "background")
+                    self._jobs.append(job)
+                self._set_state(job, "interrupted", "Legacy pending work has no verified origin; explicit review/retry required")
+                self._retry_blocked.add(normalize_title(title))
+                self._pending.remove(title)
         self._trim_history()
         self._loaded = True
         if len(self._pending) != previous_pending or self._jobs:
@@ -77,7 +90,7 @@ class ActivityImageQueue:
         write = asyncio.create_task(async_save_verified(self.hass, self._store, {
             "pending": list(self._pending),
             "failed": deepcopy(self._failed),
-            "jobs": deepcopy([job for job in self._jobs if job["kind"] == "manual" or job["state"] not in {"pending", "running"}]),
+            "jobs": deepcopy(self._jobs),
             "manual_blocked": sorted(self._manual_blocked),
             "retry_blocked": sorted(self._retry_blocked),
         }))
@@ -114,8 +127,26 @@ class ActivityImageQueue:
                         job.update(values)
                 raise
 
-    async def async_enqueue(self, titles: list[str]) -> list[str]:
-        """Accept up to 64 new unique jobs; never duplicate pending jobs."""
+    @staticmethod
+    def _valid_sources(sources) -> bool:
+        return (isinstance(sources, list) and 1 <= len(sources) <= 640
+                and all(isinstance(source, dict)
+                        and isinstance(source.get("calendar_entity_id"), str)
+                        and source["calendar_entity_id"].startswith("calendar.")
+                        and isinstance(source.get("raw_summary"), str)
+                        and 1 <= len(source["raw_summary"]) <= 1024 for source in sources))
+
+    def _background(self, title: str) -> dict | None:
+        return next((job for job in reversed(self._jobs) if job["kind"] == "background"
+                     and normalize_title(job["title"]) == normalize_title(title)
+                     and job["state"] in {"pending", "running"}), None)
+
+    async def async_enqueue(self, titles: list[str], *, calendar_sources: list[dict] | None = None) -> list[str]:
+        """Persist provenance before dispatch; public enqueueing stays independent."""
+        if calendar_sources is not None and not self._valid_sources(calendar_sources):
+            if not titles and calendar_sources == []:
+                return []
+            raise ValueError("Calendar jobs require original verified raw-summary sources")
         accepted = []
         async with self._mutation():
             if self._closed:
@@ -139,6 +170,14 @@ class ActivityImageQueue:
                     continue
                 known.add(key)
                 accepted.append(title)
+                job = self._new_job(title, "background")
+                job["origin"] = "calendar" if calendar_sources is not None else "explicit"
+                if calendar_sources is not None:
+                    job["sources"] = [dict(source) for source in calendar_sources
+                                      if normalize_title(source["raw_summary"]) == key]
+                    if not job["sources"]:
+                        raise ValueError("No verified calendar source for title")
+                self._jobs.append(job)
                 self._pending.append(title)
             if accepted:
                 await self._save()
@@ -242,6 +281,7 @@ class ActivityImageQueue:
             "image_id": image_id, "image_url": f"{IMAGE_API}/{image_id}/master" if image_id else None,
             "result_deleted": result_deleted,
             "operation_id": job.get("deletion", {}).get("operation_id"),
+            "origin": job.get("origin", "manual" if job["kind"] == "manual" else "legacy"),
         }
 
     def _trim_history(self) -> None:
@@ -351,6 +391,9 @@ class ActivityImageQueue:
             self._retry_blocked.discard(key)
             if not any(normalize_title(t) == key for t in self._pending) and not await self.engine.cache.async_find(title):
                 self._pending.append(title)
+                job = self._new_job(title, "background")
+                job["origin"] = "explicit"
+                self._jobs.append(job)
                 accepted.append(title)
             await self._save()
         if accepted:
@@ -387,6 +430,9 @@ class ActivityImageQueue:
                 job = self._manual(title)
                 manual = job is not None
                 if job is None:
+                    job = self._background(title)
+                if job is None:
+                    # Never guess the authority of an unclassified pending title.
                     job = self._new_job(title, "background")
                     self._jobs.append(job)
                 self._set_state(job, "running")
@@ -403,8 +449,26 @@ class ActivityImageQueue:
             try:
                 if manual and job.get("deletion"):
                     result = await self.engine.async_generate(title, force=True, remember=False, deletion=job["deletion"])
+                elif manual:
+                    result = await self.engine.async_generate(title, force=True, remember=False)
+                elif job.get("origin") == "calendar":
+                    async def authorize(job: dict = job, title: str = title):
+                        authorizer = self.calendar_authorizer
+                        key = normalize_title(title)
+                        if (self._closed or job["state"] != "running" or authorizer is None
+                                or key in self._failed or key in self._manual_blocked or key in self._retry_blocked):
+                            raise GenerationSuppressed("Automatic queue eligibility changed")
+                        await authorizer(title, job.get("sources", []))
+                        if (self._closed or job["state"] != "running"
+                                or key in self._failed or key in self._manual_blocked or key in self._retry_blocked):
+                            raise GenerationSuppressed("Automatic queue eligibility changed while waiting")
+                    result = await self.engine.async_generate(title, authorize=authorize)
+                elif job.get("origin") == "explicit":
+                    result = await self.engine.async_generate(title)
                 else:
-                    result = await self.engine.async_generate(title, force=True, remember=False) if manual else await self.engine.async_generate(title)
+                    raise GenerationSuppressed("Legacy automatic work requires explicit review")
+            except GenerationSuppressed as exc:
+                state, error = "cancelled", str(exc)
             except asyncio.CancelledError:
                 state, error = "interrupted", "Interrupted; explicitly retry to generate a new candidate"
                 raise
@@ -418,11 +482,12 @@ class ActivityImageQueue:
                     self._set_state(job, state, error)
                     if state == "failed" and error:
                         self._failed[normalize_title(title)] = error
-                    if not self._closed or manual:
-                        if self._pending and self._pending[0] == title:
-                            self._pending.pop(0)
-                        if state not in {"failed", "interrupted"}:
-                            self._failed.pop(normalize_title(title), None)
+                    if state == "interrupted":
+                        self._retry_blocked.add(normalize_title(title))
+                    if self._pending and self._pending[0] == title:
+                        self._pending.pop(0)
+                    if state not in {"failed", "interrupted"}:
+                        self._failed.pop(normalize_title(title), None)
                     self._current = None
                     self._trim_history()
                     # The durable running boundary already requires explicit manual retry.

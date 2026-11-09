@@ -11,13 +11,15 @@ from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from homeassistant.components.ai_task import GenImageTask, AITaskEntityFeature  # noqa: E402
-from homeassistant.core import HomeAssistant, SupportsResponse  # noqa: E402
+from homeassistant.components.conversation.chat_log import ChatLog  # noqa: E402
+from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse  # noqa: E402
 from custom_components.activity_images import (  # noqa: E402
     async_setup, async_setup_entry, async_unload_entry,
 )
@@ -47,7 +49,7 @@ async def run():
     ) == "Green Waste Collection"
 
     with tempfile.TemporaryDirectory(prefix="ha-wrapper-smoke-") as directory:
-        hass = HomeAssistant(directory)
+        hass: Any = HomeAssistant(directory)
 
         from smoke_library_ha import prepare_http
         await prepare_http(hass)
@@ -61,6 +63,7 @@ async def run():
         hass.config_entries = SimpleNamespace(
             async_forward_entry_setups=no_forward,
             async_unload_platforms=no_unload,
+            async_update_entry=lambda item, *, options: setattr(item, "options", options),
         )
 
         assert await async_setup(hass, {})
@@ -70,7 +73,7 @@ async def run():
         art.save(raw_source)
         seen = []
 
-        async def fake_ai_provider(call):
+        async def fake_ai_provider(call) -> ServiceResponse:
             seen.append(call.data)
             return {"media_source_id": "media-source://ai_task/image/smoke.png"}
 
@@ -84,7 +87,7 @@ async def run():
             assert media == "media-source://ai_task/image/smoke.png"
             return SimpleNamespace(path=raw_source, url="/api/ai_task/image/smoke.png")
 
-        entry = TestEntry()
+        entry: Any = TestEntry()
         with patch(
             "custom_components.activity_images.generated_image.async_resolve_media",
             side_effect=resolve_media,
@@ -102,7 +105,7 @@ async def run():
                     "The image must have a square 1:1 aspect ratio."
                 ),
             )
-            session = SimpleNamespace(conversation_id="isolated-session")
+            session = ChatLog(hass, "isolated-session")
             first = await wrapper._async_generate_image(task, session)
             assert first.conversation_id == "isolated-session"
             assert first.mime_type == "image/png"
@@ -112,6 +115,7 @@ async def run():
             with Image.open(BytesIO(first.image_data)) as image:
                 assert image.size == (first.width, first.height)
             assert seen[0]["entity_id"] == "ai_task.fake_real_provider"
+            assert isinstance(first.revised_prompt, str)
             assert "Green Waste Collection" in first.revised_prompt
             assert "square 1:1 aspect ratio" not in first.revised_prompt
 

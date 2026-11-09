@@ -3,20 +3,27 @@
     "step": {
       "user": {
         "title": "Configure Activity Images",
-        "description": "Select calendars to display cached icons. AI Task provider, reference image and Lucida are optional in library-only mode. Automatic generation is off by default.",
+        "description": "Select real calendars to monitor. New calendars default to disabled. Automatic generation is a separate paid opt-in. Settings apply without reload. Disabling auto prevents new attempts, not charges for a request already sent.",
         "data": {
           "ai_task_entity_id": "AI Task provider (optional for library-only mode)",
           "reference_media_content_id": "Reference image (media-source://)",
           "lucida_url": "Lucida background-removal URL",
-          "calendar_entity_ids": "Calendars to watch (optional)",
+          "calendar_entity_ids": "Monitor calendars (optional)",
           "calendar_lookahead_days": "Upcoming calendar days (1–60)",
-          "generate_missing_calendar_images": "Automatically generate icons for calendar events",
-          "prompt_template": "Activity image prompt template (exactly one {title})"
+          "prompt_template": "Activity image prompt template (exactly one {title})",
+          "auto_generate_calendar_entity_ids": "Auto-generate missing images (select only monitored calendars)"
+        }
+      },
+      "confirm_auto": {
+        "title": "May incur AI charges",
+        "description": "Enable automatic missing-image generation for these calendars: {calendars}. The next automatic scan may send paid requests. Explicit rate-limit rejections may be retried up to three attempts. Provider-internal retries and charges are not controlled by this integration. Disabling later cannot cancel a request already sent.",
+        "data": {
+          "confirm_paid": "I authorize potentially paid automatic generation for these calendars"
         }
       }
     },
     "error": {
-      "invalid_settings": "Check calendars, the prompt template, reference image, trusted HTTP(S) Lucida URL and AI provider. Automatic generation requires a provider."
+      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, reference and trusted HTTP(S) Lucida URL."
     }
   },
   "options": {
@@ -27,17 +34,28 @@
           "ai_task_entity_id": "AI Task provider (optional for library-only mode)",
           "reference_media_content_id": "Reference image (media-source://)",
           "lucida_url": "Lucida background-removal URL",
-          "calendar_entity_ids": "Calendars to watch (optional)",
+          "calendar_entity_ids": "Monitor calendars (optional)",
           "calendar_lookahead_days": "Upcoming calendar days (1–60)",
-          "generate_missing_calendar_images": "Automatically generate icons for calendar events",
-          "prompt_template": "Activity image prompt template (exactly one {title})"
+          "prompt_template": "Activity image prompt template (exactly one {title})",
+          "auto_generate_calendar_entity_ids": "Auto-generate missing images (select only monitored calendars)"
         },
-        "description": "Settings apply without reloading the integration. Running generation keeps its settings; waiting work uses the settings selected when it starts. Disabling automatic generation does not cancel accepted jobs."
+        "description": "Select real calendars to monitor. New calendars default to disabled. Automatic generation is a separate paid opt-in. Settings apply without reload. Disabling auto prevents new attempts, not charges for a request already sent."
+      },
+      "confirm_auto": {
+        "title": "May incur AI charges",
+        "description": "Enable automatic missing-image generation for these calendars: {calendars}. The next automatic scan may send paid requests. Explicit rate-limit rejections may be retried up to three attempts. Provider-internal retries and charges are not controlled by this integration. Disabling later cannot cancel a request already sent.",
+        "data": {
+          "confirm_paid": "I authorize potentially paid automatic generation for these calendars"
+        }
       }
     },
     "error": {
-      "invalid_settings": "Check calendars, the prompt template, reference image, trusted HTTP(S) Lucida URL and AI provider. Automatic generation requires a provider.",
+      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, reference and trusted HTTP(S) Lucida URL.",
       "settings_conflict": "Settings changed elsewhere. Close and reopen Configure before saving."
+    },
+    "abort": {
+      "settings_conflict": "Settings changed elsewhere. Close and reopen Configure before saving.",
+      "invalid_settings": "Settings are no longer valid. Close and reopen Configure."
     }
   }
 }

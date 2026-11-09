@@ -77,10 +77,24 @@ class MockHA:
         self.config_entries = SimpleNamespace(
             async_forward_entry_setups=self._forward_platforms,
             async_unload_platforms=self._unload_platforms,
+            async_update_entry=self._update_entry,
         )
+        self.registry = {
+            entity: SimpleNamespace(id=f"registry-{entity}", entity_id=entity, name=None,
+                                    original_name=entity, disabled_by=None)
+            for entity in ("calendar.school", "calendar.work", "calendar.test")
+        }
         self.forwarded = []
         self.state = "running"
-        self.states = SimpleNamespace(get=lambda entity: SimpleNamespace(state="off"))
+        self._states = {entity: SimpleNamespace(entity_id=entity, state="off", attributes={})
+                        for entity in self.registry}
+        self.states = SimpleNamespace(get=self._states.get,
+                                      async_all=lambda domain: list(self._states.values()))
+
+    def _update_entry(self, entry, **changes):
+        for key, value in changes.items():
+            setattr(entry, key, value)
+        return True
 
     async def _forward_platforms(self, entry, platforms):
         self.forwarded.append(("load", tuple(platforms)))
@@ -353,7 +367,7 @@ async def test_queue_provider_error_persists(ha, configured):
 
 
 @pytest.mark.asyncio
-async def test_queue_shutdown_keeps_pending_job(ha, configured, monkeypatch):
+async def test_queue_shutdown_blocks_interrupted_attempt_but_keeps_untouched_pending(ha, configured, monkeypatch):
     _, engine = configured
     started = asyncio.Event()
 
@@ -364,7 +378,7 @@ async def test_queue_shutdown_keeps_pending_job(ha, configured, monkeypatch):
     monkeypatch.setattr(ha.services, "async_call", wait_for_provider)
     queue = queue_module.ActivityImageQueue(ha, engine)
     await queue.async_setup()
-    await queue.async_enqueue(["Poczekaj"])
+    await queue.async_enqueue(["Poczekaj", "Untouched pending"])
     await asyncio.wait_for(started.wait(), 2)
     assert queue.status()["current"] == "Poczekaj"
     await queue.async_shutdown()
@@ -372,7 +386,9 @@ async def test_queue_shutdown_keeps_pending_job(ha, configured, monkeypatch):
     # Do not run a restored job while inspecting stored state.
     restored._kick = lambda: None
     await restored.async_setup()
-    assert restored.status()["pending"] == ["Poczekaj"]
+    assert restored.status()["pending"] == ["Untouched pending"]
+    assert "poczekaj" in restored._retry_blocked
+    assert restored._jobs[0]["state"] == "interrupted"
 
 
 @pytest.mark.asyncio
@@ -831,6 +847,11 @@ def _load_integration_entrypoint():
     from datetime import UTC, datetime
     sys.modules["homeassistant.util.dt"].now = lambda: datetime.now(UTC)
     sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
+    if "homeassistant.helpers.entity_registry" not in sys.modules:
+        _package("homeassistant.helpers.entity_registry")
+    sys.modules["homeassistant.helpers.entity_registry"].async_get = lambda hass: SimpleNamespace(
+        entities=hass.registry, async_get=hass.registry.get,
+    )
     core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
     sys.modules["homeassistant.config_entries"].ConfigEntry = object
 
@@ -1013,6 +1034,8 @@ def _calendar_test_setup(ha, configured, monkeypatch, events, *,
         const_module.CONF_CALENDARS: list(calendars),
         const_module.CONF_LOOKAHEAD_DAYS: 30,
         const_module.CONF_AUTO_GENERATE: enabled,
+        const_module.CALENDAR_BINDINGS: {entity: ha.registry[entity].id if entity in ha.registry else None
+                                         for entity in calendars},
     }
     engine.settings.update(settings)
     adapter = ActivityCalendarAdapter(ha, cache, queue, engine.settings)
@@ -1162,7 +1185,9 @@ async def test_calendar_title_limit_and_shutdown_unsubscribe(ha, configured, mon
     adapter, queue, _ = _calendar_test_setup(ha, configured, monkeypatch, events, enabled=True)
     await adapter.async_refresh()
     assert len(adapter.calendar_titles["calendar.school"]) == 64
-    assert len(queue.status()["pending"]) == 64
+    assert queue.status()["pending"] == []
+    assert adapter.status()["complete"] is False
+    assert not ha.services.calls
     await adapter.async_shutdown()
 
 
