@@ -36,8 +36,9 @@
     img { display:block; object-fit:contain; }
     .image img, .preview img, .job-preview img { position:absolute; inset:0; margin:auto; width:auto; height:auto; max-width:calc(100% - 16px); max-height:calc(100% - 16px); outline:1px solid var(--image-boundary, var(--secondary-text-color)); }
     .preview { width:100%; height:min(52vh,540px); border-radius:12px; }
-    .preview[data-background=dark] { background:var(--primary-background-color); }
-    .preview[data-background=light] { color-scheme:light; background:Canvas; --image-boundary:color-mix(in srgb, CanvasText 45%, Canvas); }
+    .preview[data-background=dark], .preview[data-background=light] { background:Canvas; --image-boundary:color-mix(in srgb, CanvasText 45%, Canvas); }
+    .preview[data-background=dark] { color-scheme:dark; }
+    .preview[data-background=light] { color-scheme:light; }
     .preview[data-background=checkerboard] { background-color:var(--secondary-background-color); background-image:repeating-conic-gradient(var(--divider-color) 0% 25%, transparent 0% 50%); background-size:20px 20px; }
     .preview-controls { margin:12px 0; }
     .pager { justify-content:center; margin:24px 0; } .job { padding:16px; margin:12px 0; overflow-wrap:anywhere; } .job h3 { margin:0 0 8px; }
@@ -337,10 +338,19 @@
             const image = el("img");
             image.alt = alt;
             image.src = url;
-            image.addEventListener("error", () => target.replaceChildren(el("span", "Preview unavailable")), { once: true });
+            image.addEventListener("error", () => {
+              if (scope.urls.delete(url)) URL.revokeObjectURL(url);
+              if (!scope.controller.signal.aborted) {
+                target.dataset.previewFailed = "true";
+                target.replaceChildren(el("span", "Preview unavailable"));
+              }
+            }, { once: true });
             target.replaceChildren(image);
           } catch (error) {
-            if (!scope.controller.signal.aborted) target.replaceChildren(el("span", `Preview unavailable: ${message(error)}`));
+            if (!scope.controller.signal.aborted) {
+              target.dataset.previewFailed = "true";
+              target.replaceChildren(el("span", `Preview unavailable: ${message(error)}`));
+            }
           } finally {
             scope.running--;
             this._pumpImages(scope);
@@ -621,7 +631,7 @@
       }
       this._jobPreviews.delete(id);
     }
-    async _loadJobs() {
+    async _loadJobs(retryPreviews = false) {
       clearTimeout(this._poll);
       if (!this.isConnected || !this._hass || document.hidden) return;
       const version = ++this._jobsVersion;
@@ -631,6 +641,11 @@
         const jobs = await this._ws("jobs");
         if (version !== this._jobsVersion || !this.isConnected || document.hidden) return;
         this._jobs = jobs;
+        const recovered = this._uncertain;
+        let retryFailed = false;
+        if (retryPreviews || recovered) for (const [id, preview] of this._jobPreviews) {
+          if (preview.target.dataset.previewFailed === "true") { this._removeJobPreview(id); retryFailed = true; }
+        }
         this._queueStatus.textContent = jobs.active ? "Generation active — see Queue & history for recorded jobs." : "Generation idle — no active generation reported.";
         if (this._uncertain) {
           this._status.textContent = "Job status recovered. Review queue and history before starting another paid request.";
@@ -642,7 +657,7 @@
         }
         this._uncertain = false;
         this._syncButtons();
-        if (!this._queue.childElementCount || previousStatus !== JSON.stringify(jobs)) this._renderJobs();
+        if (recovered || retryFailed || !this._queue.childElementCount || previousStatus !== JSON.stringify(jobs)) this._renderJobs();
         if (previous !== JSON.stringify([jobs.jobs.map((job) => [job.id, job.state]), jobs.operations])) this._loadList();
         const deleting = (jobs.operations || []).some((operation) => operation.active || ["pending", "running", "preparing", "generating", "replacing", "committing", "cleaning", "cleanup"].includes(operation.state));
         if (jobs.active || jobs.current || jobs.pending.length || deleting || jobs.jobs.some((job) => ACTIVE.has(job.state))) this._poll = setTimeout(() => this._loadJobs(), 3000);
@@ -656,7 +671,7 @@
       this._queue.replaceChildren(el("h2", "Queue & history"));
       this._queue.append(el("p", "Generation is serialized. Running provider calls cannot be cancelled. Manual candidates require acceptance; discarding never deletes files. Confirmed Delete & Regenerate operations save replacements before deleting their old files.", "muted"));
       const tools = el("div", undefined, "row");
-      tools.append(button("Refresh job status", () => this._loadJobs()), button("Clear recorded errors", () => {
+      tools.append(button("Refresh job status", () => this._loadJobs(true)), button("Clear recorded errors", () => {
         this._modal("Clear recorded errors?");
         this._dialog.append(el("p", "This clears recorded errors only. It does not enqueue or authorize another paid request."));
         this._actions(button("Clear errors", () => this._mutate("clear_errors", {}, () => this._dialog.close())));

@@ -748,3 +748,59 @@ test('deletion replacement jobs cannot bypass their operation through generic ca
   assert.match(panel._queue.textContent, /deletion replacement/);
   assert.ok(![...panel._queue.querySelectorAll('button')].some((b) => ['Review candidate', 'Retry…'].includes(b.textContent)));
 });
+
+test('unchanged job status recovery mounts visible previews after a connection loss from the library', async (t) => {
+  const result = { id: 'candidate', title: 'Read', kind: 'manual', state: 'accepted', image_id: 'one', thumbnail_url: item().thumbnail_url };
+  const { panel, window, images } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([result]) : undefined);
+  await tick();
+  assert.equal(panel._queue.hidden, true);
+  assert.equal(panel._jobPreviews.size, 0);
+  panel.hass.connection.dispatchEvent(new window.Event('disconnected'));
+  assert.equal(panel._uncertain, true);
+  const before = images.length;
+  await panel._loadJobs();
+  await tick();
+  assert.equal(panel._queue.hidden, false);
+  assert.ok(panel._queue.querySelector('.job-preview img'));
+  assert.equal(images.length, before + 1);
+});
+
+test('explicit status refresh retries a transient preview error without refetching successful results', async (t) => {
+  const result = { id: 'candidate', title: 'Read', kind: 'manual', state: 'accepted', image_id: 'one', thumbnail_url: item().thumbnail_url };
+  const { panel, window } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([result]) : undefined);
+  await tick();
+  let count = 0;
+  panel.hass.fetchWithAuth = async () => {
+    if (++count === 1) throw new Error('Transient network failure');
+    return { ok: true, blob: async () => new window.Blob(['image']) };
+  };
+  panel._showTab(true);
+  await tick();
+  assert.match(panel._queue.querySelector('.job-preview').textContent, /Transient network failure/);
+  await panel._loadJobs();
+  assert.equal(count, 1); // Polls do not repeatedly fetch a failing image.
+  findButton(panel._queue, 'Refresh job status').click();
+  await tick();
+  assert.equal(count, 2);
+  assert.ok(panel._queue.querySelector('.job-preview img'));
+  findButton(panel._queue, 'Refresh job status').click();
+  await tick();
+  assert.equal(count, 2);
+});
+
+test('decode errors revoke their blob immediately, including after removal from job history', async (t) => {
+  let entries = [{ id: 'candidate', title: 'Read', state: 'accepted', image_id: 'one', thumbnail_url: item().thumbnail_url }];
+  const { panel, window, revoked } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs(entries) : undefined);
+  await tick();
+  panel._showTab(true);
+  await tick();
+  const image = panel._queue.querySelector('.job-preview img');
+  const url = image.src;
+  image.dispatchEvent(new window.Event('error'));
+  assert.ok(revoked.includes(url));
+  assert.ok(!panel._scopes.get('jobs').urls.has(url));
+  entries = [];
+  await panel._loadJobs();
+  assert.equal(panel._jobPreviews.size, 0);
+  assert.equal(revoked.filter((value) => value === url).length, 1);
+});
