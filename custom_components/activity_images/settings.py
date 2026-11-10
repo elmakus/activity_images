@@ -43,16 +43,12 @@ def is_own_provider_entity(hass, entry, entity_id: str | None) -> bool:
     Ownership uses registry platform/config_entry, never a hardcoded entity ID.
     Unknown/unregistered providers return False and remain savable; entry None
     matches any Activity Images wrapper for pre-entry config creation.
+    A registry failure raises and must refuse the write/dispatch, never allow it.
     """
     if not entity_id or not entity_id.startswith("ai_task."):
         return False
-    if getattr(hass, "data", None) is None:
-        return False
     from homeassistant.helpers import entity_registry as er
-    try:
-        entity = er.async_get(hass).async_get(entity_id)
-    except AttributeError:
-        return False
+    entity = er.async_get(hass).async_get(entity_id)
     if entity is None:
         return False
     if getattr(entity, "platform", None) != DOMAIN:
@@ -64,17 +60,11 @@ def is_own_provider_entity(hass, entry, entity_id: str | None) -> bool:
 
 def own_provider_entity_ids(hass, entry) -> list[str]:
     """Current wrapper entity IDs for selector/panel exclusions (additive)."""
-    if getattr(hass, "data", None) is None:
-        return []
     from homeassistant.helpers import entity_registry as er
-    try:
-        candidates = list(er.async_get(hass).entities.values())
-    except AttributeError:
-        return []
+    registry = er.async_get(hass)
     return sorted(
-        entity.entity_id for entity in candidates
-        if getattr(entity, "entity_id", "").startswith("ai_task.")
-        and is_own_provider_entity(hass, entry, entity.entity_id)
+        entity.entity_id for entity in er.async_entries_for_config_entry(registry, entry.entry_id)
+        if entity.entity_id.startswith("ai_task.") and entity.platform == DOMAIN
     )
 
 

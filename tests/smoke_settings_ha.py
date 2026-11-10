@@ -28,6 +28,7 @@ from homeassistant.core import (  # noqa: E402
     ServiceResponse,
     SupportsResponse,
 )
+from homeassistant.helpers import device_registry as dr  # noqa: E402
 from homeassistant.helpers import entity_registry as er  # noqa: E402
 from smoke_library_ha import prepare_http  # noqa: E402
 
@@ -290,6 +291,9 @@ async def run():
                 loader.async_setup(reopened)
                 reopened.config_entries = ConfigEntries(reopened, {})
                 await reopened.config_entries.async_initialize()
+                dr.async_setup(reopened)
+                await dr.async_load(reopened, load_empty=True)
+                await er.async_load(reopened)
                 restored = reopened.config_entries.async_get_known_entry(entry.entry_id)
                 assert dict(restored.options) == dict(entry.options)
                 assert read_settings(reopened)["values"][CONF_PROMPT_TEMPLATE] == "Other {title}"

@@ -258,6 +258,14 @@ class ActivityCalendarAdapter:
         live = self._presentation.get(entity_id)
         if live is None or live.get("last_error") or not live.get("last_ok"):
             return True
+        # A source that dropped or was replaced after a good scan is stale now,
+        # not only after the next scan runs. Display-only; authority unchanged.
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable"):
+            return True
+        bindings = self._policy_bindings()
+        if entity_id not in bindings or bindings[entity_id] != calendar_identity(self.hass, entity_id):
+            return True
         try:
             scanned = datetime.fromisoformat(live["last_ok"])
         except (ValueError, TypeError):

@@ -40,7 +40,7 @@ function setup(t, handler = () => undefined) {
 function findButton(root, label) { const result = [...root.querySelectorAll('button')].find((b) => b.textContent === label); assert.ok(result, `Button missing: ${label}`); return result; }
 
 test('safe manual blocks offer confirmed restore with future-charge and normalized-variant warning', async (t) => {
-  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { manual_blocks: [{ key: 'shared title', title: 'Shared title', reason: 'discarded', revision: 3, job_id: 'job', uncertain: false, deletion: false }] }) : undefined);
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { manual_blocks: [{ key: 'shared title', title: 'Shared title', reason: 'discarded', revision: 'a'.repeat(32), job_id: 'job', uncertain: false, deletion: false }] }) : undefined);
   await tick();
   const card = [...panel._queue.querySelectorAll('article')].find((node) => node.textContent.includes('Shared title'));
   assert.ok(card);
@@ -59,12 +59,12 @@ test('safe manual blocks offer confirmed restore with future-charge and normaliz
   await tick();
   assert.equal(commands('restore_auto').length, 1);
   assert.equal(commands('restore_auto')[0].title, 'Shared title');
-  assert.equal(commands('restore_auto')[0].revision, 3);
+  assert.equal(commands('restore_auto')[0].revision, 'a'.repeat(32));
   assert.equal(commands('restore_auto')[0].confirm, true);
 });
 
 test('restore is treated as cost-authorizing and blocked while outcome is uncertain', async (t) => {
-  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { manual_blocks: [{ key: 'one', title: 'One', reason: 'cancelled', revision: 2, job_id: 'job', uncertain: false, deletion: false }] }) : undefined);
+  const { panel, commands } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { manual_blocks: [{ key: 'one', title: 'One', reason: 'cancelled', revision: 'b'.repeat(32), job_id: 'job', uncertain: false, deletion: false }] }) : undefined);
   await tick();
   panel._uncertain = true;
   const card = [...panel._queue.querySelectorAll('article')].find((node) => node.textContent.includes('One'));
@@ -80,10 +80,10 @@ test('restore is treated as cost-authorizing and blocked while outcome is uncert
 
 test('unknown, legacy, deletion and active blocks show explicit manual path without hidden restore', async (t) => {
   const blocks = [
-    { key: 'unknown title', title: 'Unknown Title', reason: 'unknown', revision: 1, job_id: 'a', uncertain: true, deletion: false },
-    { key: 'legacy title', title: 'Legacy Title', reason: 'legacy_unknown', revision: 0, job_id: null, uncertain: true, deletion: false },
-    { key: 'deletion title', title: 'Deletion Title', reason: 'active', revision: 1, job_id: 'b', uncertain: false, deletion: true },
-    { key: 'active title', title: 'Active Title', reason: 'active', revision: 1, job_id: 'c', uncertain: false, deletion: false },
+    { key: 'unknown title', title: 'Unknown Title', reason: 'unknown', revision: 'c'.repeat(32), job_id: 'a', uncertain: true, deletion: false },
+    { key: 'legacy title', title: 'Legacy Title', reason: 'legacy_unknown', revision: null, job_id: null, uncertain: true, deletion: false },
+    { key: 'deletion title', title: 'Deletion Title', reason: 'active', revision: 'd'.repeat(32), job_id: 'b', uncertain: false, deletion: true },
+    { key: 'active title', title: 'Active Title', reason: 'active', revision: 'e'.repeat(32), job_id: 'c', uncertain: false, deletion: false },
   ];
   const { panel } = setup(t, (r) => r.type.endsWith('/jobs') ? jobs([], { manual_blocks: blocks }) : undefined);
   await tick();

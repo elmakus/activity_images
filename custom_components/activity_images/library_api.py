@@ -42,7 +42,7 @@ _SCHEMAS = {
     "cancel": {p.Required("titles"): p.All([_TITLE], p.Length(min=1, max=64))},
     "retry": {p.Optional("job_id"): _ID, p.Optional("title"): _TITLE},
     "clear_errors": {},
-    "restore_auto": {p.Required("title"): _TITLE, p.Required("revision"): p.All(int, p.Range(min=0)), p.Required("confirm"): True},
+    "restore_auto": {p.Required("title"): _TITLE, p.Required("revision"): p.All(str, p.Match(r"^[a-f0-9]{32}$")), p.Required("confirm"): True},
     "delete_plan": {p.Required("image_ids"): p.All([_ID], p.Length(min=1, max=64))},
     "delete": {p.Required("token"): _ID, p.Required("regenerate"): bool, p.Required("confirm"): True},
     "deletions": {},

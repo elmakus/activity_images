@@ -26,6 +26,17 @@ for name in ("homeassistant", "homeassistant.components", "homeassistant.compone
         sys.modules[name] = package
 features = sys.modules.setdefault("homeassistant.components.ai_task.const", types.ModuleType("ai_task_const"))
 features.__dict__["AITaskEntityFeature"] = IntFlag("AITaskEntityFeature", {"GENERATE_IMAGE":4,"SUPPORT_ATTACHMENTS":2})
+# Faithful empty entity registry for ownership checks; the shared fake suite
+# provides the same mock when the full session already stubbed this module.
+sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
+er = sys.modules.setdefault("homeassistant.helpers.entity_registry", types.ModuleType("homeassistant.helpers.entity_registry"))
+if not hasattr(er, "async_get"):
+    er.__dict__["async_get"] = lambda hass: SimpleNamespace(entities=hass.registry, async_get=hass.registry.get)
+if not hasattr(er, "async_entries_for_config_entry"):
+    er.__dict__["async_entries_for_config_entry"] = (
+        lambda registry, config_entry_id: [entry for entry in registry.entities.values()
+                                            if entry.config_entry_id == config_entry_id]
+    )
 
 const = importlib.import_module("custom_components.activity_images.const")
 diag = importlib.import_module("custom_components.activity_images.settings_diagnostics")
@@ -40,6 +51,7 @@ def test_diagnostics_are_read_only_and_service_safe():
     hass = SimpleNamespace(
         states=SimpleNamespace(get=lambda e: SimpleNamespace(state="idle", attributes={"supported_features":4}) if e in ("ai_task.mock", "calendar.family") else None),
         services=Services(),
+        registry={},
     )
     entry = SimpleNamespace(data={}, options={
         const.CONF_AI_ENTITY: "ai_task.mock",
@@ -63,7 +75,8 @@ def test_diagnostics_are_read_only_and_service_safe():
 def test_diagnostics_check_selected_provider_capabilities(capabilities, reference, expected):
     state = SimpleNamespace(state="idle", attributes={"supported_features":capabilities})
     hass = SimpleNamespace(states=SimpleNamespace(get=lambda _:state),
-                           services=SimpleNamespace(has_service=lambda *_:True))
+                           services=SimpleNamespace(has_service=lambda *_:True),
+                           registry={})
     entry = SimpleNamespace(data={}, options={const.CONF_AI_ENTITY:"ai_task.test",
                                               const.CONF_REFERENCE_MEDIA_ID:reference})
     result = diag.diagnostics(hass, entry)

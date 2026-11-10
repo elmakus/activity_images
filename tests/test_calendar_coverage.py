@@ -753,3 +753,21 @@ async def test_coverage_disconnect_suppresses_partial_automatic_scan(ha, configu
     assert queue._pending == [] and not ha.services.calls
     assert adapter._generation_suppressed == 0
     await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["unavailable", "identity"])
+async def test_display_stale_turns_truthful_before_next_scan(ha, configured, monkeypatch, change):
+    adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Stay Fresh"], automatic=True)
+    await adapter.async_start()
+    await adapter.async_refresh()
+    assert adapter.status()["complete"] is True
+    assert adapter.display_stale("calendar.school") is False
+    if change == "unavailable":
+        ha._states["calendar.school"].state = "unavailable"
+    else:
+        ha.registry["calendar.school"].id = "unrelated-replacement"
+    assert adapter.display_stale("calendar.school") is True
+    assert adapter.display_titles_map()["calendar.school"] == ["Stay Fresh"]
+    assert adapter.automatic_sources() == [] and queue._pending == ["Stay Fresh"]
+    await adapter.async_shutdown()

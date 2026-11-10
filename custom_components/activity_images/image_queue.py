@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from .image_cache import asset_url, normalize_title
 from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
+_REVISION = re.compile(r"^[a-f0-9]{32}$")
 
 
 class ActivityImageQueue:
@@ -50,7 +52,9 @@ class ActivityImageQueue:
                 if (not isinstance(key, str) or key not in self._manual_blocked
                         or not isinstance(entry, dict)
                         or entry.get("reason") not in {"active", "cancelled", "discarded", "accepted", "unknown"}
-                        or type(entry.get("revision")) is not int or entry["revision"] < 1):
+                        or not isinstance(entry.get("revision"), str) or not _REVISION.fullmatch(entry["revision"])
+                        or type(entry.get("uncertain")) is not bool):
+                    # Malformed optional metadata falls back to legacy_unknown.
                     continue
                 job_id = entry.get("job_id")
                 title = entry.get("title")
@@ -60,7 +64,7 @@ class ActivityImageQueue:
                     "revision": entry["revision"],
                     "job_id": job_id if isinstance(job_id, str) else None,
                     "title": title if isinstance(title, str) and title else key,
-                    "uncertain": bool(entry.get("uncertain")) or entry["reason"] == "unknown",
+                    "uncertain": entry["uncertain"] or entry["reason"] == "unknown",
                     "deletion_operation_id": deletion_id if isinstance(deletion_id, str) else None,
                     "updated_at": entry.get("updated_at") if isinstance(entry.get("updated_at"), str) else "",
                 }
@@ -157,20 +161,24 @@ class ActivityImageQueue:
 
     def _touch_manual_block(self, title: str, *, reason: str, job_id: str | None,
                             deletion_operation_id: str | None = None) -> None:
-        """Record the latest manual outcome; sticky uncertainty survives later safe work."""
+        """Record the latest manual outcome with a fresh unpredictable restore token.
+
+        A monotonic counter would restart after restore and let an old
+        confirmation authorize a new policy; a UUID token cannot recur.
+        Sticky uncertainty survives later safe work.
+        """
         key = normalize_title(title)
         existing = self._manual_blocks.get(key)
         if existing is None and key in self._manual_blocked:
-            prev_revision, prev_uncertain = 0, True
+            prev_uncertain = True
         elif existing:
-            prev_revision = int(existing.get("revision") or 0)
             prev_uncertain = bool(existing.get("uncertain"))
         else:
-            prev_revision, prev_uncertain = 0, False
+            prev_uncertain = False
         self._manual_blocked.add(key)
         self._manual_blocks[key] = {
             "reason": reason,
-            "revision": prev_revision + 1,
+            "revision": uuid4().hex,
             "job_id": job_id,
             "title": title,
             "uncertain": prev_uncertain or reason == "unknown",
@@ -188,12 +196,12 @@ class ActivityImageQueue:
             deletion = any(normalize_title(job["title"]) == key and job.get("deletion")
                              for job in self._jobs)
             return {"key": key, "title": title, "reason": "legacy_unknown",
-                    "revision": 0, "job_id": None, "uncertain": True,
+                    "revision": None, "job_id": None, "uncertain": True,
                     "deletion": deletion}
         deletion = bool(entry.get("deletion_operation_id")) or any(
             normalize_title(job["title"]) == key and job.get("deletion") for job in self._jobs)
         return {"key": key, "title": entry.get("title") or key, "reason": entry.get("reason"),
-                "revision": int(entry.get("revision") or 0), "job_id": entry.get("job_id"),
+                "revision": entry.get("revision"), "job_id": entry.get("job_id"),
                 "uncertain": bool(entry.get("uncertain")), "deletion": deletion}
 
     async def async_coverage_snapshot(self) -> dict:
@@ -499,13 +507,13 @@ class ActivityImageQueue:
             self._kick()
         return {"queued": accepted}
 
-    async def async_restore_auto(self, title: str, revision: int, confirm: bool) -> dict:
+    async def async_restore_auto(self, title: str, revision: str, confirm: bool) -> dict:
         """Remove one explained safe manual block; never enqueues, refreshes or calls AI."""
         from .library import validate_title
         title = validate_title(title)
         if confirm is not True:
             raise ValueError("Restoring automatic generation requires confirmation")
-        if type(revision) is not int or revision < 0:
+        if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
             raise ValueError("Invalid manual block revision")
         key = normalize_title(title)
         async with self._mutation():
@@ -514,14 +522,16 @@ class ActivityImageQueue:
             info = self._manual_block_info(key)
             if info is None:
                 raise ValueError("No manual automatic-generation block for this title")
+            # Uncertainty is sticky and unrestorable, independent of token freshness;
+            # legacy blocks carry no token at all.
+            if info["uncertain"] or info["reason"] in {"unknown", "legacy_unknown"}:
+                raise ValueError("Automatic generation remains blocked: a previous manual request has an unknown outcome. Use explicit Generate new image or Retry.")
             if revision != info["revision"]:
                 raise ValueError("Manual block changed elsewhere (revision conflict); refresh before restoring")
             if info["deletion"]:
                 raise ValueError("Deletion operation owns recovery for this title; use the deletion Queue & history actions")
             if self.engine.cache.reserved(title):
                 raise ValueError("Title is reserved for permanent deletion")
-            if info["uncertain"] or info["reason"] in {"unknown", "legacy_unknown"}:
-                raise ValueError("Automatic generation remains blocked: a previous manual request has an unknown outcome. Use explicit Generate new image or Retry.")
             active = any(normalize_title(job["title"]) == key and job["state"] in {"pending", "running", "review"}
                            for job in self._jobs)
             active = active or any(normalize_title(value) == key for value in self._pending)

@@ -120,9 +120,9 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
             if key in blocked and key in snapshot["manual_blocked"]:
                 entry = manual_blocks.get(key)
                 if entry is None:
-                    manual_block = {"reason": "legacy_unknown", "revision": 0, "uncertain": True}
+                    manual_block = {"reason": "legacy_unknown", "revision": None, "uncertain": True}
                 else:
-                    manual_block = {"reason": entry.get("reason"), "revision": int(entry.get("revision") or 0),
+                    manual_block = {"reason": entry.get("reason"), "revision": entry.get("revision"),
                                     "uncertain": bool(entry.get("uncertain"))}
             sources = []
             for entity in sorted({event["calendar_entity_id"] for event in occurrences}):

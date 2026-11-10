@@ -87,9 +87,12 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
         )
         if not provider or provider == self.entity_id:
             return False
+        if getattr(self, "hass", None) is None:
+            # Not yet added to Home Assistant; no registry to consult.
+            return True
         from .settings import is_own_provider_entity
 
-        return not is_own_provider_entity(getattr(self, "hass", None), self._entry, provider)
+        return not is_own_provider_entity(self.hass, self._entry, provider)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

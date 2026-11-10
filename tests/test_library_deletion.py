@@ -699,6 +699,10 @@ def live_demand(deletions, titles):
     calendar.calendars = ("calendar.test",)
     deletions.queue.engine.settings["calendar_entity_ids"] = list(calendar.calendars)
     scans = []
+    # Same readiness interface as the real adapter: fail-closed when unusable.
+    calendar._demand_truncated = False
+    calendar.coverage_stale = lambda: bool(calendar.last_error) or not calendar.last_scan
+    calendar.status = lambda: {"complete": not calendar.coverage_stale()}
     async def refresh():
         assert not calendar._lock.locked()
         async with calendar._lock:

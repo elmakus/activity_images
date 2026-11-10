@@ -1,6 +1,8 @@
 """Explained manual automatic-generation blocks and confirmed restoration."""
 from __future__ import annotations
 
+import re
+
 import pytest
 import test_behavior as behavior
 from test_library import finished
@@ -8,6 +10,11 @@ from test_library import finished
 ha = behavior.ha
 configured = behavior.configured
 queue_module = behavior.queue_module
+_TOKEN = re.compile(r"^[a-f0-9]{32}$")
+
+
+def is_token(value):
+    return isinstance(value, str) and bool(_TOKEN.fullmatch(value))
 
 
 def manual_block(queue, key):
@@ -22,7 +29,7 @@ async def test_cancel_discard_accept_remain_blocked_but_safe_is_restorable(ha, c
     await queue.async_setup()
     job = await queue.async_candidate("Cancel Target")
     assert manual_block(queue, "cancel target")["reason"] == "active"
-    assert manual_block(queue, "cancel target")["revision"] == 1
+    assert is_token(manual_block(queue, "cancel target")["revision"])
     assert await queue.async_cancel(["Cancel Target"]) == 1
     assert manual_block(queue, "cancel target")["reason"] == "cancelled"
     assert await queue.async_enqueue(["Cancel Target"]) == []
@@ -121,16 +128,75 @@ async def test_restore_stale_revision_and_double_submit(ha, configured, monkeypa
     await queue.async_candidate("Stale Title")
     await queue.async_cancel(["Stale Title"])
     first = manual_block(queue, "stale title")
-    assert first["revision"] == 2
+    assert is_token(first["revision"])
+    stale = "0" * 32
+    if stale == first["revision"]:
+        stale = "f" * 32
     with pytest.raises(ValueError, match="revision conflict"):
-        await queue.async_restore_auto("Stale Title", 1, True)
+        await queue.async_restore_auto("Stale Title", stale, True)
+    for invalid in (0, "short", None):
+        with pytest.raises(ValueError, match="Invalid manual block revision"):
+            await queue.async_restore_auto("Stale Title", invalid, True)
     with pytest.raises(ValueError, match="confirmation"):
         await queue.async_restore_auto("Stale Title", first["revision"], False)
     await queue.async_restore_auto("Stale Title", first["revision"], True)
     with pytest.raises(ValueError, match="No manual.*block"):
         await queue.async_restore_auto("Stale Title", first["revision"], True)
-    # New work after restore starts a fresh revision chain.
+    # New work after restore mints an unrelated token; the old one stays dead.
     assert await queue.async_enqueue(["Stale Title"]) == ["Stale Title"]
+    await queue.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stale_confirmation_rejected_after_restore_reblock_and_restart(ha, configured, monkeypatch):
+    _, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_setup()
+    await queue.async_candidate("ABA Title")
+    await queue.async_cancel(["ABA Title"])
+    first = manual_block(queue, "aba title")
+    assert is_token(first["revision"])
+    await queue.async_restore_auto("ABA Title", first["revision"], True)
+    await queue.async_candidate("ABA Title")
+    await queue.async_cancel(["ABA Title"])
+    second = manual_block(queue, "aba title")
+    assert is_token(second["revision"]) and second["revision"] != first["revision"]
+    with pytest.raises(ValueError, match="revision conflict"):
+        await queue.async_restore_auto("ABA Title", first["revision"], True)
+    assert await queue.async_enqueue(["ABA Title"]) == []
+    await queue.async_shutdown()
+    resumed = queue_module.ActivityImageQueue(ha, engine)
+    await resumed.async_setup()
+    assert manual_block(resumed, "aba title")["revision"] == second["revision"]
+    with pytest.raises(ValueError, match="revision conflict"):
+        await resumed.async_restore_auto("ABA Title", first["revision"], True)
+    await resumed.async_restore_auto("ABA Title", second["revision"], True)
+    assert "aba title" not in {item["key"] for item in resumed.status()["manual_blocks"]}
+    await resumed.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_malformed_block_metadata_falls_back_to_legacy_unknown(ha, configured, monkeypatch):
+    _, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    ha.saved[queue._store.key] = {
+        "manual_blocked": ["uncertain missing", "uncertain invalid", "revision legacy"],
+        "pending": [], "failed": {}, "jobs": [],
+        "manual_blocks": {
+            "uncertain missing": {"reason": "cancelled", "revision": "a" * 32},
+            "uncertain invalid": {"reason": "accepted", "revision": "b" * 32, "uncertain": "yes"},
+            "revision legacy": {"reason": "cancelled", "revision": 2, "uncertain": False},
+        },
+    }
+    await queue.async_setup()
+    for key in ("uncertain missing", "uncertain invalid", "revision legacy"):
+        info = manual_block(queue, key)
+        assert info["reason"] == "legacy_unknown" and info["revision"] is None and info["uncertain"] is True
+        assert await queue.async_enqueue([key]) == []
+        with pytest.raises(ValueError, match="unknown outcome"):
+            await queue.async_restore_auto(key, "c" * 32, True)
     await queue.async_shutdown()
 
 
@@ -170,10 +236,10 @@ async def test_legacy_block_without_metadata_is_conservatively_unknown(ha, confi
     ha.saved[queue._store.key] = {"manual_blocked": ["legacy title"], "pending": [], "failed": {}, "jobs": []}
     await queue.async_setup()
     info = manual_block(queue, "legacy title")
-    assert info["reason"] == "legacy_unknown" and info["revision"] == 0 and info["uncertain"] is True
+    assert info["reason"] == "legacy_unknown" and info["revision"] is None and info["uncertain"] is True
     assert await queue.async_enqueue(["Legacy Title"]) == []
     with pytest.raises(ValueError, match="unknown outcome"):
-        await queue.async_restore_auto("Legacy Title", 0, True)
+        await queue.async_restore_auto("Legacy Title", "0" * 32, True)
     # A later manual candidate must not silently erase legacy uncertainty.
     await queue.async_candidate("Legacy Title")
     await queue.async_cancel(["Legacy Title"])
@@ -273,5 +339,52 @@ async def test_coverage_exposes_shared_normalized_manual_reason(ha, configured, 
     result = await coverage(runtime)
     restored = next(item for item in result["items"] if item["raw_summary"] == "Shared title")
     assert restored["manual_block"] is None
+    await adapter.async_shutdown()
+    await queue.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_coverage_reports_all_block_states_after_trim_without_mutation(ha, configured, monkeypatch):
+    from types import SimpleNamespace
+
+    from custom_components.activity_images.calendar_api import coverage
+    from custom_components.activity_images.library import ActivityImageLibrary
+
+    events = {"calendar.school": {"events": [{"summary": title} for title in
+                                             ("Known Title", "Fragile Title", "Legacy Title")]}}
+    adapter, queue, _ = behavior._calendar_test_setup(
+        ha, configured, monkeypatch, events, enabled=True,
+        calendars=("calendar.school",),
+    )
+    await adapter.async_setup()
+    await queue.async_candidate("Known Title")
+    await queue.async_cancel(["Known Title"])
+    ha.services.fail = True
+    fragile = await queue.async_candidate("Fragile Title")
+    await queue._run()
+    ha.services.fail = False
+    assert queue._job(fragile["id"])["state"] == "failed"
+    queue._manual_blocked.add("legacy title")  # Key without metadata, as loaded from storage.
+    for index in range(150):
+        terminal = queue._new_job(f"Old {index}", "background")
+        terminal["state"] = "completed"
+        queue._jobs.append(terminal)
+    queue._trim_history()
+    await adapter.async_refresh_coverage()
+    runtime = SimpleNamespace(calendar=adapter, queue=queue, cache=configured[0],
+                              library=ActivityImageLibrary(ha, configured[0]))
+    calls, blocks = len(ha.services.calls), queue.status()["manual_blocks"]
+    result = await coverage(runtime)
+    assert len(ha.services.calls) == calls  # Viewing never mutates or bills.
+    assert queue.status()["manual_blocks"] == blocks
+    assert queue._pending == []
+    by_raw = {item["raw_summary"]: item for item in result["items"]}
+    known = by_raw["Known Title"]["manual_block"]
+    assert known["reason"] == "cancelled" and is_token(known["revision"]) and known["uncertain"] is False
+    unknown = by_raw["Fragile Title"]["manual_block"]
+    assert unknown["reason"] == "unknown" and is_token(unknown["revision"]) and unknown["uncertain"] is True
+    legacy = by_raw["Legacy Title"]["manual_block"]
+    assert legacy == {"reason": "legacy_unknown", "revision": None, "uncertain": True}
+    assert all(by_raw[title]["eligible_for_auto"] is False for title in by_raw)
     await adapter.async_shutdown()
     await queue.async_shutdown()

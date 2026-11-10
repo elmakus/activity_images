@@ -161,6 +161,10 @@ sys.modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession = la
 sys.modules["homeassistant.helpers.entity_registry"].async_get = lambda hass: SimpleNamespace(
     entities=hass.registry, async_get=hass.registry.get,
 )
+sys.modules["homeassistant.helpers.entity_registry"].async_entries_for_config_entry = (
+    lambda registry, config_entry_id: [entry for entry in registry.entities.values()
+                                        if entry.config_entry_id == config_entry_id]
+)
 
 cache_module = importlib.import_module("custom_components.activity_images.image_cache")
 engine_module = importlib.import_module("custom_components.activity_images.engine")
@@ -858,6 +862,10 @@ def _load_integration_entrypoint():
         _package("homeassistant.helpers.entity_registry")
     sys.modules["homeassistant.helpers.entity_registry"].async_get = lambda hass: SimpleNamespace(
         entities=hass.registry, async_get=hass.registry.get,
+    )
+    sys.modules["homeassistant.helpers.entity_registry"].async_entries_for_config_entry = (
+        lambda registry, config_entry_id: [entry for entry in registry.entities.values()
+                                            if entry.config_entry_id == config_entry_id]
     )
     core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
     sys.modules["homeassistant.config_entries"].ConfigEntry = object

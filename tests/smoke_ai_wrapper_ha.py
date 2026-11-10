@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from homeassistant.components.ai_task import GenImageTask, AITaskEntityFeature  # noqa: E402
 from homeassistant.components.conversation.chat_log import ChatLog  # noqa: E402
 from homeassistant.core import HomeAssistant, ServiceResponse, SupportsResponse  # noqa: E402
+from homeassistant.helpers import entity_registry as er  # noqa: E402
 from custom_components.activity_images import (  # noqa: E402
     async_setup, async_setup_entry, async_unload_entry,
 )
@@ -64,7 +65,9 @@ async def run():
             async_forward_entry_setups=no_forward,
             async_unload_platforms=no_unload,
             async_update_entry=lambda item, *, options: setattr(item, "options", options),
+            async_wait_initialized=lambda: asyncio.sleep(0),
         )
+        await er.async_load(hass)
 
         assert await async_setup(hass, {})
         raw_source = Path(directory) / "raw-image.png"

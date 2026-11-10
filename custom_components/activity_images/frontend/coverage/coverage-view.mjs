@@ -249,6 +249,7 @@ export class ActivityImagesCoverage extends HTMLElement {
       const badge = (text) => badges.append(element("span", text, "badge"));
       badge(item.image_status === "available" ? "Available" : item.image_status === "missing" ? "Missing" : "Unknown image");
       if (item.ignored) badge("Ignored");
+      if (item.manual_block) badge("Manual block");
       if (item.job_status === "queued" || item.job_status === "running") badge("Queued");
       if (item.job_status === "failed") badge("Failed");
       badge(item.scheduled ? "Scheduled" : "Unscheduled");
@@ -273,6 +274,20 @@ export class ActivityImagesCoverage extends HTMLElement {
       }
       if (item.job_status === "failed") {
         card.append(element("p", "Generation failed — see Queue & history for the recorded error.", "error"));
+      }
+      if (item.manual_block) {
+        const block = item.manual_block;
+        // Read-only explanation; restoring happens in Queue & history.
+        if (block.reason === "legacy_unknown") {
+          card.append(element("p", "Automatic generation blocked: legacy manual history without reliable details for this normalized title. See Queue & history; use Generate new image or Retry for explicit requests.", "error"));
+        } else if (block.uncertain || block.reason === "unknown") {
+          card.append(element("p", "Automatic generation blocked: a previous manual request for this normalized title has an unknown outcome. See Queue & history; use Generate new image or Retry for explicit requests.", "error"));
+        } else if (block.reason === "active") {
+          card.append(element("p", "Automatic generation blocked: outstanding manual work for this normalized title. Resolve it in Queue & history before restoring.", "muted"));
+        } else {
+          const detail = {cancelled: "after cancellation", discarded: "after discarding the candidate", accepted: "after acceptance"}[block.reason] || `after ${block.reason}`;
+          card.append(element("p", `Automatic generation blocked ${detail} for this normalized title. Restore it in Queue & history; a future automatic scan may then send paid requests.`, "muted"));
+        }
       }
       if (item.image) {
         const thumb = element("div", "Loading preview…", "thumb");

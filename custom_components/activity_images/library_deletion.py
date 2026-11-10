@@ -72,14 +72,9 @@ class ActivityImageDeletions:
         except Exception as exc:
             self._calendar_error = f"Current calendar demand could not be verified: {exc}"
             return
-        stale = False
-        coverage_stale = getattr(self.calendar, "coverage_stale", None)
-        if callable(coverage_stale):
-            try:
-                stale = bool(coverage_stale())
-            except Exception:
-                stale = True
-        if not stale and bool(getattr(self.calendar, "_demand_truncated", False)):
+        try:
+            stale = self.calendar.coverage_stale() or self.calendar._demand_truncated
+        except Exception:
             stale = True
         self._calendar_error = ("Current calendar demand could not be verified; retry after a successful calendar refresh"
                                 if self.calendar.last_error or not self.calendar.last_scan or self.calendar.last_scan == previous or stale else None)
@@ -98,25 +93,15 @@ class ActivityImageDeletions:
             return None
         if self.calendar.last_error or not self.calendar.last_scan:
             return "Current calendar settings require a successful refresh before deletion"
-        coverage_stale = getattr(self.calendar, "coverage_stale", None)
-        if callable(coverage_stale):
-            try:
-                if coverage_stale():
-                    return "Current calendar demand is stale or incomplete; retry after a successful complete refresh"
-            except Exception:
-                return "Current calendar demand could not be verified; retry after a successful calendar refresh"
-        if bool(getattr(self.calendar, "_demand_truncated", False)):
+        try:
+            truncated = self.calendar._demand_truncated
+            complete = self.calendar.status()["complete"]
+        except Exception:
+            return "Current calendar demand could not be verified; retry after a successful calendar refresh"
+        if truncated:
             return "Calendar demand exceeded 64 distinct titles or 512 events; permanent deletion is blocked"
-        status_fn = getattr(self.calendar, "status", None)
-        if callable(status_fn):
-            try:
-                result = status_fn()
-                if not isinstance(result, dict):
-                    return "Current calendar demand is stale or incomplete; retry after a successful complete refresh"
-                if not result.get("complete", False):
-                    return "Current calendar demand is stale or incomplete; retry after a successful complete refresh"
-            except Exception:
-                return "Current calendar demand could not be verified; retry after a successful calendar refresh"
+        if complete is not True:
+            return "Current calendar demand is stale or incomplete; retry after a successful complete refresh"
         return None
 
     def validate_reference(self, media_id: str) -> None:
