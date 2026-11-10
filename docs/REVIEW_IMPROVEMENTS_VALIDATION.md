@@ -4,7 +4,7 @@ Date: 2026-11-10. Feature work on `feat/review-improvements`, based on stable v0
 
 This records the validation phase before release authorization. Its no-release/no-production statements describe that phase, not later separately approved operations. See the [0.6.0 release notes](RELEASE_NOTES_v0.6.0.md) for release and upgrade guidance.
 
-This is development evidence for a **Draft PR**, not release approval or production-readiness certification. No production Home Assistant, real calendar, image collection, Home Tasks source, theme or dashboard was changed. No real paid provider request, deployment, production restart, tag, release or merge was performed. Final safety review remains pending.
+This is development evidence for [PR #12](https://github.com/elmakus/activity_images/pull/12), not production-readiness certification. During this validation phase, no production Home Assistant, real calendar, image collection, Home Tasks source, theme or dashboard was changed. No real paid provider request, deployment, production restart, tag, release or merge was performed.
 
 ## Executed local checks
 
@@ -36,6 +36,12 @@ A standalone run of `tests/test_settings_diagnostics.py` fails identically with 
 | `tests/smoke_calendar_coverage_ha.py` | Real ConfigEntries, registry identities, authenticated admin WS, non-admin/schema denial, native/sidebar paid confirmation, free linking/sensor output, exact ignore Store read-back and one local fake manual candidate. |
 
 The coverage script reports `SMOKE-OK tracked=5 ignored_exact=2 linked=1 manual_paid=1 provider_calls=1 ha=2026.11.0`. Here `manual_paid=1` names a simulated potentially paid workflow, **not an actual charge**. Smoke assertions are not extra pytest test cases.
+
+## Independent review and hosted checks
+
+The final independent safety review inspected the complete 2,948-line source diff through commit `47599de781eac2c1746b9f606dde7a80e3a80f8e` and connected source. It found no concrete safety blocker. The review checked opaque restore tokens across reblocking/restart, malformed metadata, registry failure refusal, partial display versus complete authority, and deletion freshness after I/O. Review did not replace runtime tests or certify real-provider behavior.
+
+All five hosted checks passed on release-preparation commit `e004d7ba9c508b50629a938bd163f0f951af4631`: HACS validation, Hassfest validation, engine tests, frontend tests and HA runtime tests. Subsequent release-documentation corrections do not change runtime source; their exact commit must also pass the repository checks before publication.
 
 ## Scope preserved
 

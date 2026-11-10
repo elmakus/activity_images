@@ -1,6 +1,6 @@
 # Activity Images 0.6.0
 
-Stable review-hardening release after **v0.5.0**. No new frontend framework, dashboard, theme, runtime dependency, Home Tasks source change, entity ID, service, option, or title-resolution behavior change is required or included.
+Stable review-hardening release after **v0.5.0**. No new frontend framework, dashboard, theme, runtime dependency, Home Tasks source change, entity ID, public service change, or matching-threshold change is required or included.
 
 ## Provider self-guard
 
@@ -41,6 +41,6 @@ See [the complete feature/migration guide](CALENDAR_COVERAGE.md), [installation 
 
 Pre-release validation passed **290 Python tests**, **84 frontend tests**, repository lint/compile/syntax checks and **six disposable native HA 2026.11.0 smoke scripts**, using synthetic data and local fake image providers. See [the validation record](REVIEW_IMPROVEMENTS_VALIDATION.md) for exact scope and reproducible checks. Release metadata is checked again before tagging; inspect CI for the release commit.
 
-No physical device, real-provider billing, full-browser, touch, or screen-reader checks were performed, and none are claimed. Green tests and a stable version label do not guarantee every provider or frontend behaves correctly. Final safety review remains pending; publication requires its separate pass.
+No physical device, real-provider billing, full-browser, touch, or screen-reader checks were performed, and none are claimed. Green tests and a stable version label do not guarantee every provider or frontend behaves correctly. The independent final safety review inspected the complete source diff and found no blocking issue.
 
 Already dispatched requests can still finish and bill. Review these limits before enabling automatic generation.
