@@ -36,9 +36,11 @@ _package("custom_components")
 _package("custom_components.activity_images", ROOT)
 _package("homeassistant")
 _package("homeassistant.core")
+_package("homeassistant.exceptions")
 _package("homeassistant.helpers")
 _package("homeassistant.helpers.storage")
 _package("homeassistant.helpers.aiohttp_client")
+_package("homeassistant.helpers.entity_registry")
 _package("homeassistant.components")
 _package("homeassistant.components.media_source")
 
@@ -81,7 +83,8 @@ class MockHA:
         )
         self.registry = {
             entity: SimpleNamespace(id=f"registry-{entity}", entity_id=entity, name=None,
-                                    original_name=entity, disabled_by=None)
+                                    original_name=entity, disabled_by=None, platform="test",
+                                    config_entry_id="test_calendar_entry", domain=entity.split(".", 1)[0])
             for entity in ("calendar.school", "calendar.work", "calendar.test")
         }
         self.forwarded = []
@@ -151,9 +154,13 @@ class FakeServices:
 
 sys.modules["homeassistant.core"].CoreState = SimpleNamespace(running="running", stopping="stopping")
 sys.modules["homeassistant.core"].HomeAssistant = MockHA
+sys.modules["homeassistant.exceptions"].HomeAssistantError = type("HomeAssistantError", (Exception,), {})
 sys.modules["homeassistant.helpers.storage"].Store = MemoryStore
 sys.modules["homeassistant.components.media_source"].async_resolve_media = fake_resolve_media
 sys.modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession = lambda hass: None
+sys.modules["homeassistant.helpers.entity_registry"].async_get = lambda hass: SimpleNamespace(
+    entities=hass.registry, async_get=hass.registry.get,
+)
 
 cache_module = importlib.import_module("custom_components.activity_images.image_cache")
 engine_module = importlib.import_module("custom_components.activity_images.engine")
@@ -854,11 +861,8 @@ def _load_integration_entrypoint():
     )
     core.SupportsResponse = SimpleNamespace(OPTIONAL="optional")
     sys.modules["homeassistant.config_entries"].ConfigEntry = object
-
-    class HomeAssistantError(Exception):
-        pass
-
-    sys.modules["homeassistant.exceptions"].HomeAssistantError = HomeAssistantError
+    if not hasattr(sys.modules["homeassistant.exceptions"], "HomeAssistantError"):
+        sys.modules["homeassistant.exceptions"].HomeAssistantError = type("HomeAssistantError", (Exception,), {})
     validation = sys.modules["homeassistant.helpers.config_validation"]
     validation.string = str
     validation.boolean = vol.Boolean()

@@ -90,6 +90,7 @@ export class ActivityImagesSettings extends HTMLElement {
       const snapshot = await this._ws("get");
       if (version !== this._version) return;
       this._revision = snapshot.revision;
+      this._excludedProviders = Array.isArray(snapshot.excluded_providers) ? snapshot.excluded_providers : [];
       this._values = JSON.parse(JSON.stringify(snapshot.values));
       this._initial = JSON.stringify(this._values);
       this._uncertain = false;
@@ -140,7 +141,7 @@ export class ActivityImagesSettings extends HTMLElement {
     };
     if (this._tab === "general") {
       this._calendarHooks = {};
-      this._dispose = renderGeneral(this._content, this._values, update, this._hass, this._calendarHooks) || null;
+      this._dispose = renderGeneral(this._content, this._values, update, this._hass, this._calendarHooks, this._excludedProviders || []) || null;
     }
     else if (this._tab === "prompt") renderPrompt(this._content, this._values, update);
     else if (this._tab === "reference") this._dispose = renderReference(this._content, this._values, update, this._hass);

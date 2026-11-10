@@ -72,6 +72,10 @@ class ActivityImageGenerator:
             entity_id = settings.get(CONF_AI_ENTITY)
             if not entity_id:
                 raise ValueError("Configure an ai_task entity in Activity Images")
+            from .settings import is_own_provider_entity
+
+            if is_own_provider_entity(self.hass, getattr(self.settings, "entry", None), entity_id):
+                raise ValueError("Activity Images cannot use itself as its image provider")
             signature = normalize_title(title)
             task_id = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
             # Keep the provider task name stable but never overwrite published files.

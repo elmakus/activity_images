@@ -10,6 +10,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     CALENDAR_BINDINGS,
+    CONF_AI_ENTITY,
     CONF_AUTO_CALENDARS,
     CONF_CALENDARS,
     CONF_REFERENCE_MEDIA_ID,
@@ -36,6 +37,47 @@ def calendar_identity(hass, entity_id: str) -> str | None:
     return entity.id if entity is not None else None
 
 
+def is_own_provider_entity(hass, entry, entity_id: str | None) -> bool:
+    """True when a provider is this entry's own wrapper (rename-safe).
+
+    Ownership uses registry platform/config_entry, never a hardcoded entity ID.
+    Unknown/unregistered providers return False and remain savable; entry None
+    matches any Activity Images wrapper for pre-entry config creation.
+    """
+    if not entity_id or not entity_id.startswith("ai_task."):
+        return False
+    if getattr(hass, "data", None) is None:
+        return False
+    from homeassistant.helpers import entity_registry as er
+    try:
+        entity = er.async_get(hass).async_get(entity_id)
+    except AttributeError:
+        return False
+    if entity is None:
+        return False
+    if getattr(entity, "platform", None) != DOMAIN:
+        return False
+    if entry is None:
+        return True
+    return getattr(entity, "config_entry_id", None) == entry.entry_id
+
+
+def own_provider_entity_ids(hass, entry) -> list[str]:
+    """Current wrapper entity IDs for selector/panel exclusions (additive)."""
+    if getattr(hass, "data", None) is None:
+        return []
+    from homeassistant.helpers import entity_registry as er
+    try:
+        candidates = list(er.async_get(hass).entities.values())
+    except AttributeError:
+        return []
+    return sorted(
+        entity.entity_id for entity in candidates
+        if getattr(entity, "entity_id", "").startswith("ai_task.")
+        and is_own_provider_entity(hass, entry, entity.entity_id)
+    )
+
+
 def migrate_calendar_options(hass, entry) -> None:
     """Use native options once, before any queue/scanner can authorize work."""
     values = validate_settings(effective_settings(entry))
@@ -54,7 +96,8 @@ def revision(entry) -> str:
 
 def read_settings(hass) -> dict:
     entry = get_entry(hass)
-    return {"values": effective_settings(entry), "revision": revision(entry)}
+    return {"values": effective_settings(entry), "revision": revision(entry),
+            "excluded_providers": own_provider_entity_ids(hass, entry)}
 
 
 @asynccontextmanager
@@ -77,6 +120,8 @@ def options_for_update(hass, entry, changes: dict, expected_revision: str) -> di
         raise StaleSettingsError("Settings changed elsewhere. Reload before saving")
     before = effective_settings(entry)
     after = validate_settings(changes, before)
+    if after[CONF_AI_ENTITY] and is_own_provider_entity(hass, entry, after[CONF_AI_ENTITY]):
+        raise ValueError("Activity Images cannot use itself as its image provider")
     runtime = getattr(entry, "runtime_data", None)
     if runtime is not None and after[CONF_REFERENCE_MEDIA_ID] != before[CONF_REFERENCE_MEDIA_ID]:
         runtime.deletions.validate_reference(after[CONF_REFERENCE_MEDIA_ID])

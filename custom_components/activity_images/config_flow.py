@@ -20,11 +20,11 @@ from .const import (
     DOMAIN,
 )
 from .prompts import DEFAULT_PROMPT_TEMPLATE
-from .settings import StaleSettingsError, calendar_identity, options_for_update, revision, settings_lock
+from .settings import StaleSettingsError, calendar_identity, is_own_provider_entity, options_for_update, own_provider_entity_ids, revision, settings_lock
 from .settings_schema import effective_settings, validate_settings
 
 
-def schema(settings: dict | None = None) -> vol.Schema:
+def schema(settings: dict | None = None, *, exclude_providers: tuple[str, ...] | list[str] = ()) -> vol.Schema:
     settings = settings or {}
     # A provider is optional for library-only use and calendar previews.
     # An empty EntitySelector is invalid on current Home Assistant releases.
@@ -33,6 +33,11 @@ def schema(settings: dict | None = None) -> vol.Schema:
         vol.Optional(CONF_AI_ENTITY, description={"suggested_value": provider})
         if provider else vol.Optional(CONF_AI_ENTITY)
     )
+    provider_config = selector.EntitySelectorConfig(domain="ai_task")
+    if exclude_providers:
+        provider_config = selector.EntitySelectorConfig(
+            domain="ai_task", exclude_entities=sorted(exclude_providers)
+        )
     reference = settings.get(CONF_REFERENCE_MEDIA_ID)
     if isinstance(reference, str) and reference:
         reference = {"media_content_id":reference, "media_content_type":"image"}
@@ -41,7 +46,7 @@ def schema(settings: dict | None = None) -> vol.Schema:
         if reference else vol.Optional(CONF_REFERENCE_MEDIA_ID)
     )
     return vol.Schema({
-        provider_key: selector.EntitySelector(selector.EntitySelectorConfig(domain="ai_task")),
+        provider_key: selector.EntitySelector(provider_config),
         reference_key: selector.MediaSelector(selector.MediaSelectorConfig(accept=["image/*"])),
         vol.Optional(
             CONF_LUCIDA_URL, default=settings.get(CONF_LUCIDA_URL, "")
@@ -89,6 +94,10 @@ class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             try:
                 self._pending_values = _form_settings(user_input)
+                if self._pending_values[CONF_AI_ENTITY] and is_own_provider_entity(
+                    self.hass, None, self._pending_values[CONF_AI_ENTITY]
+                ):
+                    raise ValueError("Activity Images cannot use itself as its image provider")
             except ValueError:
                 errors["base"] = "invalid_settings"
             else:
@@ -137,7 +146,8 @@ class ActivityImagesOptionsFlow(config_entries.OptionsFlow):
             except (ValueError, HomeAssistantError):
                 errors["base"] = "invalid_settings"
         return self.async_show_form(
-            step_id="init", data_schema=schema(user_input if user_input is not None else effective_settings(entry)),
+            step_id="init", data_schema=schema(user_input if user_input is not None else effective_settings(entry),
+                                             exclude_providers=own_provider_entity_ids(self.hass, entry)),
             errors=errors,
         )
 
