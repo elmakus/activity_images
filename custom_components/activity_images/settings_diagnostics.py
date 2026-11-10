@@ -14,6 +14,8 @@ from .settings_schema import effective_settings
 
 
 def diagnostics(hass, entry) -> dict:
+    from .settings import is_own_provider_entity
+
     values = effective_settings(entry)
     provider = values[CONF_AI_ENTITY]
     state = hass.states.get(provider) if provider else None
@@ -25,6 +27,8 @@ def diagnostics(hass, entry) -> dict:
     attachments_supported = bool(features & AITaskEntityFeature.SUPPORT_ATTACHMENTS)
     if not provider:
         provider_status = "not_configured"
+    elif is_own_provider_entity(hass, entry, provider):
+        provider_status = "self_reference"
     elif not provider_active or not provider_service:
         provider_status = "unavailable"
     elif not image_supported:

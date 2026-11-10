@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from .image_cache import asset_url, normalize_title
 from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
+_REVISION = re.compile(r"^[a-f0-9]{32}$")
 
 
 class ActivityImageQueue:
@@ -35,6 +37,7 @@ class ActivityImageQueue:
         self._save_generation = 0
         self._jobs: list[dict] = []
         self._manual_blocked: set[str] = set()
+        self._manual_blocks: dict[str, dict] = {}
         self._retry_blocked: set[str] = set()
         self.calendar_authorizer: Callable[[str, list[dict]], Awaitable[None]] | None = None
 
@@ -42,6 +45,29 @@ class ActivityImageQueue:
         data = await self._store.async_load() or {}
         self._manual_blocked = set(data.get("manual_blocked", []))
         self._retry_blocked = set(data.get("retry_blocked", []))
+        self._manual_blocks = {}
+        raw_blocks = data.get("manual_blocks") or {}
+        if isinstance(raw_blocks, dict):
+            for key, entry in raw_blocks.items():
+                if (not isinstance(key, str) or key not in self._manual_blocked
+                        or not isinstance(entry, dict)
+                        or entry.get("reason") not in {"active", "cancelled", "discarded", "accepted", "unknown"}
+                        or not isinstance(entry.get("revision"), str) or not _REVISION.fullmatch(entry["revision"])
+                        or type(entry.get("uncertain")) is not bool):
+                    # Malformed optional metadata falls back to legacy_unknown.
+                    continue
+                job_id = entry.get("job_id")
+                title = entry.get("title")
+                deletion_id = entry.get("deletion_operation_id")
+                self._manual_blocks[key] = {
+                    "reason": entry["reason"],
+                    "revision": entry["revision"],
+                    "job_id": job_id if isinstance(job_id, str) else None,
+                    "title": title if isinstance(title, str) and title else key,
+                    "uncertain": entry["uncertain"] or entry["reason"] == "unknown",
+                    "deletion_operation_id": deletion_id if isinstance(deletion_id, str) else None,
+                    "updated_at": entry.get("updated_at") if isinstance(entry.get("updated_at"), str) else "",
+                }
         raw = data.get("pending") or []
         self._pending = [
             title for title in raw if isinstance(title, str) and title.strip()
@@ -68,6 +94,9 @@ class ActivityImageQueue:
                 self._set_state(job, "interrupted", "Request outcome unknown — explicitly retry after checking Queue & history")
                 self._retry_blocked.add(normalize_title(job["title"]))
                 self._pending = [t for t in self._pending if normalize_title(t) != normalize_title(job["title"])]
+                if job["kind"] == "manual":
+                    self._touch_manual_block(job["title"], reason="unknown", job_id=job["id"],
+                                             deletion_operation_id=(job.get("deletion") or {}).get("operation_id"))
         for title in list(self._pending):
             job = self._background(title)
             if job is None or job.get("origin") not in {"explicit", "calendar"} or (
@@ -92,6 +121,7 @@ class ActivityImageQueue:
             "failed": deepcopy(self._failed),
             "jobs": deepcopy(self._jobs),
             "manual_blocked": sorted(self._manual_blocked),
+            "manual_blocks": deepcopy(self._manual_blocks),
             "retry_blocked": sorted(self._retry_blocked),
         }))
         cancelled = False
@@ -115,6 +145,7 @@ class ActivityImageQueue:
             generation = self._save_generation
             pending, failed, jobs, blocked = list(self._pending), dict(self._failed), list(self._jobs), set(self._manual_blocked)
             retry_blocked = set(self._retry_blocked)
+            manual_blocks = deepcopy(self._manual_blocks)
             job_values = deepcopy(jobs)
             try:
                 yield
@@ -122,10 +153,72 @@ class ActivityImageQueue:
                 if not isinstance(exc, asyncio.CancelledError) or generation == self._save_generation:
                     self._pending, self._failed, self._jobs, self._manual_blocked = pending, failed, jobs, blocked
                     self._retry_blocked = retry_blocked
+                    self._manual_blocks = manual_blocks
                     for job, values in zip(jobs, job_values, strict=True):
                         job.clear()
                         job.update(values)
                 raise
+
+    def _touch_manual_block(self, title: str, *, reason: str, job_id: str | None,
+                            deletion_operation_id: str | None = None) -> None:
+        """Record the latest manual outcome with a fresh unpredictable restore token.
+
+        A monotonic counter would restart after restore and let an old
+        confirmation authorize a new policy; a UUID token cannot recur.
+        Sticky uncertainty survives later safe work.
+        """
+        key = normalize_title(title)
+        existing = self._manual_blocks.get(key)
+        if existing is None and key in self._manual_blocked:
+            prev_uncertain = True
+        elif existing:
+            prev_uncertain = bool(existing.get("uncertain"))
+        else:
+            prev_uncertain = False
+        self._manual_blocked.add(key)
+        self._manual_blocks[key] = {
+            "reason": reason,
+            "revision": uuid4().hex,
+            "job_id": job_id,
+            "title": title,
+            "uncertain": prev_uncertain or reason == "unknown",
+            "deletion_operation_id": deletion_operation_id,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+
+    def _manual_block_info(self, key: str) -> dict | None:
+        if key not in self._manual_blocked:
+            return None
+        entry = self._manual_blocks.get(key)
+        if entry is None:
+            title = next((job["title"] for job in reversed(self._jobs)
+                            if normalize_title(job["title"]) == key), key)
+            deletion = any(normalize_title(job["title"]) == key and job.get("deletion")
+                             for job in self._jobs)
+            return {"key": key, "title": title, "reason": "legacy_unknown",
+                    "revision": None, "job_id": None, "uncertain": True,
+                    "deletion": deletion}
+        deletion = bool(entry.get("deletion_operation_id")) or any(
+            normalize_title(job["title"]) == key and job.get("deletion") for job in self._jobs)
+        return {"key": key, "title": entry.get("title") or key, "reason": entry.get("reason"),
+                "revision": entry.get("revision"), "job_id": entry.get("job_id"),
+                "uncertain": bool(entry.get("uncertain")), "deletion": deletion}
+
+    async def async_coverage_snapshot(self) -> dict:
+        """Return detached jobs and blocker sets for Coverage under the queue lock.
+
+        Call with the calendar lock held for coherent groups; the queue lock is
+        released before bounded cache lookups. Never call from the engine
+        authorizer, which runs under the generator lock.
+        """
+        async with self._lock:
+            return {
+                "jobs": deepcopy(self._jobs),
+                "failed": set(self._failed),
+                "retry_blocked": set(self._retry_blocked),
+                "manual_blocked": set(self._manual_blocked),
+                "manual_blocks": deepcopy(self._manual_blocks),
+            }
 
     @staticmethod
     def _valid_sources(sources) -> bool:
@@ -218,9 +311,12 @@ class ActivityImageQueue:
         keys = {normalize_title(value) for value in titles}
         async with self._mutation():
             original = len(self._pending)
+            cancelled_manual: dict[str, dict] = {}
             for job in self._jobs:
                 if job["state"] == "pending" and normalize_title(job["title"]) in keys:
                     self._set_state(job, "cancelled")
+                    if job["kind"] == "manual":
+                        cancelled_manual[normalize_title(job["title"])] = job
             self._pending = [
                 t for t in self._pending
                 if normalize_title(t) not in keys or t == self._current
@@ -231,6 +327,10 @@ class ActivityImageQueue:
                 for key in keys:
                     if self._current is None or normalize_title(self._current) != key:
                         self._failed.pop(key, None)
+                for key, job in cancelled_manual.items():
+                    if self._current is None or normalize_title(self._current) != key:
+                        self._touch_manual_block(job["title"], reason="cancelled", job_id=job["id"],
+                                                 deletion_operation_id=(job.get("deletion") or {}).get("operation_id"))
                 await self._save()
         return removed
 
@@ -260,6 +360,10 @@ class ActivityImageQueue:
                 next((job["title"] for job in reversed(self._jobs) if normalize_title(job["title"]) == key), key)
                 for key in self._retry_blocked
             }),
+            "manual_blocks": sorted(
+                (info for key in self._manual_blocked if (info := self._manual_block_info(key))),
+                key=lambda item: (item["title"].casefold(), item["title"]),
+            ),
         }
 
     def _manual(self, title: str) -> dict | None:
@@ -317,7 +421,8 @@ class ActivityImageQueue:
             job = self._new_job(title, "manual")
             if deletion:
                 job.update(id=job_id, deletion=deepcopy(deletion))
-            self._manual_blocked.add(normalize_title(title))
+            self._touch_manual_block(title, reason="active", job_id=job["id"],
+                                       deletion_operation_id=(deletion or {}).get("operation_id"))
             self._jobs.append(job)
             self._pending.append(title)
             await self._save()
@@ -346,6 +451,7 @@ class ActivityImageQueue:
                 await self.engine.cache.async_link(job["title"], job["result_url"], replace=True,
                                                    expected=job["original_url"], compare=True)
             self._set_state(job, "accepted")
+            self._touch_manual_block(job["title"], reason="accepted", job_id=job["id"])
             self._trim_history()
             try:
                 await self._save()
@@ -368,6 +474,7 @@ class ActivityImageQueue:
             if job["state"] != "review":
                 raise ValueError("Only a review candidate can be discarded")
             self._set_state(job, "discarded")
+            self._touch_manual_block(job["title"], reason="discarded", job_id=job["id"])
             await self._save()
             self._trim_history()
             return self._public_job(job)
@@ -399,6 +506,46 @@ class ActivityImageQueue:
         if accepted:
             self._kick()
         return {"queued": accepted}
+
+    async def async_restore_auto(self, title: str, revision: str, confirm: bool) -> dict:
+        """Remove one explained safe manual block; never enqueues, refreshes or calls AI."""
+        from .library import validate_title
+        title = validate_title(title)
+        if confirm is not True:
+            raise ValueError("Restoring automatic generation requires confirmation")
+        if not isinstance(revision, str) or not _REVISION.fullmatch(revision):
+            raise ValueError("Invalid manual block revision")
+        key = normalize_title(title)
+        async with self._mutation():
+            if key not in self._manual_blocked:
+                raise ValueError("No manual automatic-generation block for this title")
+            info = self._manual_block_info(key)
+            if info is None:
+                raise ValueError("No manual automatic-generation block for this title")
+            # Uncertainty is sticky and unrestorable, independent of token freshness;
+            # legacy blocks carry no token at all.
+            if info["uncertain"] or info["reason"] in {"unknown", "legacy_unknown"}:
+                raise ValueError("Automatic generation remains blocked: a previous manual request has an unknown outcome. Use explicit Generate new image or Retry.")
+            if revision != info["revision"]:
+                raise ValueError("Manual block changed elsewhere (revision conflict); refresh before restoring")
+            if info["deletion"]:
+                raise ValueError("Deletion operation owns recovery for this title; use the deletion Queue & history actions")
+            if self.engine.cache.reserved(title):
+                raise ValueError("Title is reserved for permanent deletion")
+            active = any(normalize_title(job["title"]) == key and job["state"] in {"pending", "running", "review"}
+                           for job in self._jobs)
+            active = active or any(normalize_title(value) == key for value in self._pending)
+            active = active or (self._current is not None and normalize_title(self._current) == key)
+            if active or info["reason"] == "active":
+                raise ValueError("An outstanding manual job exists for this title; resolve it in Queue & history before restoring")
+            if key in self._failed or key in self._retry_blocked:
+                raise ValueError("A recorded failure barrier exists for this title; use explicit Retry before restoring")
+            if info["reason"] not in {"cancelled", "discarded", "accepted"}:
+                raise ValueError("Only a cancelled, discarded or accepted manual block can be restored")
+            self._manual_blocked.discard(key)
+            self._manual_blocks.pop(key, None)
+            await self._save()
+            return {"title": info["title"], "key": key, "restored": True}
 
     def _kick(self) -> None:
         if self._closed or not self._pending:
@@ -484,6 +631,9 @@ class ActivityImageQueue:
                         self._failed[normalize_title(title)] = error
                     if state == "interrupted":
                         self._retry_blocked.add(normalize_title(title))
+                    if job["kind"] == "manual" and state in {"failed", "interrupted"}:
+                        self._touch_manual_block(job["title"], reason="unknown", job_id=job["id"],
+                                                 deletion_operation_id=(job.get("deletion") or {}).get("operation_id"))
                     if self._pending and self._pending[0] == title:
                         self._pending.pop(0)
                     if state not in {"failed", "interrupted"}:

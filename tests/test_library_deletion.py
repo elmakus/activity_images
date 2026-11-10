@@ -699,6 +699,10 @@ def live_demand(deletions, titles):
     calendar.calendars = ("calendar.test",)
     deletions.queue.engine.settings["calendar_entity_ids"] = list(calendar.calendars)
     scans = []
+    # Same readiness interface as the real adapter: fail-closed when unusable.
+    calendar._demand_truncated = False
+    calendar.coverage_stale = lambda: bool(calendar.last_error) or not calendar.last_scan
+    calendar.status = lambda: {"complete": not calendar.coverage_stale()}
     async def refresh():
         assert not calendar._lock.locked()
         async with calendar._lock:
@@ -1079,3 +1083,85 @@ async def test_abandon_rejects_outstanding_managed_work(ha, configured, monkeypa
     assert (await deletions.async_abandon(operation["id"], True))["state"] == "abandoned"
     deletions.queue._kick()
     assert not deletions.queue._pending and not ha.services.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["unavailable", "identity", "expired"])
+async def test_demand_error_covers_newly_stale_authority_after_refresh(ha, configured, monkeypatch, change):
+    from datetime import UTC, datetime, timedelta
+
+    events = {"calendar.school": {"events": [{"summary": "Still needed"}]}}
+    adapter, queue, _ = behavior._calendar_test_setup(ha, configured, monkeypatch, events, enabled=False)
+    await adapter.async_refresh()
+    assert adapter.status()["complete"] is True
+    deletions = ActivityImageDeletions(ha, ActivityImageLibrary(ha, configured[0]), queue, adapter)
+    assert deletions._demand_error() is None
+    if change == "unavailable":
+        ha._states["calendar.school"].state = "unavailable"
+    elif change == "identity":
+        ha.registry["calendar.school"].id = "unrelated-replacement"
+    else:
+        adapter.last_scan = (datetime.now(UTC) - timedelta(minutes=17)).isoformat()
+    assert adapter.coverage_stale() is True
+    assert deletions._demand_error() is not None  # Previously None for these races.
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_plan_rechecks_unavailable_after_inventory_wait(ha, configured, monkeypatch):
+    events = {"calendar.school": {"events": [{"summary": "Wait consumer"}]}}
+    adapter, queue, _ = behavior._calendar_test_setup(ha, configured, monkeypatch, events, enabled=False)
+    await adapter.async_refresh()
+    picture(ha, "old.png")
+    await configured[0].async_remember("Wait consumer", "/local/activity_images/old.png")
+    deletions = ActivityImageDeletions(ha, ActivityImageLibrary(ha, configured[0]), queue, adapter)
+    native = deletions.library.async_inventory
+
+    async def raced(*args, **kwargs):
+        result = await native(*args, **kwargs)
+        ha._states["calendar.school"].state = "unavailable"
+        return result
+
+    monkeypatch.setattr(deletions.library, "async_inventory", raced)
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert plan["items"][0]["blocked_reason"]
+    assert "stale" in plan["items"][0]["blocked_reason"] or "verified" in plan["items"][0]["blocked_reason"]
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(plan["token"], True, True)
+    assert not ha.services.calls
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_display_absence_never_means_no_consumers_for_deletion(ha, configured, monkeypatch):
+    events = {
+        "calendar.school": {"events": [{"summary": "Shared consumer"}]},
+        "calendar.work": {"events": [{"summary": "Shared consumer"}]},
+    }
+    adapter, queue, _ = behavior._calendar_test_setup(
+        ha, configured, monkeypatch, events, enabled=False,
+        calendars=("calendar.school", "calendar.work"),
+    )
+    await adapter.async_refresh()
+    picture(ha, "old.png")
+    await configured[0].async_remember("Shared consumer", "/local/activity_images/old.png")
+
+    async def partial_empty(call):
+        requested = call.data.get("entity_id", [])
+        if isinstance(requested, str):
+            requested = [requested]
+        if "calendar.work" in requested:
+            raise RuntimeError("work down")
+        return {"calendar.school": {"events": []}}  # Healthy display drops the consumer.
+
+    ha.services.async_register("calendar", "get_events", partial_empty)
+    await adapter.async_refresh()
+    assert adapter.display_titles_map()["calendar.school"] == []
+    assert adapter.calendar_titles["calendar.school"] == ["Shared consumer"]  # Authority retains.
+    deletions = ActivityImageDeletions(ha, ActivityImageLibrary(ha, configured[0]), queue, adapter)
+    plan = await deletions.async_plan([deletions.library.image_id("old.png")])
+    assert plan["items"][0]["blocked_reason"]  # Stale authority blocks; display absence is not safety.
+    with pytest.raises(MappingConflict):
+        await deletions.async_delete(plan["token"], False, True)
+    assert not ha.services.calls
+    await adapter.async_shutdown()

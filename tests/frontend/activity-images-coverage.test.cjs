@@ -464,3 +464,47 @@ test("Scan calendar count handles the contracted array shape", async (t) => {
   }));
   assert.match(element.shadowRoot.textContent, /2 calendars/);
 });
+
+test("Stale per-calendar rows stay visible with freshness distinct from eligibility", async (t) => {
+  const stale = item({raw_summary: "Old", title: "Old", eligible_for_auto: false,
+    calendars: [{entity_id: "calendar.a", name: "Family", count: 1, available: false, auto_generate: false, stale: true}]});
+  const fresh = item({raw_summary: "New", title: "New", eligible_for_auto: false,
+    calendars: [{entity_id: "calendar.b", name: "Spouse", count: 1, available: true, auto_generate: true, stale: false}]});
+  const {element} = await coverageFixture(t, () => coverage([stale, fresh], {
+    scan: {calendars: 2, tracked_titles: 2, images: 0, last_scan: null, error: "work down", automatic_generation: true, complete: false, stale: true},
+  }));
+  const text = element.shadowRoot.textContent;
+  assert.match(text, /Old/);
+  assert.match(text, /Stale — showing last known events/);
+  assert.match(text, /Coverage incomplete/);
+  assert.doesNotMatch(cards(element)[1].textContent, /Stale/);
+});
+
+test("Manual blocks render explained reasons with Queue path and never mutate on view", async (t) => {
+  // Payloads as the backend emits them for post-trim survivors.
+  const blocked = (reason, uncertain, revision = "a".repeat(32)) => item({raw_summary: reason, title: reason,
+    eligible_for_auto: false, manual_block: {reason, revision, uncertain}});
+  const {element, requests, commands} = await coverageFixture(t, () => coverage([
+    item({raw_summary: "Legacy", title: "Legacy", eligible_for_auto: false,
+      manual_block: {reason: "legacy_unknown", revision: null, uncertain: true}}),
+    blocked("unknown", true),
+    blocked("cancelled", false),
+    blocked("active", false),
+  ]));
+  assert.equal(cards(element).filter((card) => card.textContent.includes("Manual block")).length, 4);
+  assert.match(element.shadowRoot.textContent, /legacy manual history/);
+  assert.match(element.shadowRoot.textContent, /unknown outcome/);
+  assert.match(element.shadowRoot.textContent, /blocked after cancellation/);
+  assert.match(element.shadowRoot.textContent, /outstanding manual work/);
+  assert.match(element.shadowRoot.textContent, /normalized title/);
+  assert.match(element.shadowRoot.textContent, /Queue & history/);
+  assert.ok(requests.length > 0 && requests.every((r) => r.type.endsWith("/coverage")));
+  assert.equal(commands("generate").length, 0);
+  assert.equal(commands("ignore").length, 0);
+});
+
+test("Items without a manual block show no badge or restore hint", async (t) => {
+  const {element} = await coverageFixture(t, () => coverage([missing()]));
+  assert.doesNotMatch(cards(element)[0].textContent, /Manual block/);
+  assert.doesNotMatch(cards(element)[0].textContent, /normalized title/);
+});

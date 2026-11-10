@@ -21,6 +21,17 @@ if "homeassistant" not in sys.modules:
 exc = sys.modules.setdefault("homeassistant.exceptions", types.ModuleType("homeassistant.exceptions"))
 if not hasattr(exc, "HomeAssistantError"):
     exc.__dict__["HomeAssistantError"] = type("HomeAssistantError", (Exception,), {})
+# Faithful empty entity registry for ownership checks; the shared fake suite
+# provides the same mock when the full session already stubbed this module.
+sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
+er = sys.modules.setdefault("homeassistant.helpers.entity_registry", types.ModuleType("homeassistant.helpers.entity_registry"))
+if not hasattr(er, "async_get"):
+    er.__dict__["async_get"] = lambda hass: types.SimpleNamespace(entities=hass.registry, async_get=hass.registry.get)
+if not hasattr(er, "async_entries_for_config_entry"):
+    er.__dict__["async_entries_for_config_entry"] = (
+        lambda registry, config_entry_id: [entry for entry in registry.entities.values()
+                                            if entry.config_entry_id == config_entry_id]
+    )
 
 api = importlib.import_module("custom_components.activity_images.settings")
 const = importlib.import_module("custom_components.activity_images.const")
@@ -42,7 +53,7 @@ class Entries:
 
 @pytest.mark.asyncio
 async def test_read_noop_update_and_real_update():
-    hass = types.SimpleNamespace(config_entries=Entries())
+    hass = types.SimpleNamespace(config_entries=Entries(), registry={})
     start = api.read_settings(hass)
     assert start["values"][const.CONF_AI_ENTITY] == "ai_task.mock"
     result = await api.save_settings(hass, {}, start["revision"])
@@ -58,7 +69,7 @@ async def test_read_noop_update_and_real_update():
 
 @pytest.mark.asyncio
 async def test_stale_editor_and_invalid_changes_do_not_persist():
-    hass = types.SimpleNamespace(config_entries=Entries())
+    hass = types.SimpleNamespace(config_entries=Entries(), registry={})
     original = api.read_settings(hass)["revision"]
     await api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 14}, original)
     with pytest.raises(api.StaleSettingsError):
@@ -69,7 +80,7 @@ async def test_stale_editor_and_invalid_changes_do_not_persist():
 
 
 def test_no_config_entry_rejects_request():
-    hass = types.SimpleNamespace(config_entries=types.SimpleNamespace(async_entries=lambda _: []))
+    hass = types.SimpleNamespace(config_entries=types.SimpleNamespace(async_entries=lambda _: []), registry={})
     with pytest.raises(api.HomeAssistantError):
         api.read_settings(hass)
 
@@ -82,7 +93,7 @@ async def test_saving_waits_for_calendar_boundary_without_stopping_generation():
         calendar=types.SimpleNamespace(_lock=asyncio.Lock(), _closed=False),
     )
     entries.entry.options = {"unrelated": "retained"}
-    hass = types.SimpleNamespace(config_entries=entries)
+    hass = types.SimpleNamespace(config_entries=entries, registry={})
     revision = api.read_settings(hass)["revision"]
     async with entries.entry.runtime_data.calendar._lock:
         pending = asyncio.create_task(api.save_settings(hass, {const.CONF_LOOKAHEAD_DAYS: 5}, revision))
@@ -96,7 +107,7 @@ async def test_saving_waits_for_calendar_boundary_without_stopping_generation():
 
 @pytest.mark.asyncio
 async def test_revision_rejects_a_recreated_entry_with_identical_settings():
-    hass = types.SimpleNamespace(config_entries=Entries())
+    hass = types.SimpleNamespace(config_entries=Entries(), registry={})
     revision = api.read_settings(hass)["revision"]
     hass.config_entries.entry.entry_id = "replacement"
     with pytest.raises(api.StaleSettingsError):

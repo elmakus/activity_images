@@ -1,12 +1,13 @@
 import {element, field} from "./controls.mjs";
 import {renderCalendars} from "./calendars-view.mjs";
 
-export function renderGeneral(root, values, update, hass, hooks) {
+export function renderGeneral(root, values, update, hass, hooks, excludedProviders = []) {
   root.replaceChildren(element("h2", "General"));
   const provider = field("AI Task provider", values.ai_task_entity_id, (v) => update("ai_task_entity_id", v), {placeholder: "ai_task.provider"});
   const choices = element("datalist");
   choices.id = "activity-images-providers";
-  Object.keys(hass?.states || {}).filter((name) => name.startsWith("ai_task.")).sort().forEach((name) => {
+  const excluded = new Set(Array.isArray(excludedProviders) ? excludedProviders : []);
+  Object.keys(hass?.states || {}).filter((name) => name.startsWith("ai_task.") && !excluded.has(name)).sort().forEach((name) => {
     const option = element("option");
     option.value = name;
     choices.append(option);

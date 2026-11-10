@@ -378,7 +378,7 @@ class ActivityImageCache:
 
         best_key: str | None = None
         best_score = DEFAULT_SIMILARITY_THRESHOLD
-        for candidate_key in candidate_keys:
+        for candidate_key in sorted(candidate_keys):
             candidate_tokens = set(
                 self._entries[candidate_key].get("tokens")
                 or _title_tokens(candidate_key)

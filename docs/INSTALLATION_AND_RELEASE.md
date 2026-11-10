@@ -1,9 +1,9 @@
 # Installation, updates and recovery
 
-Version **0.5.0** is the stable Calendar Coverage release. See the
-[release notes](RELEASE_NOTES_v0.5.0.md), [Calendar Coverage guide](CALENDAR_COVERAGE.md) and [isolated validation](CALENDAR_COVERAGE_VALIDATION.md) for changes and known limits.
+Version **0.6.0** is the stable review-hardening release. See the
+[release notes](RELEASE_NOTES_v0.6.0.md), [Calendar Coverage guide](CALENDAR_COVERAGE.md) and [isolated validation](REVIEW_IMPROVEMENTS_VALIDATION.md) for changes and known limits.
 Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before installing.
-Versions 0.2.0–0.4.0 described below are historical; updating from 0.4.0 to 0.5.0 changes runtime code and needs the normal installer restart.
+Versions 0.2.0–0.5.0 described below are historical; updating from 0.5.0 to 0.6.0 changes runtime code and needs the normal installer restart.
 Historical `STAGE*` reports describe earlier migration and validation work;
 they are not current installation instructions.
 

@@ -28,6 +28,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE, __version__  # 
 from homeassistant.core import CoreState, HomeAssistant  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from homeassistant.helpers import device_registry as dr  # noqa: E402
+from homeassistant.helpers import entity_registry as er  # noqa: E402
 from homeassistant.helpers import storage as ha_storage  # noqa: E402
 from homeassistant.helpers.data_entry_flow import _BaseFlowManagerView  # noqa: E402
 from homeassistant.helpers.storage import Store  # noqa: E402
@@ -303,7 +304,9 @@ async def run():
         async def no_unload(*args):
             return True
         hass.config_entries = SimpleNamespace(async_forward_entry_setups=no_forward,
-                                              async_unload_platforms=no_unload)
+                                              async_unload_platforms=no_unload,
+                                              async_wait_initialized=lambda: asyncio.sleep(0))
+        await er.async_load(hass)
         admin = await hass.auth.async_create_user("Smoke Admin", group_ids=[GROUP_ID_ADMIN])
         regular = await hass.auth.async_create_user("Smoke User", group_ids=[GROUP_ID_USER])
         async def token(user):
@@ -347,7 +350,7 @@ async def run():
             "activity_images/settings/diagnostics",
         }
         library_commands = {k for k in hass.data["websocket_api"] if k.startswith("activity_images/library/")}
-        assert len(library_commands) == 17
+        assert len(library_commands) == 18
         resources_before = tuple(hass.http.app.router.resources())
         handlers_before = {k: hass.data["websocket_api"][k][0] for k in library_commands}
         # A real aiohttp test server runs HA's actual bearer authentication middleware,
@@ -383,6 +386,7 @@ async def run():
                 "unlink": {"image_id": "x", "title": "Test"}, "generate": {"title": "Test"},
                 "jobs": {}, "accept": {"job_id": "x"}, "discard": {"job_id": "x"},
                 "cancel": {"titles": ["Test"]}, "retry": {"title": "Test"}, "clear_errors": {},
+                "restore_auto": {"title": "Test", "revision": "0" * 32, "confirm": True},
                 "delete_plan": {"image_ids": ["a" * 32]}, "delete": {"token": "x", "regenerate": False, "confirm": True},
                 "deletions": {}, "delete_retry_plan": {"operation_id": "x"},
                 "delete_retry": {"operation_id": "x", "token": "x", "confirm": True},

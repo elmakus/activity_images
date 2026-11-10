@@ -85,7 +85,14 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
         provider = self._entry.options.get(
             CONF_AI_ENTITY, self._entry.data.get(CONF_AI_ENTITY)
         )
-        return bool(provider) and provider != self.entity_id
+        if not provider or provider == self.entity_id:
+            return False
+        if getattr(self, "hass", None) is None:
+            # Not yet added to Home Assistant; no registry to consult.
+            return True
+        from .settings import is_own_provider_entity
+
+        return not is_own_provider_entity(self.hass, self._entry, provider)
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -107,7 +114,9 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
             raise HomeAssistantError(
                 "Configure a real AI Task image provider in Activity Images"
             )
-        if provider == self.entity_id:
+        from .settings import is_own_provider_entity
+
+        if is_own_provider_entity(self.hass, self._entry, provider) or provider == self.entity_id:
             raise HomeAssistantError(
                 "Activity Images cannot use itself as its image provider"
             )

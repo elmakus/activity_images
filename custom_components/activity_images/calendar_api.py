@@ -1,7 +1,6 @@
 """Admin-only calendar discovery and read-only Coverage over existing runtime data."""
 from __future__ import annotations
 
-from copy import deepcopy
 from urllib.parse import quote, unquote
 
 import probatio as p
@@ -83,16 +82,18 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
         by_entity = {entity["entity_id"]: entity for entity in entities}
         selected = set(adapter.settings.get(CONF_CALENDARS) or ())
         groups = {raw: [] for raw in adapter.ignored_titles}
-        for entity, events in adapter.raw_occurrences.items():
+        # Display projection only; authority stays in automatic_sources().
+        for entity, events in adapter.display_occurrences_map().items():
             if entity in selected:
                 for event in events:
                     groups.setdefault(event["raw_summary"], []).append({
                         "calendar_entity_id": entity, "start": event.get("start"), "end": event.get("end"),
                     })
-        async with queue._lock:
-            jobs = deepcopy(queue._jobs)
-            failures = set(queue._failed) | set(queue._retry_blocked)
-            blocked = failures | set(queue._manual_blocked)
+        snapshot = await queue.async_coverage_snapshot()
+        jobs = snapshot["jobs"]
+        failures = snapshot["failed"] | snapshot["retry_blocked"]
+        blocked = failures | snapshot["manual_blocked"]
+        manual_blocks = snapshot["manual_blocks"]
         scan = adapter.status()
         automatic = adapter.automatic_sources()
         inventory_titles = library._titles(cache.entries())
@@ -115,11 +116,19 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
             job = next((job for job in reversed(jobs) if normalize_title(job["title"]) == key), None)
             job_status = {"pending": "queued", "running": "running", "review": "review",
                           "failed": "failed", "interrupted": "failed"}.get(job["state"]) if job else "failed" if key in failures else None
+            manual_block = None
+            if key in blocked and key in snapshot["manual_blocked"]:
+                entry = manual_blocks.get(key)
+                if entry is None:
+                    manual_block = {"reason": "legacy_unknown", "revision": None, "uncertain": True}
+                else:
+                    manual_block = {"reason": entry.get("reason"), "revision": entry.get("revision"),
+                                    "uncertain": bool(entry.get("uncertain"))}
             sources = []
             for entity in sorted({event["calendar_entity_id"] for event in occurrences}):
                 info = by_entity[entity]
                 sources.append({"entity_id": entity, "name": info["name"], "available": info["available"],
-                                "auto_generate": info["auto_generate"],
+                                "auto_generate": info["auto_generate"], "stale": adapter.display_stale(entity),
                                 "count": sum(event["calendar_entity_id"] == entity for event in occurrences)})
             items.append({"raw_summary": raw, "title": title, "ignored": raw in adapter.ignored_titles,
                           "scheduled": bool(occurrences), "occurrence_count": len(occurrences),
@@ -127,6 +136,7 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
                           "image_status": image_status, "resolution": resolution, "image": image,
                           "job_status": job_status, "job_id": job["id"] if job else None,
                           "job_error": job.get("error") if job else None,
+                          "manual_block": manual_block,
                           "eligible_for_auto": image_status == "missing" and key not in blocked
                           and any(source["raw_summary"] == raw for source in automatic)})
         revision = adapter.ignore_revision
