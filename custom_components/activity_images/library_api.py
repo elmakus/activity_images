@@ -42,6 +42,7 @@ _SCHEMAS = {
     "cancel": {p.Required("titles"): p.All([_TITLE], p.Length(min=1, max=64))},
     "retry": {p.Optional("job_id"): _ID, p.Optional("title"): _TITLE},
     "clear_errors": {},
+    "restore_auto": {p.Required("title"): _TITLE, p.Required("revision"): p.All(int, p.Range(min=0)), p.Required("confirm"): True},
     "delete_plan": {p.Required("image_ids"): p.All([_ID], p.Length(min=1, max=64))},
     "delete": {p.Required("token"): _ID, p.Required("regenerate"): bool, p.Required("confirm"): True},
     "deletions": {},
@@ -123,6 +124,8 @@ async def _dispatch(hass, command: str, args: dict):
         return await queue.async_retry(**args)
     if command == "clear_errors":
         return {"cleared": await queue.async_clear_errors(preserve_retry_blocks=True)}
+    if command == "restore_auto":
+        return await queue.async_restore_auto(args["title"], args["revision"], args["confirm"])
     raise ValueError("Unknown command")
 
 

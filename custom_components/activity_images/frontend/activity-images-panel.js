@@ -521,7 +521,7 @@
       this._dialog.setAttribute("aria-busy", String(this._busy));
     }
     async _mutate(command, data, done) {
-      if (this._busy || (["generate", "retry", "delete", "delete_retry", "delete_abandon"].includes(command) && this._uncertain)) return;
+      if (this._busy || (["generate", "retry", "restore_auto", "delete", "delete_retry", "delete_abandon"].includes(command) && this._uncertain)) return;
       const lifecycle = this._lifecycle;
       this._busy = true;
       this._dialogError.textContent = "";
@@ -861,7 +861,23 @@
         card.append(content);
         this._queue.append(card);
       }
-      if (!jobs.length && !(this._jobs.operations || []).length && !this._jobs.current && !this._jobs.pending.length && !Object.keys(this._jobs.failed).length && !(this._jobs.retry_blocked || []).length) this._queue.append(el("p", "No queued jobs or recorded history."));
+      for (const block of this._jobs.manual_blocks || []) {
+        const card = el("article", undefined, "job");
+        const info = el("div", undefined, "job-info");
+        info.append(el("h3", block.title), el("p", `Automatic generation block · ${block.reason}`));
+        if (block.deletion) info.append(el("p", "Deletion operation owns recovery for this title. Use the deletion actions in Queue & history.", "error"));
+        else if (block.reason === "legacy_unknown") info.append(el("p", "Automatic generation remains blocked: legacy manual history without reliable details. Use Generate new image or Retry for explicit requests. This does not prevent manual generation.", "error"));
+        else if (block.uncertain || block.reason === "unknown") info.append(el("p", "Automatic generation remains blocked: a previous manual request has an unknown outcome. Use Generate new image or Retry for explicit requests. This does not prevent manual generation.", "error"));
+        else if (block.reason === "active") info.append(el("p", "Automatic generation blocked: outstanding manual work. Resolve it in Queue & history before restoring.", "muted"));
+        else {
+          const detail = { cancelled: "after cancellation", discarded: "after discarding the candidate", accepted: "after acceptance" }[block.reason] || `after ${block.reason}`;
+          info.append(el("p", `Automatic generation blocked ${detail}. Restoring may authorize future paid requests.`, "muted"));
+          info.append(button("Restore automatic generation…", () => this._restoreDialog(block)));
+        }
+        card.append(info);
+        this._queue.append(card);
+      }
+      if (!jobs.length && !(this._jobs.operations || []).length && !this._jobs.current && !this._jobs.pending.length && !Object.keys(this._jobs.failed).length && !(this._jobs.retry_blocked || []).length && !(this._jobs.manual_blocks || []).length) this._queue.append(el("p", "No queued jobs or recorded history."));
     }
     _legacyJob(title, state, error) {
       const card = el("article", undefined, "job");
@@ -888,6 +904,21 @@
         if (!check.checked) { this._dialogError.textContent = "Confirm the paid request first."; return; }
         this._mutate("retry", data, () => this._dialog.close());
       }));
+    }
+    _restoreDialog(block) {
+      this._modal("Restore automatic generation?");
+      this._dialog.append(el("p", `Allow future automatic scans to consider “${block.title}” again? This affects all titles with the same normalized form, including case, whitespace and punctuation variants.`));
+      this._dialog.append(el("p", "This sends no AI request now and does not start a scan or enqueue work. The next genuinely authorized automatic scan may send paid AI requests for missing images."));
+      const label = el("label", undefined, "check");
+      const check = el("input");
+      check.type = "checkbox";
+      label.append(check, el("span", "I understand future automatic scans may send paid AI requests for all normalized variants of this title."));
+      this._dialog.append(label);
+      this._actions(this._paidButton("Restore automatic generation", () => {
+        if (!check.checked) { this._dialogError.textContent = "Confirm future paid automatic requests first."; return; }
+        this._mutate("restore_auto", { title: block.title, revision: block.revision, confirm: true }, () => this._dialog.close());
+      }));
+      if (this._uncertain) this._dialogError.textContent = "Refresh job status before another paid request.";
     }
     async _review(job) {
       const version = this._modal(`Review candidate: ${job.title}`);
