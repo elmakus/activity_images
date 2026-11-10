@@ -82,7 +82,8 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
         by_entity = {entity["entity_id"]: entity for entity in entities}
         selected = set(adapter.settings.get(CONF_CALENDARS) or ())
         groups = {raw: [] for raw in adapter.ignored_titles}
-        for entity, events in adapter.raw_occurrences.items():
+        # Display projection only; authority stays in automatic_sources().
+        for entity, events in adapter.display_occurrences_map().items():
             if entity in selected:
                 for event in events:
                     groups.setdefault(event["raw_summary"], []).append({
@@ -127,7 +128,7 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
             for entity in sorted({event["calendar_entity_id"] for event in occurrences}):
                 info = by_entity[entity]
                 sources.append({"entity_id": entity, "name": info["name"], "available": info["available"],
-                                "auto_generate": info["auto_generate"],
+                                "auto_generate": info["auto_generate"], "stale": adapter.display_stale(entity),
                                 "count": sum(event["calendar_entity_id"] == entity for event in occurrences)})
             items.append({"raw_summary": raw, "title": title, "ignored": raw in adapter.ignored_titles,
                           "scheduled": bool(occurrences), "occurrence_count": len(occurrences),

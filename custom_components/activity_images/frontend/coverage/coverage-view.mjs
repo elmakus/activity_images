@@ -262,7 +262,7 @@ export class ActivityImagesCoverage extends HTMLElement {
       card.append(meta);
       if (Array.isArray(item.calendars) && item.calendars.length) {
         const lines = item.calendars.map((entry) =>
-          `${entry.name || entry.entity_id} · ${entry.count} occurrence${entry.count === 1 ? "" : "s"}${entry.available ? "" : " · Calendar unavailable"}${entry.auto_generate ? " · auto" : ""}`);
+          `${entry.name || entry.entity_id} · ${entry.count} occurrence${entry.count === 1 ? "" : "s"}${entry.available ? "" : " · Calendar unavailable"}${entry.stale ? " · Stale — showing last known events" : ""}${entry.auto_generate ? " · auto" : ""}`);
         card.append(element("p", "Calendars: " + lines.join("; "), "muted"));
       }
       if (item.eligible_for_auto) {

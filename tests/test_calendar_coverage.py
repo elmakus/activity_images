@@ -512,3 +512,244 @@ async def test_raw_ignored_sibling_cannot_authorize_but_unignored_normalized_sib
     assert "Shared title" in adapter.ignored_titles
     assert ("Shared title " in adapter.ignored_titles) is ignore_both
     await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_mixed_failure_keeps_healthy_display_and_blocks_all_authorization(ha, configured, monkeypatch):
+    from test_library import picture
+
+    from custom_components.activity_images.calendar_api import coverage
+    from custom_components.activity_images.library import ActivityImageLibrary
+
+    events = {
+        "calendar.school": {"events": [{"summary": "School Party"}, {"summary": "Shared Title"}]},
+        "calendar.work": {"events": [{"summary": "Work Meeting"}, {"summary": "Shared Title "}]},
+    }
+    adapter, queue, _ = behavior._calendar_test_setup(
+        ha, configured, monkeypatch, events, enabled=True,
+        calendars=("calendar.school", "calendar.work"),
+    )
+    picture(ha, "shared.png")
+    await configured[0].async_remember("Shared Title", "/local/activity_images/shared.png")
+    await adapter.async_refresh()
+    assert adapter.status()["complete"] is True
+    assert queue._pending
+    pending_before = list(queue._pending)
+    canonical_titles = deepcopy(adapter.calendar_titles)
+    canonical_raw = deepcopy(adapter.raw_occurrences)
+
+    async def mixed(call):
+        requested = call.data.get("entity_id", [])
+        if isinstance(requested, str):
+            requested = [requested]
+        if "calendar.work" in requested:
+            raise RuntimeError("work provider down")
+        return {"calendar.school": {"events": [{"summary": "Shared Title"}]}}  # Healthy removal.
+
+    ha.services.async_register("calendar", "get_events", mixed)
+    result = await adapter.async_refresh()
+    assert result["complete"] is False and result["stale"] is True
+    assert "work provider down" in (result["error"] or "")
+    assert adapter.calendar_titles == canonical_titles  # Authority unchanged.
+    assert adapter.raw_occurrences == canonical_raw
+    assert adapter.automatic_sources() == []
+    assert queue._pending == pending_before and not ha.services.calls  # No partial paid work.
+    display = adapter.display_titles_map()
+    assert display["calendar.school"] == ["Shared Title"]  # Healthy removal disappears.
+    assert display["calendar.work"] == canonical_titles["calendar.work"]  # Failed retains.
+    assert adapter.display_stale("calendar.school") is False
+    assert adapter.display_stale("calendar.work") is True
+    rules = {rule["entity"]: rule for rule in adapter.rules if rule.get("label_type") == "image"}
+    assert "calendar.school" in rules and "calendar.work" in rules  # Healthy fresh + failed retained.
+    runtime = SimpleNamespace(calendar=adapter, queue=queue, cache=configured[0],
+                              library=ActivityImageLibrary(ha, configured[0]))
+    body = await coverage(runtime)
+    assert body["scan"]["complete"] is False
+    assert "School Party" not in {item["raw_summary"] for item in body["items"]}
+    assert {"Shared Title", "Shared Title "} <= {item["raw_summary"] for item in body["items"]}
+    for item in body["items"]:
+        assert item["eligible_for_auto"] is False  # Freshness distinct from eligibility.
+        for source in item["calendars"]:
+            if source["entity_id"] == "calendar.school":
+                assert source["stale"] is False
+            if source["entity_id"] == "calendar.work":
+                assert source["stale"] is True
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_valid_empty_clears_healthy_while_malformed_retains_stale(ha, configured, monkeypatch):
+    events = {
+        "calendar.school": {"events": [{"summary": "Old school"}]},
+        "calendar.work": {"events": [{"summary": "Old work"}]},
+    }
+    adapter, queue, _ = behavior._calendar_test_setup(
+        ha, configured, monkeypatch, events, enabled=True,
+        calendars=("calendar.school", "calendar.work"),
+    )
+    await adapter.async_refresh()
+    assert adapter.status()["complete"] is True
+    pending_before = list(queue._pending)
+
+    async def empty_vs_malformed(call):
+        requested = call.data.get("entity_id", [])
+        if isinstance(requested, str):
+            requested = [requested]
+        if "calendar.school" in requested:
+            return {"calendar.school": {"events": []}}  # Valid empty clears.
+        return {"calendar.work": {"events": "not a list"}}  # Malformed retains.
+
+    ha.services.async_register("calendar", "get_events", empty_vs_malformed)
+    result = await adapter.async_refresh()
+    assert result["complete"] is False
+    assert adapter.display_titles_map()["calendar.school"] == []
+    assert adapter.display_titles_map()["calendar.work"] == ["Old work"]
+    assert adapter.display_stale("calendar.school") is False
+    assert adapter.display_stale("calendar.work") is True
+    assert adapter.automatic_sources() == [] and queue._pending == pending_before
+    assert not ha.services.calls
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_per_calendar_timeout_updates_healthy_and_drains_fetch_tasks(ha, configured, monkeypatch):
+    import custom_components.activity_images.calendar_adapter as adapter_module
+
+    events = {
+        "calendar.school": {"events": [{"summary": "Fresh school"}]},
+        "calendar.work": {"events": [{"summary": "Old work"}]},
+    }
+    adapter, queue, _ = behavior._calendar_test_setup(
+        ha, configured, monkeypatch, events, enabled=True,
+        calendars=("calendar.school", "calendar.work"),
+    )
+    await adapter.async_refresh()
+    monkeypatch.setattr(adapter_module, "_CALENDAR_FETCH_TIMEOUT", 0.05)
+
+    async def slow_work(call):
+        requested = call.data.get("entity_id", [])
+        if isinstance(requested, str):
+            requested = [requested]
+        if "calendar.work" in requested:
+            await asyncio.sleep(0.2)
+            return {"calendar.work": {"events": [{"summary": "New work"}]}}
+        return {"calendar.school": {"events": [{"summary": "Fresh school"}]}}
+
+    ha.services.async_register("calendar", "get_events", slow_work)
+    result = await adapter.async_refresh()
+    assert result["complete"] is False
+    assert adapter.display_titles_map()["calendar.school"] == ["Fresh school"]
+    assert adapter.display_titles_map()["calendar.work"] == ["Old work"]
+    assert adapter.display_stale("calendar.work") is True
+    assert adapter._fetch_tasks == set()
+    assert adapter.automatic_sources() == [] and not ha.services.calls
+    await adapter.async_shutdown()
+    assert adapter._fetch_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_unload_during_slow_fetch_commits_nothing_and_cancels_owned_tasks(ha, configured, monkeypatch):
+    events = {"calendar.school": {"events": [{"summary": "Old"}]}}
+    adapter, queue, _ = behavior._calendar_test_setup(ha, configured, monkeypatch, events, enabled=True)
+    await adapter.async_refresh()
+    assert adapter.calendar_titles == {"calendar.school": ["Old"]}
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(call):
+        entered.set()
+        await release.wait()
+        return {"calendar.school": {"events": [{"summary": "New"}]}}
+
+    ha.services.async_register("calendar", "get_events", slow)
+    refreshing = asyncio.create_task(adapter.async_refresh())
+    await entered.wait()
+    await adapter.async_shutdown()
+    release.set()
+    await asyncio.gather(refreshing, return_exceptions=True)
+    assert adapter.calendar_titles == {"calendar.school": ["Old"]}
+    assert adapter.display_titles_map()["calendar.school"] == ["Old"]
+    assert queue._pending == ["Old"] and not ha.services.calls
+    assert adapter._fetch_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_settings_lookahead_marks_display_stale_without_partial_authorization(ha, configured, monkeypatch):
+    adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Stay"], automatic=True)
+    await adapter.async_start()
+    await adapter.async_refresh()
+    assert adapter.status()["complete"] is True
+    assert adapter.display_stale("calendar.school") is False
+    new_settings = dict(adapter.settings)
+    new_settings[const.CONF_LOOKAHEAD_DAYS] = 21
+    await adapter.async_update_settings(new_settings)
+    assert adapter.status()["complete"] is False and adapter.status()["stale"] is True
+    assert adapter.display_stale("calendar.school") is True
+    assert adapter.automatic_sources() == []
+    assert adapter.display_titles_map()["calendar.school"] == ["Stay"]
+    await adapter.async_refresh()
+    assert adapter.status()["complete"] is True
+    assert adapter.display_stale("calendar.school") is False
+    await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_restored_snapshot_is_display_only_with_stale_live_state(ha, configured, monkeypatch):
+    adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Persisted"], automatic=True)
+    await adapter.async_refresh()
+    assert adapter.status()["complete"] is True
+    saved_key = adapter._store.key
+    assert ha.saved[saved_key]["calendar.school"] == ["Persisted"]
+    await adapter.async_shutdown()
+    restored, restored_queue, _ = behavior._calendar_test_setup(
+        ha, configured, monkeypatch, {"calendar.school": {"events": [{"summary": "Persisted"}]}},
+        enabled=True,
+    )
+    ha.state = "not_running"
+    await restored.async_setup()
+    await restored.async_start()
+    assert restored.calendar_titles == {"calendar.school": ["Persisted"]}
+    assert restored.display_titles_map() == {"calendar.school": ["Persisted"]}
+    assert restored.display_stale("calendar.school") is True
+    assert restored.status()["stale"] is True and restored.status()["complete"] is False
+    assert restored.automatic_sources() == [] and restored_queue._pending == []
+    ha.state = "running"
+    await restored.async_refresh()
+    assert restored.status()["complete"] is True
+    assert restored.display_stale("calendar.school") is False
+    await restored.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_coverage_disconnect_suppresses_partial_automatic_scan(ha, configured, monkeypatch):
+    events = {
+        "calendar.school": {"events": [{"summary": "Do not enqueue"}]},
+        "calendar.work": {"events": [{"summary": "Other"}]},
+    }
+    adapter, queue, _ = behavior._calendar_test_setup(
+        ha, configured, monkeypatch, events, enabled=True,
+        calendars=("calendar.school", "calendar.work"),
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(call):
+        entered.set()
+        await release.wait()
+        requested = call.data.get("entity_id", [])
+        if isinstance(requested, str):
+            requested = [requested]
+        return {entity: events[entity] for entity in requested if entity in events}
+
+    ha.services.async_register("calendar", "get_events", slow)
+    automatic = asyncio.create_task(adapter.async_refresh())
+    await entered.wait()
+    readonly = asyncio.create_task(adapter.async_refresh_coverage())
+    await asyncio.sleep(0)
+    readonly.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await readonly
+    await automatic
+    assert queue._pending == [] and not ha.services.calls
+    assert adapter._generation_suppressed == 0
+    await adapter.async_shutdown()

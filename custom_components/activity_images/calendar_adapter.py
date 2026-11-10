@@ -40,6 +40,7 @@ from .storage import async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
 _RETRY_DELAYS = (5, 15, 30)
+_CALENDAR_FETCH_TIMEOUT = 10.0
 _FALLBACK_ICON = "mdi:calendar-outline"
 _REGEX_META = re.compile(r"[.*+?^${}()|\[\]\\]")
 
@@ -70,6 +71,10 @@ class ActivityCalendarAdapter:
         self.calendar_titles: dict[str, list[str]] = {}
         self.raw_occurrences: dict[str, list[dict]] = {}
         self.calendar_identities: dict[str, str | None] = {}
+        # Bounded in-memory presentation only: per-calendar titles/occurrences plus
+        # last_ok/last_error/identity. Never authorizes paid work or deletion.
+        self._presentation: dict[str, dict] = {}
+        self._fetch_tasks: set[asyncio.Task] = set()
         self.ignored_titles: frozenset[str] = frozenset()
         self.ignore_revision = 0
         self._ignores_loaded = False
@@ -226,11 +231,44 @@ class ActivityCalendarAdapter:
                 except Exception:
                     _LOGGER.exception("Activity Images sensor listener failed")
 
+    def display_titles_map(self) -> dict[str, list[str]]:
+        """Merged read-only titles; failed calendars retain last-known rows."""
+        result: dict[str, list[str]] = {}
+        for entity in self.calendars:
+            live = self._presentation.get(entity)
+            if live is not None:
+                result[entity] = list(live.get("titles", []))
+            else:
+                result[entity] = list(self.calendar_titles.get(entity, []))
+        return result
+
+    def display_occurrences_map(self) -> dict[str, list[dict]]:
+        """Merged read-only occurrences; failed calendars retain last-known rows."""
+        result: dict[str, list[dict]] = {}
+        for entity in self.calendars:
+            live = self._presentation.get(entity)
+            if live is not None:
+                result[entity] = [dict(event) for event in live.get("occurrences", [])]
+            else:
+                result[entity] = [dict(event) for event in self.raw_occurrences.get(entity, [])]
+        return result
+
+    def display_stale(self, entity_id: str) -> bool:
+        """Per-row freshness; global complete/stale remain the authority."""
+        live = self._presentation.get(entity_id)
+        if live is None or live.get("last_error") or not live.get("last_ok"):
+            return True
+        try:
+            scanned = datetime.fromisoformat(live["last_ok"])
+        except (ValueError, TypeError):
+            return True
+        return dt_util.now() - scanned > timedelta(minutes=CALENDAR_SCAN_MINUTES + 1)
+
     @property
     def rules(self) -> list[dict]:
         """Pre-escaped native Calendar Card Pro entity entries, including fallback."""
         rules: list[dict] = []
-        for entity, titles in self.calendar_titles.items():
+        for entity, titles in self.display_titles_map().items():
             patterns: list[str] = []
             for title in titles:
                 if url := self.images.get(title):
@@ -332,6 +370,17 @@ class ActivityCalendarAdapter:
                 self.calendar_identities = dict(self._policy_bindings())
                 # Restored data is display-only, even when it includes raw titles.
                 self._verified_config = None
+                bindings = dict(self._policy_bindings())
+                self._presentation = {
+                    entity: {
+                        "titles": list(parsed.get(entity, [])),
+                        "occurrences": [dict(event) for event in self.raw_occurrences.get(entity, [])],
+                        "last_ok": None,
+                        "last_error": "Restored snapshot; awaiting fresh scan",
+                        "identity": bindings.get(entity),
+                    }
+                    for entity in self.calendars
+                }
                 images = await self.cache.async_find_many(list(dict.fromkeys(
                     title for titles in parsed.values() for title in titles
                 )))
@@ -364,7 +413,8 @@ class ActivityCalendarAdapter:
             days = int(settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS))
             auto_calendars = calendar_auto_ids(settings)
             selection_changed = calendars != self.calendars
-            demand_changed = selection_changed or days != self.lookahead_days
+            lookahead_changed = days != self.lookahead_days
+            demand_changed = selection_changed or lookahead_changed
             enable_generation = bool(set(auto_calendars) - set(self.auto_calendars))
             self.settings = settings
             if not demand_changed and auto_calendars == self.auto_calendars:
@@ -381,11 +431,21 @@ class ActivityCalendarAdapter:
                 self.last_error = None
                 self._verified_config = None
                 self._demand_truncated = False
+                if lookahead_changed:
+                    for data in self._presentation.values():
+                        data["last_error"] = "Settings changed; awaiting fresh scan"
             if selection_changed:
                 self.calendar_titles = self._snapshot_titles(self.calendar_titles)
                 self.raw_occurrences = {entity: events for entity, events in self.raw_occurrences.items() if entity in calendars}
                 self.calendar_identities = {entity: identity for entity, identity in self.calendar_identities.items() if entity in calendars}
-                wanted = {title for titles in self.calendar_titles.values() for title in titles}
+                self._presentation = {entity: data for entity, data in self._presentation.items() if entity in calendars}
+                for entity in calendars:
+                    if entity not in self._presentation:
+                        self._presentation[entity] = {"titles": [], "occurrences": [], "last_ok": None,
+                                                        "last_error": "Awaiting fresh scan", "identity": None}
+                wanted = {title for entity in calendars for title in self._presentation.get(entity, {}).get("titles", [])}
+                if not wanted:
+                    wanted = {title for titles in self.calendar_titles.values() for title in titles}
                 self.images = {title: url for title, url in self.images.items() if title in wanted}
                 if self._state_unsubscribe:
                     self._state_unsubscribe()
@@ -450,6 +510,17 @@ class ActivityCalendarAdapter:
         """Use the same scan, but never authorize paid work from the UI."""
         return await self._async_refresh_resolve_only()
 
+    async def _fetch_calendar(self, entity: str, start_iso: str, end_iso: str):
+        async with asyncio.timeout(_CALENDAR_FETCH_TIMEOUT):
+            return await self.hass.services.async_call(
+                "calendar", "get_events", {
+                    "entity_id": [entity],
+                    "start_date_time": start_iso,
+                    "end_date_time": end_iso,
+                },
+                blocking=True, return_response=True,
+            )
+
     async def _async_refresh_once(self, *, allow_generation=True) -> dict:
         """Read a 30-day by-default window, group by calendar, resolve, then queue."""
         async with self._lock:
@@ -462,42 +533,92 @@ class ActivityCalendarAdapter:
             self._scan_in_progress = True
             try:
                 await self._try_load_ignores_locked()
-                if not self.hass.services.has_service("calendar", "get_events"):
-                    raise ValueError("calendar.get_events is not ready")
                 bindings = dict(self._policy_bindings())
-                for entity in self.calendars:
-                    state = self.hass.states.get(entity)
-                    if state is None or state.state in ("unknown", "unavailable"):
-                        raise ValueError(f"Calendar is not ready: {entity}")
-                    identity = calendar_identity(self.hass, entity)
-                    if entity not in bindings or bindings[entity] != identity:
-                        raise ValueError(f"Calendar identity is unverified or changed: {entity}. Remove, save, and explicitly reselect the calendar")
-                response = await self.hass.services.async_call(
-                    "calendar", "get_events", {
-                        "entity_id": list(self.calendars),
-                        "start_date_time": now.isoformat(),
-                        "end_date_time": end.isoformat(),
-                    },
-                    blocking=True, return_response=True,
-                )
+                start_iso = now.isoformat()
+                end_iso = end.isoformat()
+                fetch_errors: dict[str, Exception] = {}
+                fetch_results: dict[str, object] = {}
+                if not self.hass.services.has_service("calendar", "get_events"):
+                    for entity in self.calendars:
+                        fetch_errors[entity] = ValueError("calendar.get_events is not ready")
+                else:
+                    fetch_entities: list[str] = []
+                    for entity in self.calendars:
+                        state = self.hass.states.get(entity)
+                        if state is None or state.state in ("unknown", "unavailable"):
+                            fetch_errors[entity] = ValueError(f"Calendar is not ready: {entity}")
+                            continue
+                        identity = calendar_identity(self.hass, entity)
+                        if entity not in bindings or bindings[entity] != identity:
+                            fetch_errors[entity] = ValueError(f"Calendar identity is unverified or changed: {entity}. Remove, save, and explicitly reselect the calendar")
+                            continue
+                        fetch_entities.append(entity)
+                    if fetch_entities:
+                        task_list = [self.hass.async_create_task(self._fetch_calendar(entity, start_iso, end_iso)) for entity in fetch_entities]
+                        self._fetch_tasks.update(task_list)
+                        try:
+                            gathered = await asyncio.gather(*task_list, return_exceptions=True)
+                        except asyncio.CancelledError:
+                            for task in task_list:
+                                task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await asyncio.gather(*task_list, return_exceptions=True)
+                            raise
+                        finally:
+                            self._fetch_tasks.difference_update(task_list)
+                        for entity, result in zip(fetch_entities, gathered, strict=True):
+                            if isinstance(result, asyncio.CancelledError):
+                                raise result
+                            if isinstance(result, Exception):
+                                fetch_errors[entity] = result
+                            else:
+                                fetch_results[entity] = result
                 if self._closed:
                     return self.status()
-                if not isinstance(response, dict):
-                    raise ValueError("calendar.get_events did not return a calendar mapping")
+                events_by_entity: dict[str, list] = {}
+                for entity in self.calendars:
+                    if entity in fetch_errors:
+                        continue
+                    response = fetch_results.get(entity)
+                    if not isinstance(response, dict):
+                        fetch_errors[entity] = ValueError("calendar.get_events did not return a calendar mapping")
+                        continue
+                    if entity not in response:
+                        fetch_errors[entity] = ValueError(f"No calendar event data returned for {entity}")
+                        continue
+                    payload = response[entity]
+                    if not isinstance(payload, dict):
+                        fetch_errors[entity] = ValueError(f"Invalid event response for {entity}")
+                        continue
+                    events = payload.get("events")
+                    if not isinstance(events, list):
+                        fetch_errors[entity] = ValueError(f"Invalid event response for {entity}")
+                        continue
+                    events_by_entity[entity] = events
                 parsed: dict[str, list[str]] = {}
                 occurrences: dict[str, list[dict]] = {}
                 seen: set[str] = set()
                 raw_seen: set[str] = set()
                 truncated = False
+                if fetch_errors:
+                    for entity in fetch_errors:
+                        live = self._presentation.get(entity)
+                        if live is not None:
+                            seen.update(title for title in live.get("titles", []) if isinstance(title, str))
+                            for event in live.get("occurrences", []):
+                                raw = event.get("raw_summary") if isinstance(event, dict) else None
+                                if isinstance(raw, str):
+                                    raw_seen.add(raw)
+                        else:
+                            seen.update(title for title in self.calendar_titles.get(entity, []) if isinstance(title, str))
+                            for event in self.raw_occurrences.get(entity, []):
+                                raw = event.get("raw_summary") if isinstance(event, dict) else None
+                                if isinstance(raw, str):
+                                    raw_seen.add(raw)
                 for entity in self.calendars:
-                    if entity not in response:
-                        raise ValueError(f"No calendar event data returned for {entity}")
-                    payload = response[entity]
-                    if not isinstance(payload, dict):
-                        raise ValueError(f"Invalid event response for {entity}")
-                    events = payload.get("events")
-                    if not isinstance(events, list):
-                        raise ValueError(f"Invalid event response for {entity}")
+                    if entity in fetch_errors:
+                        continue
+                    events = events_by_entity[entity]
                     if len(events) > 512:
                         truncated = True
                     titles: list[str] = []
@@ -531,6 +652,61 @@ class ActivityCalendarAdapter:
                             titles.append(title)
                             seen.add(title)
                     parsed[entity] = titles
+                if fetch_errors:
+                    # Partial display only: healthy fresh, failed retained, no persistence or paid work.
+                    display_wanted = list(dict.fromkeys(
+                        title for entity in self.calendars
+                        for title in (parsed.get(entity, []) if entity not in fetch_errors
+                                      else (self._presentation[entity].get("titles", [])
+                                            if entity in self._presentation
+                                            else self.calendar_titles.get(entity, [])))
+                    ))
+                    display_images: dict[str, str] = {}
+                    for title in display_wanted:
+                        if url := await self.cache.async_find(title, touch=False, prune=False):
+                            display_images[title] = url
+                    if self._closed:
+                        return self.status()
+                    for entity in self.calendars:
+                        if entity not in fetch_errors:
+                            self._presentation[entity] = {
+                                "titles": list(parsed.get(entity, [])),
+                                "occurrences": [dict(event) for event in occurrences.get(entity, [])],
+                                "last_ok": now.isoformat(),
+                                "last_error": None,
+                                "identity": bindings.get(entity),
+                            }
+                        else:
+                            previous = self._presentation.get(entity)
+                            if previous is None:
+                                previous_titles = list(self.calendar_titles.get(entity, []))
+                                previous_occurrences = [dict(event) for event in self.raw_occurrences.get(entity, [])]
+                                previous_ok = None
+                                previous_identity = None
+                            else:
+                                previous_titles = list(previous.get("titles", []))
+                                previous_occurrences = [dict(event) for event in previous.get("occurrences", [])]
+                                previous_ok = previous.get("last_ok")
+                                previous_identity = previous.get("identity")
+                            try:
+                                current_identity = calendar_identity(self.hass, entity)
+                            except Exception:
+                                current_identity = previous_identity
+                            exc = fetch_errors[entity]
+                            self._presentation[entity] = {
+                                "titles": previous_titles,
+                                "occurrences": previous_occurrences,
+                                "last_ok": previous_ok,
+                                "last_error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                                "identity": current_identity,
+                            }
+                    self.images = display_images
+                    if len(fetch_errors) == 1:
+                        self._scan_failed(next(iter(fetch_errors.values())))
+                    else:
+                        first_entity, first_exc = next(iter(fetch_errors.items()))
+                        self._scan_failed(ValueError(f"{len(fetch_errors)} calendars failed; first {first_entity}: {first_exc}"))
+                    return self.status()
 
                 wanted = list(dict.fromkeys(
                     title for titles in parsed.values() for title in titles
@@ -557,6 +733,14 @@ class ActivityCalendarAdapter:
                 self.calendar_identities = bindings
                 self._demand_truncated = truncated
                 self._verified_config = (self.calendars, self.lookahead_days)
+                for entity in self.calendars:
+                    self._presentation[entity] = {
+                        "titles": list(parsed.get(entity, [])),
+                        "occurrences": [dict(event) for event in occurrences.get(entity, [])],
+                        "last_ok": now.isoformat(),
+                        "last_error": None,
+                        "identity": bindings.get(entity),
+                    }
                 self.images = images
                 self.last_scan = now.isoformat()
                 self.last_error = None
@@ -571,8 +755,21 @@ class ActivityCalendarAdapter:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # Keep last successful map during network/provider/calendar outages.
+                # Keep last successful map during outages, but mark display rows stale.
                 if not self._closed:
+                    message = f"{type(exc).__name__}: {str(exc)[:200]}"
+                    for entity in self.calendars:
+                        live = self._presentation.get(entity)
+                        if live is None:
+                            self._presentation[entity] = {
+                                "titles": list(self.calendar_titles.get(entity, [])),
+                                "occurrences": [dict(event) for event in self.raw_occurrences.get(entity, [])],
+                                "last_ok": None,
+                                "last_error": message,
+                                "identity": self.calendar_identities.get(entity),
+                            }
+                        else:
+                            live["last_error"] = message
                     self._scan_failed(exc)
             finally:
                 self._scan_in_progress = False
@@ -597,12 +794,15 @@ class ActivityCalendarAdapter:
 
     async def async_reconcile(self) -> None:
         async with self._lock:
-            if self._closed or not self.calendar_titles:
+            if self._closed:
                 return
             wanted = list(dict.fromkeys(
-                title for titles in self.calendar_titles.values() for title in titles
+                title for titles in self.display_titles_map().values() for title in titles
             ))
-            images = await self.cache.async_find_many(wanted)
+            # No calendar query; cover display keys only.
+            if not wanted and not self.images:
+                return
+            images = await self.cache.async_find_many(wanted) if wanted else {}
             if not self._closed and images != self.images:
                 self.images = images
                 self._notify()
@@ -610,7 +810,7 @@ class ActivityCalendarAdapter:
     def status(self) -> dict:
         return {
             "calendars": list(self.calendars),
-            "tracked_titles": sum(len(items) for items in self.calendar_titles.values()),
+            "tracked_titles": sum(len(items) for items in self.display_titles_map().values()),
             "images": len(self.images),
             "last_scan": self.last_scan,
             "error": self.last_error or self._ignore_error,
@@ -637,6 +837,12 @@ class ActivityCalendarAdapter:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
+        for task in list(self._fetch_tasks):
+            if not task.done():
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        self._fetch_tasks.clear()
         # Executor writes cannot be cancelled; finish this instance's write before reload.
         if self._snapshot_task:
             try:

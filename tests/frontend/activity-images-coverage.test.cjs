@@ -464,3 +464,18 @@ test("Scan calendar count handles the contracted array shape", async (t) => {
   }));
   assert.match(element.shadowRoot.textContent, /2 calendars/);
 });
+
+test("Stale per-calendar rows stay visible with freshness distinct from eligibility", async (t) => {
+  const stale = item({raw_summary: "Old", title: "Old", eligible_for_auto: false,
+    calendars: [{entity_id: "calendar.a", name: "Family", count: 1, available: false, auto_generate: false, stale: true}]});
+  const fresh = item({raw_summary: "New", title: "New", eligible_for_auto: false,
+    calendars: [{entity_id: "calendar.b", name: "Spouse", count: 1, available: true, auto_generate: true, stale: false}]});
+  const {element} = await coverageFixture(t, () => coverage([stale, fresh], {
+    scan: {calendars: 2, tracked_titles: 2, images: 0, last_scan: null, error: "work down", automatic_generation: true, complete: false, stale: true},
+  }));
+  const text = element.shadowRoot.textContent;
+  assert.match(text, /Old/);
+  assert.match(text, /Stale — showing last known events/);
+  assert.match(text, /Coverage incomplete/);
+  assert.doesNotMatch(cards(element)[1].textContent, /Stale/);
+});
