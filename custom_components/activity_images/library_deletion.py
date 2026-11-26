@@ -5,9 +5,13 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from pathlib import Path
+from io import BytesIO
+
+from PIL import Image
 from urllib.parse import quote, unquote
 from uuid import uuid4
 
@@ -18,7 +22,7 @@ from .const import (
     DEFAULT_LOOKAHEAD_DAYS,
 )
 from .deletion_files import cleanup, group_files, snapshot
-from .engine import generation_stem
+from .engine import GenerationSuppressed, generation_stem
 from .image_cache import (
     ACTIVITY_IMAGE_PREFIX,
     CANVAS_NORMALIZATION_EXCLUDED_FILES,
@@ -27,7 +31,9 @@ from .image_cache import (
     normalize_title,
 )
 from .library import _read_owned, _verify
+from .image_processing import has_meaningful_transparency
 from .retry import MAX_ATTEMPTS
+from .storage import async_drain
 
 EXTERNAL_WARNING = "External references (including dashboards and Home Tasks) are unknown. Deletion does not update or delete Home Tasks copies."
 _ID = re.compile(r"^[a-f0-9]{32}$")
@@ -37,6 +43,7 @@ class ActivityImageDeletions:
     def __init__(self, hass, library, queue, calendar):
         self.hass, self.library, self.queue, self.calendar = hass, library, queue, calendar
         self.cache = library.cache
+        self.queue.deletion_authorizer = self.async_authorize_replacement
         self._plans: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -50,14 +57,26 @@ class ActivityImageDeletions:
         async with self.calendar._lock, self.queue._lock, self.queue.engine._lock:
             yield
 
+    def _remember_plan(self, token: str, plan: dict) -> None:
+        now = time.monotonic()
+        self._plans = dict(list((key, value) for key, value in self._plans.items()
+                                if value["expires_at"] > now)[-63:])
+        self._plans[token] = {**plan, "expires_at": now + 600}
+
+    def _get_plan(self, token: str) -> dict | None:
+        plan = self._plans.get(token)
+        return plan if plan and plan["expires_at"] > time.monotonic() else None
+
     def operations(self) -> list[dict]:
-        return [self.public(operation) for operation in self.cache._deletions.values()]
+        return [self.public(operation) for operation in self.cache._deletions.values()
+                if not operation.get("archived")]
 
     @staticmethod
     def public(operation: dict) -> dict:
         return {"id": operation["id"], "state": operation["state"],
                 "can_abandon": any(item["state"] in {"failed", "interrupted"} for item in operation["items"]),
                 "replacement_requests": operation["replacement_requests"],
+                "archived": bool(operation.get("archived")),
                 "items": [{key: deepcopy(item[key]) for key in
                            ("id", "filename", "state", "error", "needed_titles", "job_ids")}
                           for item in operation["items"]]}
@@ -197,8 +216,7 @@ class ActivityImageDeletions:
             plan = await self._snapshot_plan(image_ids)
             token = uuid4().hex
             # Plans are short-lived review capabilities, never a durable authorization.
-            self._plans = dict(list(self._plans.items())[-63:])
-            self._plans[token] = {"plan": plan, "signature": self._signature(plan)}
+            self._remember_plan(token, {"plan": plan, "signature": self._signature(plan)})
             result = {"token": token, "items": [{key: item[key] for key in
                        ("id", "filename", "files", "titles", "needed_titles", "safe_without_regeneration", "blocked_reason")}
                        for item in plan["items"]], "replacement_requests": plan["replacement_requests"],
@@ -221,7 +239,7 @@ class ActivityImageDeletions:
             if existing:
                 self._kick()
                 return self.public(existing)
-            saved = self._plans.get(token)
+            saved = self._get_plan(token)
             if not saved:
                 raise MappingConflict("Deletion plan expired; review a fresh plan")
             async with self.cache._write_lock:
@@ -245,7 +263,8 @@ class ActivityImageDeletions:
         invalid = set()
         for key, url in item["candidates"].items():
             evidence = item.get("candidate_identities", {}).get(key)
-            if not evidence or self.cache.is_deleted(url):
+            if (not evidence or self.cache.is_deleted(url)
+                    or self.cache.image_metadata(url).get("background_status", "").startswith("review_needed")):
                 invalid.add(key)
                 continue
             try:
@@ -264,9 +283,17 @@ class ActivityImageDeletions:
                 continue
             stem = generation_stem(title, item["jobs"][key])
             files = [stem + suffix for suffix in (".png", "_thumb.webp", "_qa.webp")]
-            def verify(files=files):
+            url = ACTIVITY_IMAGE_PREFIX + stem + ".png"
+            if self.cache.image_metadata(url).get("background_status", "").startswith("review_needed"):
+                continue
+            def verify(files=files, url=url):
                 for filename in files:
-                    _verify(_read_owned(self.library.root, filename))
+                    data = _read_owned(self.library.root, filename)
+                    _verify(data)
+                    if filename == files[0] and not self.cache.image_metadata(url).get("background_status"):
+                        with Image.open(BytesIO(data)) as image:
+                            if not has_meaningful_transparency(image):
+                                raise ValueError("Unjournaled image requires manual background review")
                 return snapshot(self.library.root, files)
             try:
                 evidence = await self.hass.async_add_executor_job(verify)
@@ -314,8 +341,8 @@ class ActivityImageDeletions:
             count = sum(len(set(map(normalize_title, item["needed_titles"])) - (set(item["candidates"]) - set(invalid_candidates.get(item["id"], []))) - set(recoveries.get(item["id"], {})))
                         for item in operation["items"] if item["state"] not in {"done", "abandoned", "cleanup", "cleanup_failed"})
             token = uuid4().hex
-            self._plans[token] = {"retry": operation_id, "snapshot": deepcopy(operation), "replacement_requests": count,
-                                  "recoveries": recoveries, "blocked": blocked, "invalid_candidates": invalid_candidates}
+            self._remember_plan(token, {"retry": operation_id, "snapshot": deepcopy(operation), "replacement_requests": count,
+                                        "recoveries": recoveries, "blocked": blocked, "invalid_candidates": invalid_candidates})
             items = []
             for item in operation["items"]:
                 needed = [title for title in item["needed_titles"] if (normalize_title(title) not in item["candidates"]
@@ -339,7 +366,7 @@ class ActivityImageDeletions:
             operation = deepcopy(self._operation(operation_id))
             if token in operation.get("retry_tokens", []):
                 return self.public(operation)
-            plan = self._plans.get(token)
+            plan = self._get_plan(token)
             if plan and plan.get("consumed") and plan.get("retry") == operation_id:
                 return self.public(operation)
             if not plan or plan.get("retry") != operation_id or plan["snapshot"] != operation:
@@ -434,14 +461,7 @@ class ActivityImageDeletions:
                         await self.queue._save()
                     raise
 
-            work = asyncio.create_task(commit())
-            cancelled = False
-            while not work.done():
-                try:
-                    await asyncio.shield(work)
-                except asyncio.CancelledError:
-                    cancelled = True
-            await work
+            _, cancelled = await async_drain(commit())
             if cancelled:
                 raise asyncio.CancelledError
             return self.public(self._operation(operation_id))
@@ -466,6 +486,8 @@ class ActivityImageDeletions:
 
     async def async_setup(self):
         for operation in list(self.cache._deletions.values()):
+            if operation["state"] in {"done", "abandoned"}:
+                continue
             operation = deepcopy(operation)
             changed = False
             for item in operation["items"]:
@@ -507,11 +529,33 @@ class ActivityImageDeletions:
                         await self._save_item(operation_id, image_id, state=state, error=f"{type(exc).__name__}: {str(exc)[:300]}")
                     except OSError:
                         # Keep an observable failure in memory; the durable running/cleanup phase is retry-safe.
-                        self._item(operation_id, image_id).update(state=state, error="Persistence failed; explicit retry required")
-                        self._operation(operation_id)["state"] = state
+                        async with self.cache._write_lock:
+                            operation = deepcopy(self._operation(operation_id))
+                            item = next(item for item in operation["items"] if item["id"] == image_id)
+                            item.update(state=state, error="Persistence failed; explicit retry required")
+                            operation["state"] = state
+                            self.cache._deletions[operation_id] = operation
 
     def _item(self, operation_id, image_id):
         return next(item for item in self._operation(operation_id)["items"] if item["id"] == image_id)
+
+    async def async_authorize_replacement(self, title: str, context: dict) -> None:
+        """Recheck live demand before every attempt, including a 429 retry."""
+        operation = self._operation(context["operation_id"])
+        item = self._item(operation["id"], context["image_id"])
+        key = normalize_title(title)
+        def valid():
+            return (not self._closed and item["state"] == "running"
+                    and key == context["key"] and item["jobs"].get(key) == context["job_id"]
+                    and key not in item["candidates"])
+        if not valid():
+            raise GenerationSuppressed("Replacement authorization changed")
+        fresh = await self.calendar.async_read_live_demand()
+        if fresh != operation["demand"]:
+            raise GenerationSuppressed("Calendar demand changed; original files retained")
+        await self._validate_original(operation, item)
+        if (not valid() or operation is not self._operation(context["operation_id"])):
+            raise GenerationSuppressed("Replacement authorization changed while checking demand")
 
     async def _replace(self, operation_id: str, image_id: str):
         item = deepcopy(self._item(operation_id, image_id))
@@ -552,6 +596,8 @@ class ActivityImageDeletions:
             item = deepcopy(self._item(operation_id, image_id))
             if key not in item["candidates"]:
                 raise ValueError(job.get("error") or "Replacement failed; original files retained")
+            if self.cache.image_metadata(item["candidates"][key]).get("background_status", "").startswith("review_needed"):
+                raise ValueError("Replacement requires manual background review; original retained. Keep originals to link the candidate manually, or explicitly retry.")
         await self._refresh_demand()
         async with self._boundaries():
             await self._validate_original(self._operation(operation_id), item)
@@ -567,15 +613,8 @@ class ActivityImageDeletions:
         # Queue history is another Store: redact durably before irreversible unlink.
         await self.queue.async_redact_deleted(item["urls"])
         await self.queue.async_finish_replacements(operation_id, image_id)
-        work = asyncio.ensure_future(self.hass.async_add_executor_job(cleanup, self.library.root, self.quarantine_root, item["identity"], operation_id, image_id))
-        # Never leave an executor deleting after unload returns.
-        cancelled = False
-        while not work.done():
-            try:
-                await asyncio.shield(work)
-            except asyncio.CancelledError:
-                cancelled = True
-        await work
+        _, cancelled = await async_drain(self.hass.async_add_executor_job(
+            cleanup, self.library.root, self.quarantine_root, item["identity"], operation_id, image_id))
         self.library.invalidate()
         await self._save_item(operation_id, image_id, state="done", error=None)
         if cancelled:

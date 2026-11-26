@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import stat
 import time
 import unicodedata
 from copy import deepcopy
@@ -19,12 +20,11 @@ from homeassistant.helpers.storage import Store
 from PIL import Image
 
 from .const import DOMAIN
-from .generated_image import normalize_existing_generated_image
-from .storage import async_save_verified
+from .deletion_files import open_root, validate_filename
+from .storage import async_drain, async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
 
-DATA_IMAGE_CACHE = f"{DOMAIN}_image_cache"
 STORAGE_KEY = f"{DOMAIN}_image_cache"
 STORAGE_VERSION = 1
 CANVAS_NORMALIZATION_VERSION = 2
@@ -35,7 +35,9 @@ CANVAS_NORMALIZATION_VERSION = 2
 DEFAULT_SIMILARITY_THRESHOLD = 0.85
 DEFAULT_TOKEN_OVERLAP = 0.50
 MIN_INDEX_TOKEN_LENGTH = 4
-MAX_CACHED_IMAGES = 4000
+RECOMMENDED_LIBRARY_SIZE = 4000
+RECENCY_WRITE_INTERVAL = 3600
+DETAILED_DELETION_HISTORY = 100
 LOCAL_IMAGE_LOCATIONS = {
     "/local/activity_images/": ("www", "activity_images"),
     "/local/home_tasks/": ("www", "home_tasks"),
@@ -85,8 +87,9 @@ def _transaction(method):
     @wraps(method)
     async def wrapped(self, *args, **kwargs):
         async with self._write_lock:
-            entries, metadata = deepcopy(self._entries), deepcopy(self._metadata)
-            deletions, tombstones = deepcopy(self._deletions), set(self._tombstones)
+            # Entries, metadata and journal values are replaced, never edited in place.
+            entries, metadata = self._entries.copy(), self._metadata.copy()
+            deletions, tombstones = self._deletions.copy(), self._tombstones.copy()
             generation = self._save_generation
             try:
                 return await method(self, *args, **kwargs)
@@ -129,7 +132,7 @@ class ActivityImageCache:
             self._tombstones = set(data.get("tombstones", []))
             raw_metadata = data.get("images", {})
             self._metadata = {
-                url: metadata for url, metadata in raw_metadata.items()
+                asset_url(url): metadata for url, metadata in raw_metadata.items()
                 if isinstance(url, str) and isinstance(metadata, dict)
             } if isinstance(raw_metadata, dict) else {}
             stored_canvas_version = data.get("canvas_normalization_version", 0)
@@ -142,7 +145,7 @@ class ActivityImageCache:
                     for key, value in raw_entries.items()
                     if isinstance(key, str)
                     and isinstance(value, dict)
-                    and value.get("image_url")
+                    and isinstance(value.get("image_url"), str) and value["image_url"]
                 }
                 for entry in self._entries.values():
                     last_used_at = entry.get("last_used_at", 0)
@@ -152,13 +155,14 @@ class ActivityImageCache:
                         else 0.0
                     )
             self._rebuild_token_index()
-            changed = False
+            changed = self._compact_history()
             if self._canvas_normalization_version < CANVAS_NORMALIZATION_VERSION:
-                await self._async_migrate_activity_image_canvases()
+                # Preserve published masters and references on upgrade.
+                self._canvas_normalization_version = CANVAS_NORMALIZATION_VERSION
                 changed = True
-            self._loaded = True
             if changed:
                 await self._async_save()
+            self._loaded = True
 
     def _activity_image_path(self, canonical_url: str) -> Path | None:
         """Resolve one safe generated activity-image URL to its master file."""
@@ -175,130 +179,47 @@ class ActivityImageCache:
             return None
         return Path(self.hass.config.path("www", "activity_images", filename))
 
-    def _activity_url_map(self) -> dict[str, str]:
-        """Return current versioned URLs for generated masters in the cache."""
-        url_map: dict[str, str] = {}
-        for entry in self._entries.values():
-            image_url = entry.get("image_url")
-            if not isinstance(image_url, str):
-                continue
-            canonical = _canonical_url(image_url)
-            if self._activity_image_path(canonical) is not None:
-                url_map[canonical] = image_url
-        return url_map
-
     async def async_image_metadata(
         self, images: dict[str, str]
     ) -> dict[str, dict[str, int]]:
         """Return intrinsic dimensions for resolved local activity images."""
 
         def read_size(path: Path) -> tuple[int, int]:
-            with Image.open(path) as image:
-                return image.size
+            directory = open_root(path.parent)
+            try:
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                with os.fdopen(fd, "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        raise ValueError("Invalid image file")
+                    with Image.open(stream) as image:
+                        return image.size
+            finally:
+                os.close(directory)
 
         metadata: dict[str, dict[str, int]] = {}
+        sizes: dict[Path, tuple[int, int] | None] = {}
         for title, image_url in images.items():
             if not isinstance(image_url, str):
                 continue
             path = self._activity_image_path(_canonical_url(image_url))
-            if path is None or not await self.hass.async_add_executor_job(path.is_file):
+            if path is None:
                 continue
-            try:
-                width, height = await self.hass.async_add_executor_job(read_size, path)
-            except OSError:
-                continue
-            if width > 0 and height > 0:
-                metadata[title] = {"width": width, "height": height}
+            if path not in sizes:
+                try:
+                    sizes[path] = await self.hass.async_add_executor_job(read_size, path)
+                except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+                    sizes[path] = None
+            if (size := sizes[path]) and size[0] > 0 and size[1] > 0:
+                metadata[title] = {"width": size[0], "height": size[1]}
         return metadata
-
-    async def _async_migrate_activity_image_canvases(self) -> None:
-        """Normalize cached Gemini masters once and update loaded references."""
-        canonical_urls: set[str] = set()
-        for entry in self._entries.values():
-            image_url = entry.get("image_url")
-            if not isinstance(image_url, str):
-                continue
-            canonical = _canonical_url(image_url)
-            if self._activity_image_path(canonical) is not None:
-                canonical_urls.add(canonical)
-        url_map: dict[str, str] = {}
-        for canonical in sorted(canonical_urls):
-            path = self._activity_image_path(canonical)
-            if path is None or not await self.hass.async_add_executor_job(
-                path.is_file
-            ):
-                continue
-            version = await self.hass.async_add_executor_job(
-                normalize_existing_generated_image, path
-            )
-            url_map[canonical] = f"{canonical}?v={version}"
-
-        if url_map:
-            for entry in self._entries.values():
-                current_url = entry.get("image_url", "")
-                replacement = url_map.get(_canonical_url(current_url))
-                if replacement:
-                    entry["image_url"] = replacement
-            await self._async_rewrite_active_references(url_map)
-
-        self._canvas_normalization_version = CANVAS_NORMALIZATION_VERSION
-        _LOGGER.info(
-            "Normalized %d cached activity-image canvases to version %d",
-            len(url_map),
-            CANVAS_NORMALIZATION_VERSION,
-        )
-
-    async def async_sync_active_references(self) -> None:
-        """Bring newly loaded task stores onto the cache's versioned URLs."""
-        if self._canvas_normalization_version < CANVAS_NORMALIZATION_VERSION:
-            return
-        await self._async_rewrite_active_references(self._activity_url_map())
-
-    async def _async_rewrite_active_references(
-        self, url_map: dict[str, str]
-    ) -> None:
-        """Update task references only through their public store APIs."""
-        if not url_map:
-            return
-        for store in self.hass.data.get(DOMAIN, {}).values():
-            if hasattr(store, "async_update_task") and hasattr(store, "tasks"):
-                updates = [
-                    (
-                        task.get("id"),
-                        url_map.get(_canonical_url(image_url)),
-                        image_url,
-                    )
-                    for task in store.tasks
-                    if isinstance((image_url := task.get("image_url")), str)
-                ]
-                for task_id, replacement, current in updates:
-                    if (
-                        task_id is not None
-                        and replacement
-                        and current != replacement
-                    ):
-                        await store.async_update_task(
-                            task_id, image_url=replacement
-                        )
-            elif hasattr(store, "get_all_overlays") and hasattr(
-                store, "async_set_overlay"
-            ):
-                updates = [
-                    (task_uid, url_map.get(_canonical_url(image_url)), image_url)
-                    for task_uid, overlay in store.get_all_overlays().items()
-                    if isinstance((image_url := overlay.get("image_url")), str)
-                ]
-                for task_uid, replacement, current in updates:
-                    if replacement and current != replacement:
-                        await store.async_set_overlay(
-                            task_uid, image_url=replacement
-                        )
 
     def _rebuild_token_index(self) -> None:
         self._token_index = {}
         for key, entry in self._entries.items():
             tokens = set(entry.get("tokens") or _title_tokens(key))
-            entry["tokens"] = sorted(tokens)
+            ordered = sorted(tokens)
+            if entry.get("tokens") != ordered:
+                self._entries[key] = {**entry, "tokens": ordered}
             for token in tokens:
                 self._token_index.setdefault(token, set()).add(key)
 
@@ -309,6 +230,10 @@ class ActivityImageCache:
         self.check_mapping(title, image_url)
         if not key or not image_url:
             return
+        self._remember_mapping(title, image_url, key)
+        await self._async_save()
+
+    def _remember_mapping(self, title: str, image_url: str, key: str) -> None:
         old = self._entries.get(key)
         if old:
             for token in old.get("tokens", []):
@@ -326,7 +251,6 @@ class ActivityImageCache:
         }
         for token in tokens:
             self._token_index.setdefault(token, set()).add(key)
-        await self._async_save()
 
     @_transaction
     async def async_remember_many(self, tasks: list[dict]) -> None:
@@ -363,7 +287,10 @@ class ActivityImageCache:
         if exact and await self._async_url_exists(exact["image_url"]):
             if touch:
                 await self._async_touch_url(exact["image_url"])
+            self._check_lookup(key, exact["image_url"])
             return exact["image_url"]
+        if self._entries.get(key) is not exact:
+            raise MappingConflict("Title mapping changed during lookup; retry lookup")
         if exact and prune:
             await self._async_forget_keys({key}, expected_url=exact["image_url"])
 
@@ -398,6 +325,8 @@ class ActivityImageCache:
             return None
         image_url = self._entries[best_key]["image_url"]
         if not await self._async_url_exists(image_url):
+            if self._entries.get(best_key, {}).get("image_url") != image_url:
+                raise MappingConflict("Image mapping changed during lookup; retry lookup")
             if prune:
                 await self._async_forget_keys({best_key}, expected_url=image_url)
             return None
@@ -406,7 +335,14 @@ class ActivityImageCache:
         # an unbounded title alias for every wording variation.
         if touch:
             await self._async_touch_url(image_url)
+        self._check_lookup(best_key, image_url)
+        if key != best_key and self._entries.get(key) is not exact and self._entries.get(key) is not None:
+            raise MappingConflict("Exact title mapping changed during lookup; retry lookup")
         return image_url
+
+    def _check_lookup(self, key: str, url: str) -> None:
+        if self._entries.get(key, {}).get("image_url") != url or self.is_deleted(url):
+            raise MappingConflict("Image mapping changed during lookup; retry lookup")
 
     async def async_find_many(self, titles: list[str]) -> dict[str, str]:
         """Resolve several titles while persisting their LRU touch only once."""
@@ -431,9 +367,9 @@ class ActivityImageCache:
         """Return whether the persistent library intentionally retains a file."""
         if not image_url:
             return False
-        canonical = _canonical_url(image_url)
+        canonical = asset_url(image_url)
         return any(
-            _canonical_url(entry.get("image_url", "")) == canonical
+            asset_url(entry.get("image_url", "")) == canonical
             for entry in self._entries.values()
         )
 
@@ -453,18 +389,24 @@ class ActivityImageCache:
         """Refresh the recency of every title alias for one canonical image."""
         await self._async_touch_urls({image_url})
 
-    @_transaction
     async def _async_touch_urls(self, image_urls: set[str]) -> None:
-        """Refresh several canonical images with one storage write."""
-        canonicals = {_canonical_url(image_url) for image_url in image_urls}
-        touched = False
+        """Skip snapshots and URL normalization entirely on warm recency reads."""
+        canonicals = {asset_url(url) for url in image_urls}
         now = time.time()
-        for entry in self._entries.values():
-            if _canonical_url(entry.get("image_url", "")) in canonicals:
-                entry["last_used_at"] = now
-                touched = True
-        if touched:
-            await self._async_save()
+        async with self._write_lock:
+            touched = {key: entry for key, entry in self._entries.items()
+                       if now - entry.get("last_used_at", 0) >= RECENCY_WRITE_INTERVAL
+                       and asset_url(entry["image_url"]) in canonicals}
+            if not touched:
+                return
+            generation = self._save_generation
+            self._entries.update({key: {**entry, "last_used_at": now} for key, entry in touched.items()})
+            try:
+                await self._async_save()
+            except BaseException as exc:
+                if not isinstance(exc, asyncio.CancelledError) or generation == self._save_generation:
+                    self._entries.update(touched)
+                raise
 
     async def _async_url_exists(self, image_url: str) -> bool:
         if self.is_deleted(image_url):
@@ -482,10 +424,17 @@ class ActivityImageCache:
             return True
         prefix, directory_parts = location
         filename = unquote(path[len(prefix):])
-        if not filename or filename != os.path.basename(filename) or "\\" in filename or chr(0) in filename:
-            return False
-        local_path = self.hass.config.path(*directory_parts, filename)
-        return await self.hass.async_add_executor_job(os.path.isfile, local_path)
+        def exists() -> bool:
+            try:
+                validate_filename(filename)
+                directory = open_root(Path(self.hass.config.path(*directory_parts)))
+                try:
+                    return stat.S_ISREG(os.stat(filename, dir_fd=directory, follow_symlinks=False).st_mode)
+                finally:
+                    os.close(directory)
+            except (OSError, ValueError):
+                return False
+        return await self.hass.async_add_executor_job(exists)
 
     async def async_metadata(self, titles: list[str]) -> dict[str, dict]:
         """Metadata helper for standalone callers."""
@@ -500,7 +449,7 @@ class ActivityImageCache:
         keys = {
             key for key, entry in self._entries.items()
             if (title and key == normalize_title(title))
-            or (url and _canonical_url(entry["image_url"]) == _canonical_url(url))
+            or (url and asset_url(entry["image_url"]) == asset_url(url))
         }
         if any(self.reserved(key, self._entries[key]["image_url"]) for key in keys):
             raise MappingConflict("Associations are reserved for permanent deletion")
@@ -520,12 +469,15 @@ class ActivityImageCache:
         return self._entries.get(normalize_title(title), {}).get("image_url")
 
     def image_metadata(self, url: str) -> dict:
-        return deepcopy(self._metadata.get(_canonical_url(url), {}))
+        return deepcopy(self._metadata.get(asset_url(url), self._metadata.get(_canonical_url(url), {})))
 
     @_transaction
-    async def async_record_image(self, url: str, metadata: dict) -> None:
-        self.check_mapping("", url)
-        self._metadata[_canonical_url(url)] = deepcopy(metadata)
+    async def async_record_image(self, url: str, metadata: dict, *, title: str | None = None) -> None:
+        """Commit provenance and an approved automatic association together."""
+        self.check_mapping(title or "", url)
+        self._metadata[asset_url(url)] = deepcopy(metadata)
+        if title is not None and (key := normalize_title(title)):
+            self._remember_mapping(title, url, key)
         await self._async_save()
         self.image_revision += 1
 
@@ -541,7 +493,7 @@ class ActivityImageCache:
         current = self.exact(title)
         if compare and current != expected:
             raise MappingConflict("The title mapping changed; refresh before accepting")
-        if current and _canonical_url(current) != _canonical_url(url) and not replace:
+        if current and asset_url(current) != asset_url(url) and not replace:
             raise MappingConflict("The title is already linked; confirm replacement")
         self._entries[key] = {
             "title": title.strip(), "image_url": url,
@@ -556,7 +508,7 @@ class ActivityImageCache:
         current = self.exact(title)
         if compare and current != expected:
             raise MappingConflict("The title mapping changed; refresh before accepting")
-        if current is None or _canonical_url(current) != _canonical_url(url):
+        if current is None or asset_url(current) != asset_url(url):
             raise MappingConflict("The title is no longer linked to this image")
         self._entries.pop(normalize_title(title))
         self._rebuild_token_index()
@@ -590,11 +542,29 @@ class ActivityImageCache:
         if expected_entries is not None and self.mapping_identity(self._entries) != self.mapping_identity(expected_entries):
             raise MappingConflict("Library associations changed; review a fresh deletion plan")
         self._deletions[operation["id"]] = deepcopy(operation)
+        self._compact_history()
         await self._async_save()
+
+    def _compact_history(self) -> bool:
+        """Keep old terminal receipts/idempotency, discard only obsolete recovery evidence."""
+        terminal = [key for key, operation in self._deletions.items()
+                    if operation["state"] in {"done", "abandoned"} and not operation.get("archived")]
+        changed = False
+        for key in terminal[:-DETAILED_DELETION_HISTORY]:
+            operation = self._deletions[key]
+            self._deletions[key] = {
+                **{name: operation[name] for name in ("id", "token", "state", "replacement_requests")},
+                "retry_tokens": list(operation.get("retry_tokens", [])),
+                "archived": True,
+                "items": [{name: item[name] for name in ("id", "filename", "state", "error", "needed_titles", "job_ids")}
+                          for item in operation["items"]],
+            }
+            changed = True
+        return changed
 
     @_transaction
     async def async_record_candidate(self, url: str, metadata: dict, context: dict) -> None:
-        operation = self._deletions[context["operation_id"]]
+        operation = deepcopy(self._deletions[context["operation_id"]])
         item = next(item for item in operation["items"] if item["id"] == context["image_id"])
         if item["state"] != "running":
             raise MappingConflict("Deletion operation is no longer running")
@@ -606,12 +576,13 @@ class ActivityImageCache:
         item.setdefault("candidate_identities", {})[context["key"]] = evidence
         item["candidates"][context["key"]] = url
         self._metadata[asset_url(url)] = deepcopy(metadata)
+        self._deletions[operation["id"]] = operation
         await self._async_save()
         self.image_revision += 1
 
     @_transaction
     async def async_commit_deletion(self, operation_id: str, image_id: str) -> None:
-        operation = self._deletions[operation_id]
+        operation = deepcopy(self._deletions[operation_id])
         item = next(item for item in operation["items"] if item["id"] == image_id)
         current = {key: entry for key, entry in self._entries.items() if asset_url(entry["image_url"]) in item["urls"]}
         # Recency may legitimately change during reads; associations may not.
@@ -633,12 +604,13 @@ class ActivityImageCache:
             self._metadata.pop(url, None)
             self._tombstones.add(url)
         item["state"] = "cleanup"
+        self._deletions[operation_id] = operation
         self._rebuild_token_index()
         await self._async_save()
         self.image_revision += 1
 
     async def _async_save(self) -> None:
-        write = asyncio.create_task(async_save_verified(self.hass, self._store,
+        _, cancelled = await async_drain(async_save_verified(self.hass, self._store,
             {
                 "entries": deepcopy(self._entries),
                 "images": deepcopy(self._metadata),
@@ -647,24 +619,6 @@ class ActivityImageCache:
                 "tombstones": sorted(self._tombstones),
             }
         ))
-        cancelled = False
-        # Cancelling an await cannot stop an executor's atomic file replacement.
-        while not write.done():
-            try:
-                await asyncio.shield(write)
-            except asyncio.CancelledError:
-                cancelled = True
-        await write
         self._save_generation += 1
         if cancelled:
             raise asyncio.CancelledError
-
-
-async def async_get_cache(hass: HomeAssistant) -> ActivityImageCache:
-    """Return the shared cache, loading it lazily for all image entry points."""
-    cache = hass.data.get(DATA_IMAGE_CACHE)
-    if cache is None:
-        cache = ActivityImageCache(hass)
-        hass.data[DATA_IMAGE_CACHE] = cache
-    await cache.async_setup()
-    return cache

@@ -18,6 +18,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import DOMAIN
 from .image_cache import MappingConflict
 from .library import IMAGE_API, validate_title
+from .settings import get_runtime as _runtime
 
 PANEL_ROUTE = "activity-images"
 MODULE_URL = "/activity_images/activity-images-panel.js"
@@ -50,13 +51,6 @@ _SCHEMAS = {
     "delete_retry": {p.Required("operation_id"): _ID, p.Required("token"): _ID, p.Required("confirm"): True},
     "delete_abandon": {p.Required("operation_id"): _ID, p.Required("confirm"): True},
 }
-
-
-def _runtime(hass):
-    runtimes = hass.data.get(DOMAIN, {})
-    if not runtimes:
-        raise HomeAssistantError("Activity Images is not configured")
-    return next(iter(runtimes.values()))
 
 
 async def _dispatch(hass, command: str, args: dict):

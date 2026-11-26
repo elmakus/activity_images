@@ -109,6 +109,8 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
         """Generate through the existing pipeline and return real PNG bytes."""
         title = extract_home_tasks_title(task.name, task.instructions)
         runtime = self._entry.runtime_data
+        if runtime is None:
+            raise HomeAssistantError("Activity Images is not loaded")
         provider = runtime.generator.settings.get(CONF_AI_ENTITY)
         if not provider:
             raise HomeAssistantError(
@@ -125,7 +127,9 @@ class ActivityImagesAITaskEntity(ai_task.AITaskEntity):
                 "Home Tasks wrapper does not accept custom attachments; "
                 "configure a shared style reference in Activity Images"
             )
-        result = await runtime.generator.async_generate(title)
+        result = await runtime.queue.async_generate_direct(title)
+        if result.get("background_status", "").startswith("review_needed"):
+            raise HomeAssistantError("Image requires manual background review in Activity Images")
         url = result.get("image_url", "")
         parsed = urlsplit(url)
         if parsed.scheme or parsed.netloc or parsed.fragment:

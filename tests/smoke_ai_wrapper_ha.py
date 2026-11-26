@@ -91,6 +91,7 @@ async def run():
             return SimpleNamespace(path=raw_source, url="/api/ai_task/image/smoke.png")
 
         entry: Any = TestEntry()
+        hass.config_entries.async_entries = lambda *_: [entry]
         with patch(
             "custom_components.activity_images.generated_image.async_resolve_media",
             side_effect=resolve_media,

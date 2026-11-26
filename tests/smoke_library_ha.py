@@ -25,8 +25,8 @@ from homeassistant.components import frontend, media_source, websocket_api  # no
 from homeassistant.components.http import StaticPathConfig  # noqa: E402
 from homeassistant.components.http.server import HomeAssistantHTTP  # noqa: E402
 from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE, __version__  # noqa: E402
-from homeassistant.core import CoreState, HomeAssistant  # noqa: E402
-from homeassistant.exceptions import HomeAssistantError  # noqa: E402
+from homeassistant.core import Context, CoreState, HomeAssistant  # noqa: E402
+from homeassistant.exceptions import HomeAssistantError, Unauthorized  # noqa: E402
 from homeassistant.helpers import device_registry as dr  # noqa: E402
 from homeassistant.helpers import entity_registry as er  # noqa: E402
 from homeassistant.helpers import storage as ha_storage  # noqa: E402
@@ -286,7 +286,7 @@ async def stopping_writes_never_commit_after_reported_failure():
 
 
 async def run():
-    assert __version__ == "2026.11.0", __version__
+    assert __version__ in {"2026.11.0", "2026.11.3"}, __version__
     await stopping_writes_never_commit_after_reported_failure()
     with tempfile.TemporaryDirectory(prefix="activity-library-smoke-") as directory:
         hass: Any = HomeAssistant(directory)
@@ -305,7 +305,8 @@ async def run():
             return True
         hass.config_entries = SimpleNamespace(async_forward_entry_setups=no_forward,
                                               async_unload_platforms=no_unload,
-                                              async_wait_initialized=lambda: asyncio.sleep(0))
+                                              async_wait_initialized=lambda: asyncio.sleep(0),
+                                              async_entries=lambda *_: [])
         await er.async_load(hass)
         admin = await hass.auth.async_create_user("Smoke Admin", group_ids=[GROUP_ID_ADMIN])
         regular = await hass.auth.async_create_user("Smoke User", group_ids=[GROUP_ID_USER])
@@ -323,6 +324,8 @@ async def run():
         # Exercise the exact real-HA serializer used by config/options HTTP views.
         config_flow = ActivityImagesConfigFlow()
         config_flow.hass = hass
+        config_flow.handler = "activity_images"
+        config_flow.context = {"source": "user"}
         form = await config_flow.async_step_user()
         flow_manager: Any = SimpleNamespace()
         view = _BaseFlowManagerView[Any, Any](flow_manager)
@@ -338,6 +341,26 @@ async def run():
         hass.config_entries.async_entries = lambda domain: [entry]
         hass.config_entries.async_update_entry = lambda item, *, options: setattr(item, "options", options)
         assert await async_setup_entry(hass, entry)
+        # The service registry must enforce the same permissions as the manager.
+        for name, args in {
+            "generate_image": {"title": "Permission test"},
+            "resolve_images": {"titles": ["Permission test"], "enqueue_missing": True},
+            "queue_status": {}, "cancel_queued": {"titles": ["Permission test"]},
+            "clear_errors": {}, "refresh_calendars": {},
+            "link_existing_image": {"title": "Permission test", "image_url": "/local/activity_images/standalone.png"},
+            "forget_image": {"title": "Permission test"},
+        }.items():
+            try:
+                await hass.services.async_call("activity_images", name, args, blocking=True,
+                                               return_response=True, context=Context(user_id=regular.id))
+            except Unauthorized:
+                pass
+            else:
+                raise AssertionError(f"Non-admin accessed {name}")
+        for context in (Context(user_id=admin.id), Context()):
+            result = await hass.services.async_call("activity_images", "queue_status", {}, blocking=True,
+                                                   return_response=True, context=context)
+            assert result["pending"] == []
         panel = hass.data[frontend.DATA_PANELS][PANEL_ROUTE]
         assert panel.require_admin
         assert panel.config is not None

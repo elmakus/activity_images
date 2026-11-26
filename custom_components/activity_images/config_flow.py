@@ -20,7 +20,7 @@ from .const import (
     DOMAIN,
 )
 from .prompts import DEFAULT_PROMPT_TEMPLATE
-from .settings import StaleSettingsError, calendar_identity, is_own_provider_entity, options_for_update, own_provider_entity_ids, revision, settings_lock
+from .settings import automatic_confirmation_ids, StaleSettingsError, calendar_identity, is_own_provider_entity, options_for_update, own_provider_entity_ids, revision, settings_lock
 from .settings_schema import effective_settings, validate_settings
 
 
@@ -90,6 +90,8 @@ class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_create_entry(title="Activity Images", data={**self._pending_values, CALENDAR_BINDINGS: bindings})
 
     async def async_step_user(self, user_input=None):
+        if self._async_current_entries():
+            return self.async_abort(reason="already_configured")
         errors = {}
         if user_input is not None:
             try:
@@ -98,9 +100,16 @@ class ActivityImagesConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self.hass, None, self._pending_values[CONF_AI_ENTITY]
                 ):
                     raise ValueError("Activity Images cannot use itself as its image provider")
+                from .settings_diagnostics import provider_diagnostics
+                if self._pending_values[CONF_AI_ENTITY]:
+                    status = provider_diagnostics(self.hass, None, self._pending_values)["status"]
+                    if status in {"unavailable", "image_generation_unsupported", "attachments_unsupported"}:
+                        errors["base"] = "provider_unavailable"
             except ValueError:
                 errors["base"] = "invalid_settings"
             else:
+                if errors:
+                    return self.async_show_form(step_id="user", data_schema=schema(user_input), errors=errors)
                 if self._pending_values[CONF_AUTO_CALENDARS]:
                     return await self.async_step_confirm_auto()
                 return await self._finish()
@@ -135,7 +144,7 @@ class ActivityImagesOptionsFlow(config_entries.OptionsFlow):
                     # The full native form can omit a cleared optional provider.
                     values = _form_settings(user_input)
                     options = options_for_update(self.hass, entry, values, self._revision)
-                    if set(values[CONF_AUTO_CALENDARS]) - set(effective_settings(entry)[CONF_AUTO_CALENDARS]):
+                    if automatic_confirmation_ids(effective_settings(entry), values):
                         self._pending_values = values
                     else:
                         # HA's flow manager persists this result without another await.

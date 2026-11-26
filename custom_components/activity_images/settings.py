@@ -30,6 +30,15 @@ def get_entry(hass):
     return entries[0]
 
 
+def get_runtime(hass):
+    """Resolve the singleton native runtime only after successful setup."""
+    entries = hass.config_entries.async_entries(DOMAIN)
+    runtime = getattr(entries[0], "runtime_data", None) if len(entries) == 1 else None
+    if runtime is None or not runtime.ready:
+        raise HomeAssistantError("Activity Images is not configured or ready")
+    return runtime
+
+
 def calendar_identity(hass, entity_id: str) -> str | None:
     """Entity IDs can be reused; registry IDs identify the selected calendar."""
     from homeassistant.helpers import entity_registry as er
@@ -128,12 +137,20 @@ def options_for_update(hass, entry, changes: dict, expected_revision: str) -> di
     return {**entry.options, **after, CALENDAR_BINDINGS: selected}
 
 
+def automatic_confirmation_ids(before: dict, after: dict) -> set[str]:
+    automatic = set(after.get(CONF_AUTO_CALENDARS, []))
+    if before.get(CONF_AI_ENTITY) != after.get(CONF_AI_ENTITY):
+        return automatic
+    return automatic - set(before.get(CONF_AUTO_CALENDARS, []))
+
+
 async def save_settings(hass, changes: dict, expected_revision: str, *, confirm_auto: bool = False) -> dict:
     """Persist through HA once; its update listener applies calendar settings live."""
     entry = get_entry(hass)
     async with settings_lock(entry):
         options = options_for_update(hass, entry, changes, expected_revision)
-        added = set(options.get(CONF_AUTO_CALENDARS, [])) - set(effective_settings(entry)[CONF_AUTO_CALENDARS])
+        before = effective_settings(entry)
+        added = automatic_confirmation_ids(before, {**before, **options})
         if added and confirm_auto is not True:
             raise ValueError("Enabling calendar automatic generation requires explicit paid confirmation")
         changed = options != entry.options

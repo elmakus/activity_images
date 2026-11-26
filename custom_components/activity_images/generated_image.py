@@ -10,6 +10,7 @@ from io import BytesIO
 from pathlib import Path
 import logging
 import os
+import stat
 import tempfile
 
 import aiohttp
@@ -20,6 +21,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .image_processing import (
     create_theme_qa_preview,
+    has_meaningful_transparency,
+    validate_dimensions,
     normalize_icon_canvas,
     normalize_generated_image,
 )
@@ -38,46 +41,42 @@ class SavedGeneratedImage:
     qa_url: str
 
 
+def _read_local_source(path: Path) -> bytes:
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_IMAGE_BYTES:
+            raise ValueError("Image source must be a regular file of at most 20 MiB")
+        data = stream.read(MAX_IMAGE_BYTES + 1)
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        raise ValueError("Image exceeds size limit or is empty")
+    return data
+
+
 async def _read_source(hass: HomeAssistant, source: str) -> bytes:
-    """Resolve HA media or an image URL returned by AI Task."""
-    if source.startswith("media-source://"):
-        resolved = await async_resolve_media(hass, source, None)
-        if resolved.path:
-            data = await hass.async_add_executor_job(Path(resolved.path).read_bytes)
-            if len(data) > MAX_IMAGE_BYTES:
-                raise ValueError("Image exceeds size limit")
-            return data
-        source = resolved.url
-    if not source.startswith(("https://", "http://")):
-        raise ValueError("AI image must be HA media or a valid HTTP(S) URL")
-    async with async_get_clientsession(hass).get(
-        source, timeout=aiohttp.ClientTimeout(total=45), allow_redirects=False
-    ) as response:
-        response.raise_for_status()
-        if response.content_length and response.content_length > MAX_IMAGE_BYTES:
-            raise ValueError("Image exceeds size limit")
-        chunks = bytearray()
-        async for part in response.content.iter_chunked(65536):
-            chunks.extend(part)
-            if len(chunks) > MAX_IMAGE_BYTES:
-                raise ValueError("Image exceeds size limit")
-        return bytes(chunks)
+    """Use the native AI Task local media result; never fetch provider-supplied URLs."""
+    if not source.startswith("media-source://"):
+        raise ValueError("AI Task must return a local media-source image ID")
+    resolved = await async_resolve_media(hass, source, None)
+    if not resolved.path:
+        raise ValueError("AI Task media source must resolve to a local file")
+    return await hass.async_add_executor_job(_read_local_source, Path(resolved.path))
 
 
 def _already_transparent(data: bytes) -> bool:
     with Image.open(BytesIO(data)) as image:
-        if "A" not in image.getbands() and "transparency" not in image.info:
-            return False
-        return image.convert("RGBA").getchannel("A").getextrema()[0] < 250
+        return has_meaningful_transparency(image)
 
 
 def _validate_lucida(data: bytes) -> bytes:
     if not data or len(data) > MAX_IMAGE_BYTES:
         raise ValueError("Invalid Lucida response size")
     with Image.open(BytesIO(data)) as image:
+        validate_dimensions(image)
         if image.format != "PNG" or image.mode != "RGBA":
             raise ValueError("Lucida did not return an RGBA PNG")
         image.load()
+        if not has_meaningful_transparency(image) or image.getchannel("A").getextrema()[1] <= 8:
+            raise ValueError("Lucida did not return a visible transparent subject")
     return data
 
 
@@ -86,11 +85,23 @@ async def _maybe_remove_background(
 ) -> bytes:
     if not lucida_url or await hass.async_add_executor_job(_already_transparent, data):
         return data
+
+    def input_format() -> tuple[str, str]:
+        with Image.open(BytesIO(data)) as image:
+            validate_dimensions(image)
+            formats = {"PNG": ("png", "image/png"), "JPEG": ("jpg", "image/jpeg"),
+                       "WEBP": ("webp", "image/webp"), "GIF": ("gif", "image/gif")}
+            if image.format not in formats:
+                raise ValueError("Unsupported image source format")
+            image.verify()
+            return formats[image.format]
+
+    extension, mime = await hass.async_add_executor_job(input_format)
     try:
         form = aiohttp.FormData()
-        form.add_field("file", data, filename="image.png", content_type="image/png")
+        form.add_field("file", data, filename=f"image.{extension}", content_type=mime)
         async with async_get_clientsession(hass).post(
-            lucida_url, data=form, timeout=LUCIDA_TIMEOUT
+            lucida_url, data=form, timeout=LUCIDA_TIMEOUT, allow_redirects=False
         ) as response:
             response.raise_for_status()
             if response.content_length and response.content_length > MAX_IMAGE_BYTES:
@@ -101,7 +112,7 @@ async def _maybe_remove_background(
                 if len(parts) > MAX_IMAGE_BYTES:
                     raise ValueError("Lucida response exceeds limit")
         return await hass.async_add_executor_job(_validate_lucida, bytes(parts))
-    except (aiohttp.ClientError, TimeoutError, ValueError, OSError) as exc:
+    except (aiohttp.ClientError, TimeoutError, ValueError, OSError, Image.DecompressionBombError, SyntaxError) as exc:
         _LOGGER.warning("Lucida failed (%s); using image fallback", type(exc).__name__)
         return data
 
@@ -124,12 +135,31 @@ def _process(data: bytes, target: Path) -> str:
     with Image.open(BytesIO(data)) as source:
         result = normalize_generated_image(source)
         normalized = normalize_icon_canvas(result.image)
-    _atomic_save(normalized, target, "PNG", optimize=True)
     preview = create_theme_qa_preview(normalized)
-    _atomic_save(preview, target.with_name(target.stem + "_qa.webp"), "WEBP", quality=86)
     thumb = normalized.copy()
     thumb.thumbnail((512, 512), Image.Resampling.LANCZOS)
-    _atomic_save(thumb, target.with_name(target.stem + "_thumb.webp"), "WEBP", quality=82)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Encode every variant before publishing; the master appears last.
+    with tempfile.TemporaryDirectory(dir=target.parent) as directory:
+        staged = Path(directory)
+        qa = target.with_name(target.stem + "_qa.webp")
+        thumbnail = target.with_name(target.stem + "_thumb.webp")
+        _atomic_save(normalized, staged / target.name, "PNG", optimize=True)
+        _atomic_save(preview, staged / qa.name, "WEBP", quality=86)
+        _atomic_save(thumb, staged / thumbnail.name, "WEBP", quality=82)
+        published = []
+        try:
+            for destination in (qa, thumbnail, target):
+                os.link(staged / destination.name, destination)
+                published.append(destination)
+        except BaseException:
+            for destination in reversed(published):
+                try:
+                    if os.path.samestat(destination.lstat(), (staged / destination.name).stat()):
+                        destination.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
     return result.background_status
 
 

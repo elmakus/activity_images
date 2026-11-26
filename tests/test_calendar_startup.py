@@ -11,7 +11,7 @@ def test_calendar_startup_real_ha_subprocess():
         installed = version("homeassistant")
     except PackageNotFoundError:
         raise SkipTest("Run smoke_calendar_startup_ha.py with HA Core 2026.11.0 installed") from None
-    if installed != "2026.11.0":
+    if installed not in {"2026.11.0", "2026.11.3"}:
         raise SkipTest(f"Calendar lifecycle smoke targets HA Core 2026.11.0, not {installed}")
     result = subprocess.run(
         [sys.executable, str(Path(__file__).with_name("smoke_calendar_startup_ha.py"))],

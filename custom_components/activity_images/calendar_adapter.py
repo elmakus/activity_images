@@ -11,6 +11,7 @@ import re
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from datetime import datetime, timedelta
+from functools import partial
 
 from homeassistant.core import CoreState, HomeAssistant, callback
 from homeassistant.helpers.event import (
@@ -36,7 +37,7 @@ from .image_cache import ActivityImageCache, normalize_title
 from .image_queue import ActivityImageQueue
 from .settings import calendar_identity
 from .settings_schema import calendar_auto_ids
-from .storage import async_save_verified
+from .storage import async_drain, async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
 _RETRY_DELAYS = (5, 15, 30)
@@ -48,6 +49,23 @@ _REGEX_META = re.compile(r"[.*+?^${}()|\[\]\\]")
 def escape_event_title(title: str) -> str:
     """Escape only JavaScript RegExp special characters (including backslash)."""
     return _REGEX_META.sub(lambda match: "\\" + match.group(0), title)
+
+
+def event_summary(event) -> tuple[str, str] | None:
+    """Return untouched summary and display title; reject malformed live input."""
+    if not isinstance(event, dict):
+        raise ValueError("Invalid calendar event")
+    if event.get("status") == "cancelled":
+        return None
+    raw = event.get("summary")
+    if not isinstance(raw, str):
+        raise ValueError("Invalid calendar event summary")
+    title = raw.strip()
+    if not title:
+        return None
+    if len(title) > 255 or len(raw) > 1024:
+        raise ValueError("Invalid calendar event summary")
+    return raw, title
 
 
 class ActivityCalendarAdapter:
@@ -93,6 +111,7 @@ class ActivityCalendarAdapter:
         self._reconcile_task: asyncio.Task | None = None
         self._snapshot_task: asyncio.Task | None = None
         self._rescan_needed = False
+        self._rescan_allow_generation = False
         self._generation_suppressed = 0
         self._demand_truncated = False
         self._reconcile_needed = False
@@ -148,16 +167,9 @@ class ActivityCalendarAdapter:
                 raise ValueError("At most 512 exact ignored titles are supported")
             if titles != self.ignored_titles:
                 next_revision = self.ignore_revision + 1
-                write = asyncio.create_task(async_save_verified(self.hass, self._ignore_store, {
+                _, cancelled = await async_drain(async_save_verified(self.hass, self._ignore_store, {
                     "titles": sorted(titles), "revision": next_revision,
                 }))
-                cancelled = False
-                while not write.done():
-                    try:
-                        await asyncio.shield(write)
-                    except asyncio.CancelledError:
-                        cancelled = True
-                await write
                 # No await between publishing the new policy and its acknowledgement.
                 self.ignored_titles = frozenset(titles)
                 self.ignore_revision = next_revision
@@ -314,18 +326,19 @@ class ActivityCalendarAdapter:
             allow_generation = self._rescan_allow_generation
 
     @callback
-    def _retry_scan(self, _now) -> None:
+    def _retry_scan(self, _now, *, allow_generation: bool) -> None:
         self._retry_cancel = None
-        self._schedule_scan()
+        self._schedule_scan(allow_generation=allow_generation)
 
     @callback
-    def _scan_failed(self, exc: Exception) -> None:
+    def _scan_failed(self, exc: Exception, *, allow_generation: bool) -> None:
         self.last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
         self._rescan_needed = False
         if self._retry_count < len(_RETRY_DELAYS):
             delay = _RETRY_DELAYS[self._retry_count]
             self._retry_count += 1
-            self._retry_cancel = async_call_later(self.hass, delay, self._retry_scan)
+            self._retry_cancel = async_call_later(self.hass, delay, partial(
+                self._retry_scan, allow_generation=allow_generation and not self._generation_suppressed))
         elif self._warned_error != self.last_error:
             _LOGGER.warning("Unable to refresh Activity Images calendars: %s", self.last_error)
             self._warned_error = self.last_error
@@ -491,16 +504,8 @@ class ActivityCalendarAdapter:
     async def _async_refresh_resolve_only(self) -> dict:
         """Keep joined scans nonbillable even when the requesting client disconnects."""
         self._generation_suppressed += 1
-        refresh = asyncio.create_task(self.async_refresh(allow_generation=False))
-        cancelled = False
         try:
-            # A cancelled admin request must not leave its scan free to enqueue.
-            while not refresh.done():
-                try:
-                    await asyncio.shield(refresh)
-                except asyncio.CancelledError:
-                    cancelled = True
-            result = await refresh
+            result, cancelled = await async_drain(self.async_refresh(allow_generation=False))
             if cancelled:
                 raise asyncio.CancelledError
             return result
@@ -528,6 +533,52 @@ class ActivityCalendarAdapter:
                 },
                 blocking=True, return_response=True,
             )
+
+    async def async_read_live_demand(self) -> list[str]:
+        """Read fresh deletion demand without changing presentation or taking locks."""
+        config = self._current_config()
+        calendars, days = config
+        bindings = dict(self._policy_bindings())
+
+        def verified() -> bool:
+            return (not self._closed and self.hass.state is CoreState.running
+                    and config == self._current_config() and bindings == self._policy_bindings()
+                    and all(entity in bindings and bindings[entity] == calendar_identity(self.hass, entity)
+                            and (state := self.hass.states.get(entity)) is not None
+                            and state.state not in ("unknown", "unavailable") for entity in calendars))
+
+        if not verified():
+            raise GenerationSuppressed("Calendar demand is unavailable or changed")
+        if not calendars:
+            return []
+        if not self.hass.services.has_service("calendar", "get_events"):
+            raise GenerationSuppressed("Calendar service is unavailable")
+        now = dt_util.now()
+        results = await asyncio.gather(*(self._fetch_calendar(entity, now.isoformat(),
+            (now + timedelta(days=days)).isoformat()) for entity in calendars), return_exceptions=True)
+        titles: set[str] = set()
+        raw_titles: set[str] = set()
+        for entity, response in zip(calendars, results, strict=True):
+            if isinstance(response, asyncio.CancelledError):
+                raise response
+            payload = response.get(entity) if isinstance(response, dict) else None
+            events = payload.get("events") if isinstance(payload, dict) else None
+            if not isinstance(events, list) or len(events) > 512:
+                raise GenerationSuppressed("Calendar demand could not be verified")
+            for event in events:
+                try:
+                    summary = event_summary(event)
+                except ValueError as exc:
+                    raise GenerationSuppressed(str(exc)) from exc
+                if summary is not None:
+                    raw, title = summary
+                    titles.add(title)
+                    raw_titles.add(raw)
+                if len(titles) > MAX_TRACKED_TITLES or len(raw_titles) > MAX_TRACKED_TITLES:
+                    raise GenerationSuppressed("Calendar demand exceeds the supported limit")
+        if not verified():
+            raise GenerationSuppressed("Calendar selection changed during verification")
+        return sorted(titles)
 
     async def _async_refresh_once(self, *, allow_generation=True) -> dict:
         """Read a 30-day by-default window, group by calendar, resolve, then queue."""
@@ -632,21 +683,16 @@ class ActivityCalendarAdapter:
                     titles: list[str] = []
                     occurrences[entity] = []
                     for event in events[:512]:
-                        if not isinstance(event, dict):
+                        try:
+                            summary = event_summary(event)
+                        except ValueError:
                             truncated = True
                             continue
-                        if event.get("status") == "cancelled":
-                            continue
-                        raw_summary = event.get("summary")
-                        if not isinstance(raw_summary, str):
-                            truncated = True
+                        if summary is None:
                             continue
                         # Ignore identity is the untouched HA string, never this resolution title.
-                        title = raw_summary.strip()
-                        if not title:
-                            continue
-                        if (len(title) > 255 or len(raw_summary) > 1024
-                                or (raw_summary not in raw_seen and len(raw_seen) >= MAX_TRACKED_TITLES)
+                        raw_summary, title = summary
+                        if ((raw_summary not in raw_seen and len(raw_seen) >= MAX_TRACKED_TITLES)
                                 or (title not in seen and len(seen) >= MAX_TRACKED_TITLES)):
                             truncated = True
                             continue
@@ -710,10 +756,11 @@ class ActivityCalendarAdapter:
                             }
                     self.images = display_images
                     if len(fetch_errors) == 1:
-                        self._scan_failed(next(iter(fetch_errors.values())))
+                        self._scan_failed(next(iter(fetch_errors.values())), allow_generation=allow_generation)
                     else:
                         first_entity, first_exc = next(iter(fetch_errors.items()))
-                        self._scan_failed(ValueError(f"{len(fetch_errors)} calendars failed; first {first_entity}: {first_exc}"))
+                        self._scan_failed(ValueError(f"{len(fetch_errors)} calendars failed; first {first_entity}: {first_exc}"),
+                                          allow_generation=allow_generation)
                     return self.status()
 
                 wanted = list(dict.fromkeys(
@@ -778,7 +825,7 @@ class ActivityCalendarAdapter:
                             }
                         else:
                             live["last_error"] = message
-                    self._scan_failed(exc)
+                    self._scan_failed(exc, allow_generation=allow_generation)
             finally:
                 self._scan_in_progress = False
             return self.status()

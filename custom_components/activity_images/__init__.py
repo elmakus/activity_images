@@ -5,6 +5,7 @@ from Home Tasks. Actions are registered in async_setup, as recommended by HA.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -15,15 +16,16 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 
 from .calendar_adapter import ActivityCalendarAdapter
 from .const import DOMAIN
 from .engine import ActivityImageGenerator
-from .image_cache import ActivityImageCache, async_get_cache
+from .image_cache import ActivityImageCache, MappingConflict
 from .image_queue import ActivityImageQueue
 from .library import ActivityImageLibrary, _read_owned, _verify, validate_title
 from .library_deletion import ActivityImageDeletions
-from .settings import migrate_calendar_options
+from .settings import get_runtime as _get_runtime, migrate_calendar_options
 from .settings_schema import ConfigEntrySettings
 
 _LOGGER = logging.getLogger(__name__)
@@ -59,26 +61,19 @@ class ActivityImagesRuntime:
     calendar: ActivityCalendarAdapter
     library: ActivityImageLibrary
     deletions: ActivityImageDeletions | None = None
-
-
-def _get_runtime(hass: HomeAssistant) -> ActivityImagesRuntime:
-    """Access the configured generator without accepting unconfigured calls."""
-    integrations = hass.data.get(DOMAIN, {})
-    if not integrations:
-        raise HomeAssistantError(
-            "Activity Images is not configured. Add it in Settings > Devices & services."
-        )
-    return next(iter(integrations.values()))
+    ready: bool = False
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Register actions once, regardless of config-entry availability."""
-    hass.data.setdefault(DOMAIN, {})
 
     async def generate(call: ServiceCall) -> dict:
-        return await _get_runtime(hass).generator.async_generate(
+        result = await _get_runtime(hass).queue.async_generate_direct(
             call.data["title"], force=call.data.get("force", False)
         )
+        if result.get("background_status", "").startswith("review_needed"):
+            raise HomeAssistantError("Image requires manual background review in Activity Images")
+        return result
 
     async def resolve(call: ServiceCall) -> dict:
         return await _get_runtime(hass).queue.async_resolve(
@@ -118,7 +113,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         except (OSError, ValueError) as exc:
             raise HomeAssistantError("Local PNG is missing or invalid") from exc
         runtime = _get_runtime(hass)
-        await runtime.cache.async_remember(title, url)
+        try:
+            await runtime.cache.async_link(title, url, replace=call.data.get("replace", False))
+        except MappingConflict as exc:
+            raise HomeAssistantError(str(exc)) from exc
         await runtime.calendar.async_reconcile()
         return {"title": title, "image_url": url, "linked": True}
 
@@ -132,47 +130,48 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         await runtime.calendar.async_reconcile()
         return {"removed": removed}
 
-    hass.services.async_register(
-        DOMAIN, "generate_image", generate,
+    async_register_admin_service(
+        hass, DOMAIN, "generate_image", generate,
         schema=vol.Schema({
             vol.Required("title"): _TITLE,
             vol.Optional("force", default=False): cv.boolean,
         }),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN, "resolve_images", resolve,
+    async_register_admin_service(
+        hass, DOMAIN, "resolve_images", resolve,
         schema=vol.Schema({
             vol.Required("titles"): _TITLES,
             vol.Optional("enqueue_missing", default=False): cv.boolean,
         }),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN, "queue_status", status,
+    async_register_admin_service(
+        hass, DOMAIN, "queue_status", status,
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN, "cancel_queued", cancel,
+    async_register_admin_service(
+        hass, DOMAIN, "cancel_queued", cancel,
         schema=vol.Schema({vol.Required("titles"): _TITLES}),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN, "clear_errors", clear,
+    async_register_admin_service(
+        hass, DOMAIN, "clear_errors", clear,
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN, "link_existing_image", link_existing,
+    async_register_admin_service(
+        hass, DOMAIN, "link_existing_image", link_existing,
         schema=vol.Schema({vol.Required("title"): _TITLE,
-                           vol.Required("image_url"): cv.string}),
+                           vol.Required("image_url"): cv.string,
+                           vol.Optional("replace", default=False): cv.boolean}),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN, "refresh_calendars", refresh_calendars,
+    async_register_admin_service(
+        hass, DOMAIN, "refresh_calendars", refresh_calendars,
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
-        DOMAIN, "forget_image", forget,
+    async_register_admin_service(
+        hass, DOMAIN, "forget_image", forget,
         schema=vol.Schema({
             vol.Optional("title"): _TITLE,
             vol.Optional("image_url"): cv.string,
@@ -193,7 +192,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Load the one independent image generator and its persistent queue."""
     migrate_calendar_options(hass, entry)
     settings = ConfigEntrySettings(entry)
-    cache = await async_get_cache(hass)
+    cache = ActivityImageCache(hass)
+    await cache.async_setup()
     generator = ActivityImageGenerator(hass, cache, settings)
     queue = ActivityImageQueue(hass, generator)
     calendar = ActivityCalendarAdapter(hass, cache, queue, settings)
@@ -203,25 +203,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     runtime.deletions = ActivityImageDeletions(hass, runtime.library, queue, calendar)
     entry.runtime_data = runtime
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
     generator.image_saved_callback = calendar.image_saved
     manager_registered = False
+    platforms_loaded = False
     try:
         await _async_register_manager(hass)
         manager_registered = True
         await calendar.async_setup()
-        await queue.async_setup()
+        await queue.async_setup(start_worker=False)
         await runtime.deletions.async_setup()
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor", "ai_task"])
+        platforms_loaded = True
         await calendar.async_start()
-    except Exception:
+        runtime.ready = True
+        queue.start()
+    except (Exception, asyncio.CancelledError):
+        if platforms_loaded:
+            await hass.config_entries.async_unload_platforms(entry, ["sensor", "ai_task"])
         if manager_registered:
             _async_remove_manager(hass)
         generator.image_saved_callback = None
         await calendar.async_shutdown()
         await runtime.deletions.async_shutdown()
         await queue.async_shutdown()
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        runtime.ready = False
+        entry.runtime_data = None
         raise
     entry.async_on_unload(entry.add_update_listener(_async_update_options))
     _LOGGER.info("Activity Images standalone generator and calendar library initialized")
@@ -230,17 +236,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Stop the queue while retaining the configured action registrations."""
-    runtime: ActivityImagesRuntime | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    runtime: ActivityImagesRuntime | None = getattr(entry, "runtime_data", None)
     if runtime is not None:
         if not await hass.config_entries.async_unload_platforms(entry, ["sensor", "ai_task"]):
             return False
         _async_remove_manager(hass)
+        runtime.ready = False
         runtime.generator.image_saved_callback = None
         await runtime.calendar.async_shutdown()
         if runtime.deletions is not None:
             await runtime.deletions.async_shutdown()
         await runtime.queue.async_shutdown()
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        entry.runtime_data = None
     return True
 
 

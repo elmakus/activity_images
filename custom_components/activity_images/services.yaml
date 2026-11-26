@@ -40,6 +40,11 @@ link_existing_image:
       required: true
       selector:
         text:
+    replace:
+      name: Confirm replacement of existing association
+      description: Replace the title's current mapping without deleting any image files.
+      selector:
+        boolean:
 refresh_calendars:
   name: Refresh calendar images
   description: >-

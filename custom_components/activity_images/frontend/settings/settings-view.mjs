@@ -174,12 +174,12 @@ export class ActivityImagesSettings extends HTMLElement {
     await this._doSave(submitted, this._revision, false);
   }
   _newlyAutoEnabled(values) {
-    let before = [];
-    try { before = JSON.parse(this._initial).auto_generate_calendar_entity_ids || []; }
-    catch { before = []; }
-    const known = new Set(Array.isArray(before) ? before : []);
+    let before = {};
+    try { before = JSON.parse(this._initial) || {}; }
+    catch { before = {}; }
+    const known = new Set(Array.isArray(before.auto_generate_calendar_entity_ids) ? before.auto_generate_calendar_entity_ids : []);
     const after = Array.isArray(values.auto_generate_calendar_entity_ids) ? values.auto_generate_calendar_entity_ids : [];
-    return after.filter((id) => !known.has(id));
+    return before.ai_task_entity_id !== values.ai_task_entity_id ? after : after.filter((id) => !known.has(id));
   }
   _confirmAuto(submitted, revision) {
     const ids = this._newlyAutoEnabled(submitted);
@@ -198,7 +198,7 @@ export class ActivityImagesSettings extends HTMLElement {
     check.type = "checkbox";
     checkLabel.prepend(check);
     dialog.append(heading,
-      element("p", "These calendars will be newly authorized for automatic missing-image generation:"),
+      element("p", "Confirm automatic missing-image generation for these calendars with the selected provider:"),
       list,
       element("p", "May incur AI charges. Provider retries and failed or timed-out attempts may still incur charges. " +
         "Turning automatic generation off later stops new calendar jobs; already accepted work remains in Queue & history and can still incur charges."),

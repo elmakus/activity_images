@@ -95,7 +95,9 @@ async def build(directory: str) -> dict:
     media_folder.mkdir(parents=True)
     Image.new("RGB", (64, 48), "green").save(media_folder / "library.png")
     source = Path(directory) / "provider.png"
-    Image.new("RGBA", (64, 64), (10, 20, 30, 255)).save(source)
+    art = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    art.paste((10, 20, 30, 255), (8, 8, 56, 56))
+    art.save(source)
 
     provider_calls = []
 
@@ -169,7 +171,7 @@ async def run_assertions(ctx: dict) -> None:
     runtime = ctx["runtime"]
     provider_calls = ctx["provider_calls"]
     calendar = runtime.calendar
-    assert __version__ == "2026.11.0", __version__
+    assert __version__ in {"2026.11.0", "2026.11.3"}, __version__
 
     status = await calendar.async_refresh()
     # Five exact raw occurrences collapse to four trimmed titles; the

@@ -30,6 +30,9 @@ def manager(ha, configured, titles=()):
     async def reconcile():
         calendar.images = {title: await cache.async_find(title, touch=False) for title in titles}
     calendar.async_reconcile = reconcile
+    async def read_live_demand():
+        return sorted({title for group in calendar.calendar_titles.values() for title in group})
+    calendar.async_read_live_demand = read_live_demand
     return ActivityImageDeletions(ha, ActivityImageLibrary(ha, cache), queue, calendar)
 
 

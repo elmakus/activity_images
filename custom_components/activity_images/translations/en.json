@@ -12,6 +12,15 @@
           "calendar_lookahead_days": "Upcoming calendar days (1–60)",
           "prompt_template": "Activity image prompt template (exactly one {title})",
           "auto_generate_calendar_entity_ids": "Auto-generate missing images (select only monitored calendars)"
+        },
+        "data_description": {
+          "ai_task_entity_id": "Choose an image-capable AI Task entity. Leave empty to use the existing library without generating images.",
+          "reference_media_content_id": "Optional local style reference passed as an image attachment. The provider must support attachments.",
+          "lucida_url": "Optional trusted background-removal endpoint. Leave empty for local processing only.",
+          "calendar_entity_ids": "Only these calendars are monitored.",
+          "calendar_lookahead_days": "Number of future days included in calendar coverage.",
+          "prompt_template": "Use exactly one {title} placeholder for the activity name.",
+          "auto_generate_calendar_entity_ids": "Automatic missing-image requests may incur charges; confirmation is required."
         }
       },
       "confirm_auto": {
@@ -23,7 +32,11 @@
       }
     },
     "error": {
-      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, reference and trusted HTTP(S) Lucida URL."
+      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, reference and trusted HTTP(S) Lucida URL.",
+      "provider_unavailable": "The selected provider is unavailable or does not support the requested image generation or attachment. Choose another provider or leave it empty for library-only mode."
+    },
+    "abort": {
+      "already_configured": "Activity Images is already configured."
     }
   },
   "options": {
@@ -39,7 +52,16 @@
           "prompt_template": "Activity image prompt template (exactly one {title})",
           "auto_generate_calendar_entity_ids": "Auto-generate missing images (select only monitored calendars)"
         },
-        "description": "Select real calendars to monitor. New calendars default to disabled. Automatic generation is a separate paid opt-in. Settings apply without reload. Disabling auto prevents new attempts, not charges for a request already sent."
+        "description": "Select real calendars to monitor. New calendars default to disabled. Automatic generation is a separate paid opt-in. Settings apply without reload. Disabling auto prevents new attempts, not charges for a request already sent.",
+        "data_description": {
+          "ai_task_entity_id": "Choose an image-capable AI Task entity. Leave empty to use the existing library without generating images.",
+          "reference_media_content_id": "Optional local style reference passed as an image attachment. The provider must support attachments.",
+          "lucida_url": "Optional trusted background-removal endpoint. Leave empty for local processing only.",
+          "calendar_entity_ids": "Only these calendars are monitored.",
+          "calendar_lookahead_days": "Number of future days included in calendar coverage.",
+          "prompt_template": "Use exactly one {title} placeholder for the activity name.",
+          "auto_generate_calendar_entity_ids": "Automatic missing-image requests may incur charges; confirmation is required."
+        }
       },
       "confirm_auto": {
         "title": "May incur AI charges",

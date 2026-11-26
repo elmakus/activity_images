@@ -396,6 +396,7 @@
           tile.dataset.imageId = item.id;
           const image = el("div", "Loading preview…", "image");
           const caption = el("div", undefined, "caption");
+          if (item.background_status?.startsWith("review_needed")) caption.append(el("small", "Background review needed"));
           caption.append(el("strong", item.title || item.filename), el("small", item.filename), el("small", `${item.titles.length} linked title${item.titles.length === 1 ? "" : "s"} · ${item.origin || "Unknown origin"}`), el("small", "", "selection-state"));
           tile.append(image, caption);
           this._grid.append(tile);
@@ -605,6 +606,9 @@
       showVariant("master", "Master");
       const info = el("dl");
       for (const [key, value] of Object.entries({ Filename: item.filename, "Master dimensions": item.width && item.height ? `${item.width} × ${item.height}` : "Unknown", "Master format": item.format || "Unknown", "File modified (not creation date)": item.modified_at || "Unknown", Created: item.created_at || "Unknown", Source: item.origin || "Unknown" })) info.append(el("dt", key), el("dd", String(value)));
+      if (item.background_status?.startsWith("review_needed")) {
+        info.append(el("dt", "Background"), el("dd", "Review needed — inspect the image preview."));
+      }
       this._dialog.append(info, el("h3", "Linked titles / aliases"));
       const aliases = el("ul", undefined, "aliases");
       for (const title of item.titles) {

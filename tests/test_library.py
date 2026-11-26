@@ -114,7 +114,7 @@ async def test_linked_imported_formats_reuse_through_home_tasks_as_png(ha, confi
     wrapper, ai = behavior._load_ai_wrapper()
     entry = SimpleNamespace(
         entry_id="imported_format_test", data=engine.settings, options={},
-        runtime_data=SimpleNamespace(generator=engine),
+        runtime_data=SimpleNamespace(generator=engine, queue=behavior.queue_module.ActivityImageQueue(ha, engine)),
     )
     entity = wrapper.ActivityImagesAITaskEntity(entry)
     entity.hass = ha
@@ -627,7 +627,8 @@ async def test_missing_file_cleanup_does_not_remove_replaced_mapping(ha, configu
     await entered.wait()
     await cache.async_link("Walking Outside", new, replace=True)
     release.set()
-    assert await lookup is None
+    with pytest.raises(ValueError, match="mapping changed"):
+        await lookup
     assert cache.exact("Walking Outside") == new
 
 

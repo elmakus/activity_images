@@ -68,10 +68,13 @@ def test_partial_update_and_safe_prompt_rendering():
     assert rendered == "Draw {once}: Party {strange}"
 
 
-def test_original_default_is_byte_identical_to_stable_030():
-    # Golden output independently rendered from stable commit 5ae5371.
-    output = prompts.build_activity_image_instructions("Example activity")
-    assert hashlib.sha256(output.encode()).hexdigest() == "68163a62b71ee645f631a0ef1355bbc0ea9c60d10d6994bdac0e774a3ab5b0b9"
+def test_default_upgrade_preserves_style_and_custom_templates():
+    old = prompts.LEGACY_DEFAULT_PROMPT_TEMPLATE.format(title="Example activity")
+    assert hashlib.sha256(old.encode()).hexdigest() == "68163a62b71ee645f631a0ef1355bbc0ea9c60d10d6994bdac0e774a3ab5b0b9"
+    entry = types.SimpleNamespace(data={const.CONF_PROMPT_TEMPLATE: prompts.LEGACY_DEFAULT_PROMPT_TEMPLATE}, options={})
+    assert schema.effective_settings(entry)[const.CONF_PROMPT_TEMPLATE] == prompts.DEFAULT_PROMPT_TEMPLATE
+    entry.options = {const.CONF_PROMPT_TEMPLATE: "Custom {title} on a chroma-key background"}
+    assert schema.effective_settings(entry)[const.CONF_PROMPT_TEMPLATE] == entry.options[const.CONF_PROMPT_TEMPLATE]
 
 
 def test_live_entry_view_does_not_retain_an_old_options_object():

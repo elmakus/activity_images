@@ -14,7 +14,7 @@ from .const import (
     CONF_LUCIDA_URL, CONF_PROMPT_TEMPLATE, CONF_REFERENCE_MEDIA_ID,
     CALENDAR_BINDINGS, DEFAULT_LOOKAHEAD_DAYS, MAX_CALENDARS,
 )
-from .prompts import DEFAULT_PROMPT_TEMPLATE, validate_prompt_template
+from .prompts import DEFAULT_PROMPT_TEMPLATE, upgrade_default_prompt, validate_prompt_template
 
 KEYS = frozenset((
     CONF_AI_ENTITY, CONF_AUTO_GENERATE, CONF_AUTO_CALENDARS, CONF_CALENDARS, CONF_LOOKAHEAD_DAYS,
@@ -45,7 +45,9 @@ def effective_settings(entry) -> dict:
     """Resolve settings and migrate only the previously selected authorization."""
     saved = {**{k: v for k, v in entry.data.items() if k in KEYS},
              **{k: v for k, v in entry.options.items() if k in KEYS}}
-    return {**DEFAULTS, **saved, CONF_AUTO_CALENDARS: list(calendar_auto_ids(saved))}
+    values = {**DEFAULTS, **saved, CONF_AUTO_CALENDARS: list(calendar_auto_ids(saved))}
+    values[CONF_PROMPT_TEMPLATE] = upgrade_default_prompt(values[CONF_PROMPT_TEMPLATE])
+    return values
 
 
 class ConfigEntrySettings(Mapping):
@@ -59,7 +61,10 @@ class ConfigEntrySettings(Mapping):
             return self.entry.options.get(key, self.entry.data.get(key, {}))
         if key not in KEYS:
             raise KeyError(key)
-        return effective_settings(self.entry)[key]
+        if key == CONF_AUTO_CALENDARS:
+            return effective_settings(self.entry)[key]
+        value = self.entry.options.get(key, self.entry.data.get(key, DEFAULTS[key]))
+        return upgrade_default_prompt(value) if key == CONF_PROMPT_TEMPLATE else value
 
     def __iter__(self):
         return iter(DEFAULTS)

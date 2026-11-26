@@ -342,3 +342,13 @@ test("Registry identity warnings render as inert text without rebinding rows", a
   element.remove();
   window.happyDOM.abort();
 });
+
+test("Changing the provider requires renewed confirmation for authorized calendars", async () => {
+  const {window, element} = await confirmFixture(async (query) => {
+    throw new Error("Unexpected " + query.type);
+  });
+  assert.deepEqual(element._newlyAutoEnabled({...settingsValues(), ai_task_entity_id: "ai_task.other"}), ["calendar.a"]);
+  assert.deepEqual(element._newlyAutoEnabled(settingsValues()), []);
+  element.remove();
+  window.happyDOM.abort();
+});

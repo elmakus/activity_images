@@ -1,0 +1,35 @@
+name: Publish verified Activity Images v0.6.1
+on:
+  workflow_run:
+    workflows: ["Python checks", "Frontend checks", "HACS and hassfest"]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-activity-images-v0.6.1
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Publish only the exact successful main candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -eu
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$CANDIDATE" || exit 0
+          test "$(jq -r .version custom_components/activity_images/manifest.json)" = 0.6.1 || exit 0
+          if gh release view v0.6.1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then exit 0; fi
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$CANDIDATE&event=push&per_page=100")"
+          for name in "Python checks" "Frontend checks" "HACS and hassfest"; do
+            jq -e --arg name "$name" '[.workflow_runs[] | select(.name == $name)] | sort_by(.id) | last | .conclusion == "success"' <<< "$runs" >/dev/null || exit 0
+          done
+          gh release create v0.6.1 --repo "$GITHUB_REPOSITORY" --target "$CANDIDATE" --title "Activity Images v0.6.1" --notes-file docs/RELEASE_NOTES_v0.6.1.md

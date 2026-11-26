@@ -76,7 +76,9 @@ class MockHA:
         self.medias = {}
         self.config = SimpleNamespace(path=self.path)
         self.services = FakeServices(self)
+        self.entries = []
         self.config_entries = SimpleNamespace(
+            async_entries=lambda *_: self.entries,
             async_forward_entry_setups=self._forward_platforms,
             async_unload_platforms=self._unload_platforms,
             async_update_entry=self._update_entry,
@@ -101,6 +103,8 @@ class MockHA:
 
     async def _forward_platforms(self, entry, platforms):
         self.forwarded.append(("load", tuple(platforms)))
+        if entry not in self.entries:
+            self.entries.append(entry)
 
     async def _unload_platforms(self, entry, platforms):
         self.forwarded.append(("unload", tuple(platforms)))
@@ -231,7 +235,7 @@ async def test_similar_matching_not_different_task(ha):
 
 @pytest.mark.asyncio
 async def test_cache_has_no_capacity_eviction(ha, monkeypatch):
-    monkeypatch.setattr(cache_module, "MAX_CACHED_IMAGES", 2)
+    monkeypatch.setattr(cache_module, "RECOMMENDED_LIBRARY_SIZE", 2)
     cache = cache_module.ActivityImageCache(ha)
     await cache.async_setup()
     names = ("a", "b", "c")
@@ -300,7 +304,7 @@ async def test_reference_and_shared_activity_prompt(ha, configured):
 async def test_provider_missing_image_error(ha, configured):
     cache, engine = configured
     ha.services.response = {}
-    with pytest.raises(ValueError, match="image URL"):
+    with pytest.raises(ValueError, match="local media-source image ID"):
         await engine.async_generate("Niewykonalne")
 
 
@@ -442,6 +446,12 @@ async def test_batch_lookup_updates_cache_once(ha):
     cache._async_save = count_writes
     found = await cache.async_find_many(["Odkurzanie", "Sprzątanie"])
     assert len(found) == 2
+    assert writes == 0
+    for entry in cache._entries.values():
+        entry["last_used_at"] = 0
+    assert len(await cache.async_find_many(["Odkurzanie", "Sprzątanie"])) == 2
+    assert writes == 1
+    assert len(await cache.async_find_many(["Odkurzanie", "Sprzątanie"])) == 2
     assert writes == 1
 
 
@@ -488,7 +498,7 @@ async def test_opaque_background_fallback(ha):
 async def test_media_response_without_file_is_rejected(ha, configured):
     _, engine = configured
     ha.services.response = {"url": "/api/media_source/proxy/bad-token"}
-    with pytest.raises(ValueError, match="HTTP"):
+    with pytest.raises(ValueError, match="local media-source image ID"):
         await engine.async_generate("Malformed URL")
 
 
@@ -500,7 +510,8 @@ def test_unabridged_normal_activity_prompt_and_no_room_variant():
     assert "isometric" not in room
     assert "isometric" not in isolated
     assert isolated.split("Posprzątaj zabawki", 1)[-1] == room.split("Pokój Hani", 1)[-1]
-    assert "do not draw or simulate transparency" in isolated.lower()
+    assert "genuine alpha-channel transparency" in isolated.lower()
+    assert "simulate a checkerboard" in isolated.lower()
 
 
 @pytest.mark.asyncio
@@ -538,7 +549,8 @@ async def test_lucida_valid_transparency_is_used(ha, monkeypatch):
             yield returned
 
     class Client:
-        def post(self, url, *, data, timeout):
+        def post(self, url, *, data, timeout, allow_redirects):
+            assert not allow_redirects
             assert url == "http://lucida.test/remove"
             return Response()
 
@@ -871,6 +883,11 @@ def _load_integration_entrypoint():
     sys.modules["homeassistant.config_entries"].ConfigEntry = object
     if not hasattr(sys.modules["homeassistant.exceptions"], "HomeAssistantError"):
         sys.modules["homeassistant.exceptions"].HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+    if "homeassistant.helpers.service" not in sys.modules:
+        _package("homeassistant.helpers.service")
+    sys.modules["homeassistant.helpers.service"].async_register_admin_service = (
+        lambda hass, domain, service, func, **kwargs: hass.services.async_register(domain, service, func, **kwargs)
+    )
     validation = sys.modules["homeassistant.helpers.config_validation"]
     validation.string = str
     validation.boolean = vol.Boolean()
@@ -958,7 +975,7 @@ async def test_actions_register_once_in_setup_before_config_entry(ha, configured
 
     assert await integration.async_unload_entry(ha, entry)
     assert len(ha.services.registered) == 8
-    assert entry.entry_id not in ha.data["activity_images"]
+    assert entry.runtime_data is None
     with pytest.raises(sys.modules["homeassistant.exceptions"].HomeAssistantError,
                        match="not configured"):
         await ha.services.async_call("activity_images", "queue_status", {})
@@ -1283,7 +1300,7 @@ async def test_integration_calendar_service_and_platform_lifecycle(ha, monkeypat
     assert result["tracked_titles"] == 1
     assert await integration.async_unload_entry(ha, entry)
     assert ("unload", ("sensor", "ai_task")) in ha.forwarded
-    assert entry.entry_id not in ha.data["activity_images"]
+    assert entry.runtime_data is None
 
 @pytest.mark.asyncio
 async def test_existing_png_can_be_linked_without_provider(ha, monkeypatch):

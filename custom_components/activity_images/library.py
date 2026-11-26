@@ -15,10 +15,8 @@ from PIL import Image
 
 from .deletion_files import open_root, validate_filename
 from .generated_image import MAX_IMAGE_BYTES
-from .image_cache import ACTIVITY_IMAGE_PREFIX, ActivityImageCache, normalize_title
-
-# Bound standalone decoding to 25 million pixels, even for highly compressed files.
-MAX_IMAGE_PIXELS = 25_000_000
+from .image_cache import ACTIVITY_IMAGE_PREFIX, RECOMMENDED_LIBRARY_SIZE, ActivityImageCache, asset_url, normalize_title
+from .image_processing import MAX_IMAGE_PIXELS
 
 IMAGE_API = "/api/activity_images/library"
 _EXTENSIONS = {".png", ".webp", ".jpg", ".jpeg", ".gif"}
@@ -165,7 +163,7 @@ class ActivityImageLibrary:
     def _titles(entries: dict) -> dict[str, list[str]]:
         titles: dict[str, list[str]] = {}
         for key, entry in entries.items():
-            titles.setdefault(entry["image_url"].split("?", 1)[0], []).append(entry.get("title", key))
+            titles.setdefault(asset_url(entry["image_url"]), []).append(entry.get("title", key))
         return titles
 
     def _item(self, image_id: str, titles_by_url: dict) -> dict:
@@ -180,6 +178,7 @@ class ActivityImageLibrary:
             "title": titles[0] if titles else Path(filename).stem,
             "titles": titles, "linked": bool(titles),
             "origin": "generated" if metadata.get("origin") == "generated" else "unknown",
+            "background_status": metadata.get("background_status"),
             "image_url": assets["master"],
             "thumbnail_url": assets.get("thumbnail", assets["master"]),
         }
@@ -194,7 +193,7 @@ class ActivityImageLibrary:
         linked = sum(item["linked"] for item in items)
         stats = {
             "images": len(items), "linked": linked, "unlinked": len(items) - linked,
-            "mappings": len(entries), "storage_bytes": self._storage_bytes, "supported_images": 4000,
+            "mappings": len(entries), "storage_bytes": self._storage_bytes, "supported_images": RECOMMENDED_LIBRARY_SIZE,
         }
         search = query.casefold().strip()
         items = [item for item in items if (

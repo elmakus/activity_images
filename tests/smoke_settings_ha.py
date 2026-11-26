@@ -69,7 +69,7 @@ def form_input(values):
 
 
 async def run():
-    assert __version__ == "2026.11.0"
+    assert __version__ in {"2026.11.0", "2026.11.3"}
     with tempfile.TemporaryDirectory(prefix="activity-settings-native-") as directory:
         hass = HomeAssistant(directory)
         loader.async_setup(hass)
@@ -141,7 +141,9 @@ async def run():
             await hass.async_block_till_done()
 
             source = Path(directory) / "fake-provider.png"
-            Image.new("RGBA", (24, 24), (200, 40, 60, 255)).save(source)
+            art = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
+            art.paste((200, 40, 60, 255), (3, 3, 21, 21))
+            art.save(source)
             started, release = asyncio.Event(), asyncio.Event()
             calls, processing = [], []
             async def fake_provider(call) -> ServiceResponse:

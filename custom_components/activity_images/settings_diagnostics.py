@@ -13,10 +13,9 @@ from .const import (
 from .settings_schema import effective_settings
 
 
-def diagnostics(hass, entry) -> dict:
+def provider_diagnostics(hass, entry, values: dict) -> dict:
     from .settings import is_own_provider_entity
 
-    values = effective_settings(entry)
     provider = values[CONF_AI_ENTITY]
     state = hass.states.get(provider) if provider else None
     provider_active = bool(state and state.state not in ("unknown", "unavailable"))
@@ -37,6 +36,17 @@ def diagnostics(hass, entry) -> dict:
         provider_status = "attachments_unsupported"
     else:
         provider_status = "available"
+    return {
+        "entity_id": provider,
+        "status": provider_status,
+        "image_service_registered": provider_service,
+        "image_generation_supported": image_supported,
+        "attachments_supported": attachments_supported,
+    }
+
+
+def diagnostics(hass, entry) -> dict:
+    values = effective_settings(entry)
     calendars = []
     for entity_id in values[CONF_CALENDARS]:
         item = hass.states.get(entity_id)
@@ -46,13 +56,7 @@ def diagnostics(hass, entry) -> dict:
                       else "unavailable",
         })
     return {
-        "provider": {
-            "entity_id": provider,
-            "status": provider_status,
-            "image_service_registered": provider_service,
-            "image_generation_supported": image_supported,
-            "attachments_supported": attachments_supported,
-        },
+        "provider": provider_diagnostics(hass, entry, values),
         "lucida": {
             "configured": bool(values[CONF_LUCIDA_URL]),
             "status": "configured_not_probed" if values[CONF_LUCIDA_URL] else "not_configured",

@@ -107,6 +107,7 @@ async def run():
             return True
 
         hass.config_entries = SimpleNamespace(
+            async_entries=lambda *_: [entry],
             async_forward_entry_setups=fake_forward,
             async_unload_platforms=fake_unload,
             async_update_entry=lambda item, *, options: setattr(item, "options", options),

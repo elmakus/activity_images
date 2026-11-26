@@ -182,7 +182,7 @@ async def lifecycle_and_recovery(hass):
         await subject.async_reconcile()
         subject.image_saved("ignored", URL)
         subject._at_started(hass)  # Already-dispatched start callback is harmless.
-        subject._retry_scan(None)
+        subject._retry_scan(None, allow_generation=True)
         await hass.async_block_till_done()
         assert (len(calls), len(notifications), subject.status()) == before
         clean(hass, subject, timers)
@@ -501,7 +501,7 @@ async def swallowed_snapshot_write_failure_preserves_last_good(hass):
 
 
 async def run():
-    assert __version__ == "2026.11.0", __version__
+    assert __version__ in {"2026.11.0", "2026.11.3"}, __version__
     with tempfile.TemporaryDirectory(prefix="ha-calendar-smoke-") as directory:
         hass = HomeAssistant(directory)
         dr.async_setup(hass)

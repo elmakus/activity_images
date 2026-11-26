@@ -16,6 +16,8 @@ ICON_CANVAS_SIZE = 512
 # visible height. Width follows the artwork aspect ratio.
 ICON_VISIBLE_SIZE = ICON_CANVAS_SIZE
 VISIBLE_ALPHA_THRESHOLD = 8
+MAX_IMAGE_PIXELS = 25_000_000
+MAX_ICON_WIDTH = 4096
 
 
 @dataclass(slots=True)
@@ -66,10 +68,30 @@ def _edge_connected_background(candidate_mask: Image.Image) -> Image.Image:
     return connected.point(lambda value: 255 if value == 128 else 0)
 
 
+def validate_dimensions(image: Image.Image) -> None:
+    if image.width <= 0 or image.height <= 0 or image.width * image.height > MAX_IMAGE_PIXELS:
+        raise ValueError("Invalid or excessive image dimensions")
+
+
+def has_meaningful_transparency(image: Image.Image) -> bool:
+    """Require at least 1% almost-transparent pixels, not one faint alpha value."""
+    validate_dimensions(image)
+    if "A" not in image.getbands() and "transparency" not in image.info:
+        return False
+    alpha = image.getchannel("A") if "A" in image.getbands() else image.convert("RGBA").getchannel("A")
+    return sum(alpha.histogram()[:VISIBLE_ALPHA_THRESHOLD + 1]) >= image.width * image.height * 0.01
+
+
+def _validate_icon_width(width: int) -> None:
+    if width > MAX_ICON_WIDTH:
+        raise ValueError("Normalized image dimensions exceed the width limit")
+
+
 def normalize_generated_image(image: Image.Image) -> ProcessedImage:
     """Normalize an image and remove simple edge-connected backgrounds."""
+    validate_dimensions(image)
     rgba = image.convert("RGBA")
-    if rgba.getchannel("A").getextrema()[0] < 250:
+    if has_meaningful_transparency(rgba):
         return ProcessedImage(rgba, "existing_alpha")
 
     palette, coverage = _border_palette(rgba)
@@ -104,6 +126,7 @@ def normalize_icon_canvas(image: Image.Image) -> Image.Image:
     its width follows the artwork aspect ratio, so consumers can render every
     icon at one optical height without distorting wider or narrower artwork.
     """
+    validate_dimensions(image)
     rgba = image.convert("RGBA")
     bbox = _visible_bbox(rgba)
     if bbox is None:
@@ -111,6 +134,7 @@ def normalize_icon_canvas(image: Image.Image) -> Image.Image:
 
     visible_width = bbox[2] - bbox[0]
     visible_height = bbox[3] - bbox[1]
+    _validate_icon_width(max(1, round(visible_width * ICON_CANVAS_SIZE / visible_height)))
     if (
         rgba.size == (visible_width, ICON_CANVAS_SIZE)
         and visible_height == ICON_CANVAS_SIZE
@@ -125,6 +149,7 @@ def normalize_icon_canvas(image: Image.Image) -> Image.Image:
             max(1, round(cropped.width * scale)),
             ICON_CANVAS_SIZE,
         )
+        _validate_icon_width(target_size[0])
         cropped = cropped.resize(target_size, Image.Resampling.LANCZOS)
 
     # Lanczos may create a barely visible halo. Apply the same meaningful-alpha
@@ -135,6 +160,7 @@ def normalize_icon_canvas(image: Image.Image) -> Image.Image:
     cropped = cropped.crop(resized_bbox)
     if cropped.height != ICON_CANVAS_SIZE:
         target_width = max(1, round(cropped.width * ICON_CANVAS_SIZE / cropped.height))
+        _validate_icon_width(target_width)
         cropped = cropped.resize(
             (target_width, ICON_CANVAS_SIZE), Image.Resampling.LANCZOS
         )
@@ -146,7 +172,7 @@ def normalize_icon_canvas(image: Image.Image) -> Image.Image:
 
 def create_theme_qa_preview(image: Image.Image) -> Image.Image:
     """Show a generated icon on dark and light backgrounds side by side."""
-    icon = image.convert("RGBA").copy()
+    icon = image.convert("RGBA")
     icon.thumbnail((232, 232), Image.Resampling.LANCZOS)
     preview = Image.new("RGB", (512, 256), "#f5f5f5")
     ImageDraw.Draw(preview).rectangle((0, 0, 255, 255), fill="#121212")

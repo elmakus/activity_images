@@ -1,9 +1,9 @@
 # Installation, updates and recovery
 
-Version **0.6.0** is the stable review-hardening release. See the
-[release notes](RELEASE_NOTES_v0.6.0.md), [Calendar Coverage guide](CALENDAR_COVERAGE.md) and [isolated validation](REVIEW_IMPROVEMENTS_VALIDATION.md) for changes and known limits.
+Version **0.6.1** is the stable audit-hardening and optimization release. See
+[release notes](RELEASE_NOTES_v0.6.1.md), [audit validation](AUDIT_HARDENING_VALIDATION.md) and [optimization validation](OPTIMIZATION_VALIDATION.md).
 Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before installing.
-Versions 0.2.0–0.5.0 described below are historical; updating from 0.5.0 to 0.6.0 changes runtime code and needs the normal installer restart.
+Updating from 0.6.0 to 0.6.1 changes runtime code and requires a normal installer restart.
 Historical `STAGE*` reports describe earlier migration and validation work;
 they are not current installation instructions.
 
@@ -47,7 +47,7 @@ request a refresh.
 To enable generation, select a real image-capable `ai_task.*` provider in
 **Settings → Devices & services → Activity Images → Configure**. Never
 select `ai_task.activity_images` as its own backend. Optional reference
-images use `media-source://` URLs. The full original shared prompt is the default; an optional global template is editable in the administrator-only Settings tab.
+images use `media-source://` URLs. The original tactile style with native transparency and a chroma-key fallback is the default; an optional global template is editable in the administrator-only Settings tab.
 
 For unmodified Home Tasks, select `ai_task.activity_images` as its image
 provider and leave Home Tasks `prompt_prefix` empty. Existing Home Tasks

@@ -1,6 +1,7 @@
 """Verify native Store commits without trusting its logged-and-swallowed errors."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -24,3 +25,20 @@ async def async_save_verified(hass, store, snapshot: dict) -> None:
             raise OSError("Activity Images persistence verification failed") from exc
 
     await hass.async_add_executor_job(verify)
+
+
+
+async def async_drain(awaitable):
+    """Complete an owned operation despite caller cancellation.
+
+    Return the result and whether cancellation was requested, so the caller
+    can publish its durable state before propagating cancellation.
+    """
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    return await task, cancelled

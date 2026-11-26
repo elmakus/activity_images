@@ -415,7 +415,7 @@ async def test_public_clear_errors_never_rearms_unknown_calendar_outcomes(ha, co
     adapter, queue, _ = calendar(ha, configured, monkeypatch, ["Unknown result"])
     integration = behavior._load_integration_entrypoint()
     await integration.async_setup(ha, {})
-    ha.data[const.DOMAIN]["synthetic"] = SimpleNamespace(queue=queue)
+    ha.config_entries.async_entries = lambda *_: [SimpleNamespace(runtime_data=SimpleNamespace(queue=queue, ready=True))]
     attempts = []
     call = ha.services.async_call
 

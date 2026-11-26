@@ -1,0 +1,37 @@
+# Self-assessed progress for this custom integration; not a Core certification.
+rules:
+  # Bronze
+  action-setup: done
+  appropriate-polling:
+    status: done
+    comment: Calendar refresh uses a 15-minute interval with bounded event queries and retry backoff.
+  brands:
+    status: done
+    comment: The custom integration includes local branding assets.
+  common-modules: done
+  config-flow-test-coverage: done
+  config-flow: done
+  dependency-transparency: done
+  docs-actions: done
+  docs-conditions:
+    status: exempt
+    comment: No custom conditions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions: done
+  docs-triggers:
+    status: exempt
+    comment: No custom triggers.
+  entity-event-setup: done
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data: done
+  test-before-configure:
+    status: done
+    comment: Checks the native AI Task service, entity availability and capabilities without a billable probe; the provider is optional.
+  test-before-setup:
+    status: done
+    comment: Validates stored settings, loads and verifies persistent state before enabling the worker. An unavailable optional provider does not prevent local library use.
+  unique-config-entry: done
+  # Additional implemented rule
+  diagnostics: done

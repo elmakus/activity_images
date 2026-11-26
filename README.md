@@ -4,9 +4,9 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stable version: 0.6.0.** This release hardens the 0.5.0 Calendar Coverage foundation: a rename-safe provider self-guard, deterministic similar-title ties, an explicit manual automatic-generation policy with cost-confirmed restoration, and per-calendar live display where all automatic AI and deletion still require a complete fresh scan. See [release notes](docs/RELEASE_NOTES_v0.6.0.md), [Calendar Coverage, migration and rollback](docs/CALENDAR_COVERAGE.md), and [isolated validation](docs/REVIEW_IMPROVEMENTS_VALIDATION.md). Previous [Coverage features](docs/RELEASE_NOTES_v0.5.0.md), [Settings features](docs/RELEASE_NOTES_v0.4.0.md) and [library/deletion recovery](docs/RELEASE_NOTES_v0.3.0.md) remain applicable.
+**Stable version: 0.6.1.** This maintenance release improves paid-request safety, image validation, library persistence, calendar authorization, native diagnostics and measured cache performance. See [release notes](docs/RELEASE_NOTES_v0.6.1.md), [audit validation](docs/AUDIT_HARDENING_VALIDATION.md) and [optimization validation](docs/OPTIMIZATION_VALIDATION.md). Previous [0.6.0 review hardening](docs/RELEASE_NOTES_v0.6.0.md), [Calendar Coverage](docs/RELEASE_NOTES_v0.5.0.md), [Settings](docs/RELEASE_NOTES_v0.4.0.md) and [library recovery](docs/RELEASE_NOTES_v0.3.0.md) remain applicable.
 
-Existing entity IDs, public action signatures, prompt, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. This release deliberately tightens retry, queue-restart and error-clearing behavior to prevent unknown-outcome paid requests from replaying. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
+Existing entity IDs, public URLs, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. This release deliberately tightens retry, queue-restart and error-clearing behavior to prevent unknown-outcome paid requests from replaying. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
 
 ## Capabilities
 
@@ -32,11 +32,11 @@ Existing entity IDs, public action signatures, prompt, reference-image behavior,
 
 On Home Assistant **2026.11.0 or later**, add `elmakus/activity_images` as a custom **Integration** in **Settings → Marketplace** and install the stable release. Restart Home Assistant when prompted, then add **Activity Images** in **Settings → Devices & services**. See [installation, updates and recovery](docs/INSTALLATION_AND_RELEASE.md) for manual installation and existing development builds.
 
-An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The full original visual prompt remains the default; the Settings tab supports an optional global override. Calendar scanning is opt-in. Each monitored calendar has its own automatic-generation opt-in, off for newly selected calendars.
+An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The original tactile 3D style remains the default, now requesting true alpha-channel transparency with a uniform chroma-key fallback. Only the exact previous built-in default is upgraded automatically; custom prompt overrides remain unchanged. Calendar scanning is opt-in. Each monitored calendar has its own automatic-generation opt-in, off for newly selected calendars.
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
 
-For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.5.0 to 0.6.0 changes runtime code and requires the normal installer restart. Review waiting queue work and explained manual blocks first. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
+For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.6.0 to 0.6.1 changes runtime code and requires the normal installer restart. Review waiting queue work and explained manual blocks first. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
 
 ## Image library manager
 
@@ -48,7 +48,7 @@ Open **Activity Images** in the Home Assistant sidebar as an administrator, or n
 - **Unlink:** remove one confirmed title association. Files and other titles remain. **Unlinked does not mean safe to delete**: dashboards, Home Tasks, or other integrations may still use the file.
 - **Generate new image / Regenerate:** enter a title or choose exactly one existing alias, then explicitly authorize the potentially paid request. The shared AI Task/reference/Lucida pipeline creates a new file and leaves the current mapping unchanged. Review the candidate, then **Accept for this title** or **Discard candidate**. Discard never deletes files. Acceptance rejects a stale request if another operation changed that title's mapping.
 - **Delete permanently / Delete selected:** review the exact files, aliases, current calendar consumers, and external-reference warning before confirming. If replacements are necessary, **Delete & Regenerate** requires separate paid authorization and preserves each original until its replacements are durable. Batch items can finish independently. Failed/interrupted precommit operations support explicit retry or **Keep originals…**. See [deletion behavior, safety, and rollback](docs/LIBRARY_DELETION.md).
-- **Queue & history:** inspect running/pending jobs, failures, candidates, deletion operations, and the last 100 terminal generation records. Small authenticated previews show real available results without cropping; missing/deleted results have clear placeholders. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted requests are not replayed after restart. Legacy unclassified background work remains visible for explicit review/retry; provenance-aware calendar work requires fresh verification.
+- **Queue & history:** inspect running/pending jobs, failures, candidates, deletion operations, and the last 100 terminal generation records. The last 100 completed/abandoned deletion operations retain detailed recovery evidence; older terminal operations retain compact idempotency receipts, not visible in the active history. Tombstones and retry/manual protections are never automatically removed. Small authenticated previews show real available results without cropping; missing/deleted results have clear placeholders. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted requests are not replayed after restart. Legacy unclassified background work remains visible for explicit review/retry; provenance-aware calendar work requires fresh verification.
 
 Both the manager's **Clear recorded errors** and public `activity_images.clear_errors` retain persisted retry barriers. Clearing an error no longer authorizes a new paid attempt. Use the separately confirmed **Retry** or a deliberately requested candidate. Library and Queue controls do not change automatic generation; the Settings tab can update that option explicitly.
 
@@ -95,6 +95,8 @@ including the outstanding full-browser check. The feature was independently revi
 desktop/mobile browser validation remains an important post-install check.
 
 ## Public actions
+
+Actions require an administrator when invoked with a user context. Native Home Assistant automations without a user context remain supported. Replacing an existing exact mapping with link_existing_image requires replace: true. A failed direct request blocks unattended repeats; deliberately use `force: true` or a confirmed Retry to authorize another attempt. The combined pending-generation limit is 256; deletion and retry review plans expire after ten minutes. Existing files and mappings are not evicted or automatically re-normalized on startup. Normalized/fuzzy matching and its thresholds are unchanged; cache recency is persisted at most hourly per association.
 
 The built-in services are usable in **Developer Tools → Actions**. For a synchronous generation, call:
 
@@ -222,7 +224,7 @@ Automatic generation remains an explicit opt-in; publishing or installing a rele
 
 Home Tasks source, `.storage` state, and generated files remain untouched. Activity Images retains its existing `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` envelopes with additive metadata. The existing `.storage/activity_images_calendar_snapshot` retains its bounded title map and adds raw occurrences for private admin Coverage. Restored snapshots are display-only until verified by a fresh complete scan. Exact ignores use a separate revisioned `.storage/activity_images_ignored_titles` Store; ConfigEntry options own calendar selection, paid authorization and stable registry bindings. Verified atomic saves detect native Store write failures instead of reporting an unpersisted association as saved. Version 0.3.0 adds deletion journals, reservations, and tombstones to its cache Store, plus private `.storage/activity_images_deletions` quarantine. Only previously confirmed committed cleanup can resume after restart. There is no new migration of the original image collection and no automatic garbage collection.
 
-The optional Lucida URL is configured locally; no server address or API credential is embedded in this repository. Generated image URLs are not automatically written to external services. Review generated images and QA previews before relying on them for important displays.
+Generated results must resolve through the native AI Task local media source; arbitrary provider-returned HTTP URLs are not fetched. The optional Lucida URL is configured locally; no server address or API credential is embedded in this repository. Generated image URLs are not automatically written to external services. Review generated images and QA previews before relying on them for important displays. New images with uncertain background processing are saved as unlinked review candidates. Automatic jobs and Home Tasks do not assign them until explicit acceptance in Queue & history. A deletion replacement requiring background review leaves the original intact; choose Keep originals and explicitly link the saved candidate, or authorize a fresh retry. Existing images are left unchanged. Generation inputs are limited to 20 MiB and 25 million pixels, with normalized masters limited to 4096 pixels wide.
 
 ## Roadmap
 
@@ -240,3 +242,7 @@ Resolve existing confirmed deletion operations before removing the Activity Imag
 ## Attribution
 
 This project adapts ideas and portions of image-processing code from [L3t4l3s/home-tasks](https://github.com/L3t4l3s/home-tasks), licensed under MIT. See [LICENSE](LICENSE).
+
+### Native diagnostics
+
+Home Assistant diagnostics export provider capability/status and aggregate calendar, queue and deletion counts only. They omit titles, entity IDs, media paths, prompts and Lucida URLs. Diagnostics never contact AI providers.
