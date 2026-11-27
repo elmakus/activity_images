@@ -1,6 +1,6 @@
-# Activity Images v0.7.0 — release candidate
+# Activity Images v0.7.0
 
-Not published or installed yet. Requires Home Assistant 2026.11.0 or later.
+Requires Home Assistant 2026.11.0 or later.
 Install only the approved stable tag after successful exact-commit CI.
 
 ## Changes
@@ -22,7 +22,7 @@ Install only the approved stable tag after successful exact-commit CI.
 ## Release gates
 Local regression and live provider test evidence is recorded separately.
 Remote Python, frontend, HACS and hassfest checks must succeed on the
-exact candidate commit; no release is created by this preparation.
+exact candidate commit before publication.
 
 ## Upgrade
 Use the Marketplace stable release, preserve the existing ConfigEntry.

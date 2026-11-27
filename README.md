@@ -4,7 +4,7 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stable release: 0.6.1.** The main branch contains the unreleased 0.7.0 candidate; use published tags for installation. See [candidate release notes](docs/RELEASE_NOTES_v0.7.0.md) and [Platinum verification](docs/PLATINUM_VALIDATION.md).
+**Version 0.7.0.** Use published stable tags for installation. See [release notes](docs/RELEASE_NOTES_v0.7.0.md) and [Platinum verification](docs/PLATINUM_VALIDATION.md).
 
 The 0.6.1 maintenance release improves paid-request safety, image validation, library persistence, calendar authorization, native diagnostics and measured cache performance. See [release notes](docs/RELEASE_NOTES_v0.6.1.md), [audit validation](docs/AUDIT_HARDENING_VALIDATION.md) and [optimization validation](docs/OPTIMIZATION_VALIDATION.md). Previous [0.6.0 review hardening](docs/RELEASE_NOTES_v0.6.0.md), [Calendar Coverage](docs/RELEASE_NOTES_v0.5.0.md), [Settings](docs/RELEASE_NOTES_v0.4.0.md) and [library recovery](docs/RELEASE_NOTES_v0.3.0.md) remain applicable.
 

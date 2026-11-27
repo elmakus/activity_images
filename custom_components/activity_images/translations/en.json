@@ -164,7 +164,7 @@
       "message": "Activity Images returned an invalid image URL"
     },
     "invalid_link_url": {
-      "message": "Only /local/activity_images/<filename>.png can be linked"
+      "message": "Only PNG files in /local/activity_images/ can be linked"
     },
     "invalid_local_png": {
       "message": "Local PNG is missing or invalid"

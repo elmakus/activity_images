@@ -1,9 +1,9 @@
 # Installation, updates and recovery
 
-Version **0.6.1** is the stable audit-hardening and optimization release. See
-[release notes](RELEASE_NOTES_v0.6.1.md), [audit validation](AUDIT_HARDENING_VALIDATION.md) and [optimization validation](OPTIMIZATION_VALIDATION.md).
+Version **0.7.0** completes the quality-scale work. See
+[release notes](RELEASE_NOTES_v0.7.0.md), [Platinum verification](PLATINUM_VALIDATION.md), [audit validation](AUDIT_HARDENING_VALIDATION.md) and [optimization validation](OPTIMIZATION_VALIDATION.md).
 Read [deletion, preservation, and rollback](LIBRARY_DELETION.md) before installing.
-Updating from 0.6.0 to 0.6.1 changes runtime code and requires a normal installer restart.
+Updating from 0.6.1 to 0.7.0 changes runtime code and requires a normal installer restart.
 Historical `STAGE*` reports describe earlier migration and validation work;
 they are not current installation instructions.
 
