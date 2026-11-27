@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.components.websocket_api import ActiveConnection
 from urllib.parse import unquote
 
 import probatio as p
@@ -25,7 +31,7 @@ MODULE_URL = "/activity_images/activity-images-panel.js"
 _REGISTRATION = f"{DOMAIN}_library_registration"
 _TITLE = p.All(str, p.Length(min=1, max=255))
 _ID = p.All(str, p.Length(min=1, max=128))
-_SCHEMAS = {
+_SCHEMAS: dict[str, dict[Any, Any]] = {
     "list": {
         p.Optional("query", default=""): p.All(str, p.Length(max=255)),
         p.Optional("filter", default="all"): p.In(["all", "linked", "unlinked", "generated"]),
@@ -53,7 +59,7 @@ _SCHEMAS = {
 }
 
 
-async def _dispatch(hass, command: str, args: dict):
+async def _dispatch(hass: HomeAssistant, command: str, args: dict[str, Any]) -> object:
     runtime = _runtime(hass)
     library, queue = runtime.library, runtime.queue
     if command == "list":
@@ -72,23 +78,22 @@ async def _dispatch(hass, command: str, args: dict):
     if command == "generate":
         return await library.async_generate(queue, **args)
     if command == "jobs":
-        response = queue.status()
+        jobs_response = queue.status()
         await library.async_inventory()
-        for job in response["jobs"]:
-            url = queue.candidate_url(job["id"])
-            image_id = library.image_id(unquote(url.split("?", 1)[0].rsplit("/", 1)[-1])) if url else None
-            image = library._images.get(image_id)
-            if image is None or runtime.cache.is_deleted(url or ""):
-                job.update(image_id=None, image_url=None, thumbnail_url=None, result_unavailable=bool(url))
+        for job in jobs_response["jobs"]:
+            candidate_url = queue.candidate_url(job["id"])
+            image_id = library.image_id(unquote(candidate_url.split("?", 1)[0].rsplit("/", 1)[-1])) if candidate_url else None
+            image = library._images.get(image_id) if image_id else None
+            if image is None or runtime.cache.is_deleted(candidate_url or ""):
+                job.update({"image_id": None, "image_url": None, "thumbnail_url": None, "result_unavailable": bool(candidate_url)})
             else:
-                job.update(image_id=image_id, image_url=f"{IMAGE_API}/{image_id}/master",
-                           thumbnail_url=f"{IMAGE_API}/{image_id}/thumbnail" if "thumbnail" in image["files"] else f"{IMAGE_API}/{image_id}/preview")
-        response["operations"] = runtime.deletions.operations() if runtime.deletions else []
-        return response
+                job.update({"image_id": image_id, "image_url": f"{IMAGE_API}/{image_id}/master",
+                            "thumbnail_url": f"{IMAGE_API}/{image_id}/thumbnail" if "thumbnail" in image["files"] else f"{IMAGE_API}/{image_id}/preview"})
+        return {**jobs_response, "operations": runtime.deletions.operations() if runtime.deletions else []}
     if command in {"delete_plan", "delete", "deletions", "delete_retry_plan", "delete_retry", "delete_abandon"}:
         deletions = runtime.deletions
         if deletions is None:
-            raise HomeAssistantError("Activity Images deletion manager is unavailable")
+            raise HomeAssistantError("Activity Images deletion manager is unavailable", translation_domain=DOMAIN, translation_key="deletion_unavailable")
         if command == "deletions":
             return {"operations": deletions.operations()}
         if command == "delete_plan":
@@ -123,11 +128,11 @@ async def _dispatch(hass, command: str, args: dict):
     raise ValueError("Unknown command")
 
 
-def _handler(command: str, fields: dict):
+def _handler(command: str, fields: Mapping[Any, Any]) -> Callable[..., None]:
     @websocket_api.websocket_command({"type": f"{DOMAIN}/library/{command}", **fields})
     @websocket_api.require_admin
     @websocket_api.async_response
-    async def handle(hass, connection, msg):
+    async def handle(hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]) -> None:
         try:
             result = await _dispatch(hass, command, {k: v for k, v in msg.items() if k not in {"id", "type"}})
         except MappingConflict as exc:
@@ -145,7 +150,7 @@ class LibraryImageView(HomeAssistantView):
     requires_auth = True
 
     @require_admin
-    async def get(self, request, image_id, asset):
+    async def get(self, request: web.Request, image_id: str, asset: str) -> web.Response:
         try:
             runtime = _runtime(request.app[KEY_HASS])
             data, content_type = await runtime.library.async_read(image_id, asset)
@@ -158,7 +163,7 @@ class LibraryImageView(HomeAssistantView):
         })
 
 
-async def async_register_manager(hass) -> None:
+async def async_register_manager(hass: HomeAssistant) -> None:
     """Durable routes resolve the current runtime; the panel is entry-owned."""
     registered = hass.data.setdefault(_REGISTRATION, set())
     if "static" not in registered:
@@ -198,5 +203,5 @@ async def async_register_manager(hass) -> None:
     )
 
 
-def async_remove_manager(hass) -> None:
+def async_remove_manager(hass: HomeAssistant) -> None:
     frontend.async_remove_panel(hass, PANEL_ROUTE, warn_if_unknown=False)

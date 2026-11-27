@@ -184,3 +184,43 @@ async def test_cancelled_task_is_never_retried(delays):
         await retry.async_retry_transient(operation)
     assert count == 1
     assert delays == []
+
+
+@pytest.mark.parametrize("headers,expected", [
+    ({"retry-after": "Wed, 01 Jan 2025 12:01:00 GMT"}, 60.0),
+    ({"Retry-After": "Wed, 01 Jan 2025 12:01:00"}, 60.0),
+    ({"Retry-After": "Wed, 01 Jan 2025 11:59:00 GMT"}, 0.0),
+    ({"Retry-After": "not a valid date"}, None),
+    ({"Retry-After": -5}, 0.0),
+    ({"Other": "ignored"}, None),
+])
+def test_retry_after_formats(headers, expected, monkeypatch):
+    from datetime import datetime, timezone
+
+    class FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(retry, "datetime", FixedClock)
+    assert retry._retry_after_seconds(ProviderHttpError(429, headers)) == expected
+
+
+def test_response_status_and_wrapped_header():
+    from types import SimpleNamespace
+
+    outer = RuntimeError("wrapped")
+    outer.response = SimpleNamespace(status_code=429, headers={"Retry-After": "7"})
+    assert retry._transient(outer)
+    assert retry._retry_after_seconds(outer) == 7
+    outer.response.status_code = True
+    assert not retry._transient(outer)
+
+
+def test_exception_chain_cycle_is_bounded():
+    first = RuntimeError("first")
+    second = RuntimeError("second")
+    first.__cause__ = second
+    second.__cause__ = first
+    assert list(retry._chain(first)) == [first, second]
+    assert not retry._transient(first)

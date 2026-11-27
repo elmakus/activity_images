@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageDraw
 
 
-BACKGROUND_DISTANCE = 30
-MAX_BACKGROUND_COLORS = 6
-MIN_BORDER_COVERAGE = 0.72
 ICON_CANVAS_SIZE = 512
 # Normalized display masters are tightly cropped and always retain a 512 px
 # visible height. Width follows the artwork aspect ratio.
@@ -18,54 +13,6 @@ ICON_VISIBLE_SIZE = ICON_CANVAS_SIZE
 VISIBLE_ALPHA_THRESHOLD = 8
 MAX_IMAGE_PIXELS = 25_000_000
 MAX_ICON_WIDTH = 4096
-
-
-@dataclass(slots=True)
-class ProcessedImage:
-    """A normalized RGBA image and the background-processing result."""
-
-    image: Image.Image
-    background_status: str
-
-
-def _border_palette(image: Image.Image) -> tuple[list[tuple[int, int, int]], float]:
-    """Return dominant quantized border colours and their total coverage."""
-    rgb = image.convert("RGB")
-    width, height = rgb.size
-    border = [
-        *(rgb.getpixel((x, 0)) for x in range(width)),
-        *(rgb.getpixel((x, height - 1)) for x in range(width)),
-        *(rgb.getpixel((0, y)) for y in range(1, height - 1)),
-        *(rgb.getpixel((width - 1, y)) for y in range(1, height - 1)),
-    ]
-    quantized = [tuple((channel // 16) * 16 + 8 for channel in pixel) for pixel in border]
-    dominant = Counter(quantized).most_common(MAX_BACKGROUND_COLORS)
-    coverage = sum(count for _colour, count in dominant) / max(1, len(border))
-    return [colour for colour, _count in dominant], coverage
-
-
-def _similar_to_palette_mask(
-    image: Image.Image, palette: list[tuple[int, int, int]]
-) -> Image.Image:
-    """Return a white mask where pixels are close to a border colour."""
-    rgb = image.convert("RGB")
-    aggregate = Image.new("L", rgb.size, 0)
-    for colour in palette:
-        difference = ImageChops.difference(rgb, Image.new("RGB", rgb.size, colour))
-        red, green, blue = difference.split()
-        maximum = ImageChops.lighter(ImageChops.lighter(red, green), blue)
-        close = maximum.point(lambda value: 255 if value <= BACKGROUND_DISTANCE else 0)
-        aggregate = ImageChops.lighter(aggregate, close)
-    return aggregate
-
-
-def _edge_connected_background(candidate_mask: Image.Image) -> Image.Image:
-    """Keep only candidate background pixels connected to an outer edge."""
-    blocked = ImageOps.invert(candidate_mask)
-    expanded = ImageOps.expand(blocked, border=1, fill=0)
-    ImageDraw.floodfill(expanded, (0, 0), 128, thresh=0)
-    connected = expanded.crop((1, 1, expanded.width - 1, expanded.height - 1))
-    return connected.point(lambda value: 255 if value == 128 else 0)
 
 
 def validate_dimensions(image: Image.Image) -> None:
@@ -85,29 +32,6 @@ def has_meaningful_transparency(image: Image.Image) -> bool:
 def _validate_icon_width(width: int) -> None:
     if width > MAX_ICON_WIDTH:
         raise ValueError("Normalized image dimensions exceed the width limit")
-
-
-def normalize_generated_image(image: Image.Image) -> ProcessedImage:
-    """Normalize an image and remove simple edge-connected backgrounds."""
-    validate_dimensions(image)
-    rgba = image.convert("RGBA")
-    if has_meaningful_transparency(rgba):
-        return ProcessedImage(rgba, "existing_alpha")
-
-    palette, coverage = _border_palette(rgba)
-    if coverage < MIN_BORDER_COVERAGE:
-        return ProcessedImage(rgba, "review_needed_complex_background")
-
-    candidate_mask = _similar_to_palette_mask(rgba, palette)
-    background_mask = _edge_connected_background(candidate_mask)
-    histogram = background_mask.histogram()
-    removed_fraction = histogram[255] / max(1, rgba.width * rgba.height)
-    if removed_fraction < 0.01 or removed_fraction > 0.92:
-        return ProcessedImage(rgba, "review_needed_unsafe_mask")
-
-    alpha = ImageOps.invert(background_mask).filter(ImageFilter.GaussianBlur(0.7))
-    rgba.putalpha(alpha)
-    return ProcessedImage(rgba, "background_removed")
 
 
 def _visible_bbox(image: Image.Image) -> tuple[int, int, int, int] | None:

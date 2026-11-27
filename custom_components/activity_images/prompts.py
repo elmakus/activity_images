@@ -27,14 +27,20 @@ as if reduced to 25 px: if the defining object would not be immediately
 recognizable, enlarge and simplify it.
 
 Do not create a photograph, room, wall, floor, frame, tile, letters, numbers,
-words, caption, logo or UI. Return genuine alpha-channel transparency when supported. Do not draw or
-simulate a checkerboard. If transparency is unavailable, use one perfectly
-uniform chroma-key background, with no texture, gradient or cast shadow. Keep a
+words, caption, logo or UI. Return genuine alpha-channel transparency. The background must be fully
+transparent, not a drawn checkerboard, solid color or simulated transparency. Keep a
 clear margin around the subject. Return a square 1:1 PNG.
 """.strip()
 
 DEFAULT_PROMPT_TEMPLATE = f"{DEFAULT_PROMPT_PREFIX} {{title}}\n\n{PROMPT_STYLE_SUFFIX}"
-LEGACY_DEFAULT_PROMPT_TEMPLATE = DEFAULT_PROMPT_TEMPLATE.replace(
+PREVIOUS_DEFAULT_PROMPT_TEMPLATE = DEFAULT_PROMPT_TEMPLATE.replace(
+    """Return genuine alpha-channel transparency. The background must be fully
+transparent, not a drawn checkerboard, solid color or simulated transparency.""",
+    """Return genuine alpha-channel transparency when supported. Do not draw or
+simulate a checkerboard. If transparency is unavailable, use one perfectly
+uniform chroma-key background, with no texture, gradient or cast shadow.""",
+)
+LEGACY_DEFAULT_PROMPT_TEMPLATE = PREVIOUS_DEFAULT_PROMPT_TEMPLATE.replace(
     """Return genuine alpha-channel transparency when supported. Do not draw or
 simulate a checkerboard. If transparency is unavailable, use one perfectly
 uniform chroma-key background, with no texture, gradient or cast shadow.""",
@@ -47,10 +53,10 @@ MAX_PROMPT_LENGTH = 16000
 
 def upgrade_default_prompt(template: str) -> str:
     """Upgrade only the previous built-in prompt, never a custom override."""
-    return DEFAULT_PROMPT_TEMPLATE if template == LEGACY_DEFAULT_PROMPT_TEMPLATE else template
+    return DEFAULT_PROMPT_TEMPLATE if template in (LEGACY_DEFAULT_PROMPT_TEMPLATE, PREVIOUS_DEFAULT_PROMPT_TEMPLATE) else template
 
 
-def validate_prompt_template(template: str) -> str:
+def validate_prompt_template(template: object) -> str:
     """Allow exactly one named {title} placeholder; reject format expressions."""
     if not isinstance(template, str) or not 1 <= len(template) <= MAX_PROMPT_LENGTH:
         raise ValueError("Prompt template must contain 1–16000 characters")

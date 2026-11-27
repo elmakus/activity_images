@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Mapping
+from typing import TYPE_CHECKING, TypeVar
 import json
 from pathlib import Path
 
-from homeassistant.core import CoreState
+from homeassistant.core import CoreState, HomeAssistant
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.storage import Store
+
+T = TypeVar("T")
+SnapshotT = TypeVar("SnapshotT", bound=Mapping[str, object])
 
 
-async def async_save_verified(hass, store, snapshot: dict) -> None:
+async def async_save_verified(hass: HomeAssistant, store: Store[SnapshotT], snapshot: SnapshotT) -> None:
     """Read the actual envelope off-loop, never Store's potentially cached load."""
     # Store defers stopping saves to final-write; reject before it retains a mutation.
     if hass.state is CoreState.stopping:
@@ -28,7 +36,7 @@ async def async_save_verified(hass, store, snapshot: dict) -> None:
 
 
 
-async def async_drain(awaitable):
+async def async_drain(awaitable: Awaitable[T]) -> tuple[T, bool]:
     """Complete an owned operation despite caller cancellation.
 
     Return the result and whether cancellation was requested, so the caller

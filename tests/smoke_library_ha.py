@@ -329,14 +329,14 @@ async def run():
         form = await config_flow.async_step_user()
         flow_manager: Any = SimpleNamespace()
         view = _BaseFlowManagerView[Any, Any](flow_manager)
-        assert len(view._prepare_result_json(form)["data_schema"]) == 7
+        assert len(view._prepare_result_json(form)["data_schema"]) == 6
         entry: Any = Entry()
         hass.config_entries.async_get_known_entry = lambda _: entry
         options_flow = ActivityImagesOptionsFlow()
         options_flow.handler = entry.entry_id
         options_flow.hass = hass
         options_form = await options_flow.async_step_init()
-        assert len(view._prepare_result_json(options_form)["data_schema"]) == 7
+        assert len(view._prepare_result_json(options_form)["data_schema"]) == 6
         assert await async_setup(hass, {})
         hass.config_entries.async_entries = lambda domain: [entry]
         hass.config_entries.async_update_entry = lambda item, *, options: setattr(item, "options", options)
@@ -439,7 +439,11 @@ async def run():
                 assert response.status == 200 and response.content_type == content_type, (response.status, await response.text())
                 assert response.headers["Cache-Control"] == "private, no-store"
                 assert await response.read() == (media_folder / f"reference.{extension}").read_bytes()
-            for media_id in ("media-source://media_source/missing/reference.png",
+            (media_folder / "linked.png").symlink_to(media_folder / "reference.png")
+            (media_folder / "alias").symlink_to(media_folder, target_is_directory=True)
+            for media_id in ("media-source://media_source/local/linked.png",
+                             "media-source://media_source/local/alias/reference.png",
+                             "media-source://media_source/missing/reference.png",
                              "media-source://media_source/local/missing.png",
                              "media-source://media_source/local/invalid.png",
                              "media-source://media_source/local/no_extension",
@@ -479,6 +483,12 @@ async def run():
             assert stale["error"]["code"] == "settings_conflict", stale
             diagnostics = await settings_command("diagnostics")
             assert diagnostics["success"] and diagnostics["result"]["provider"]["status"] == "not_configured"
+            # The native WS registrations outlive an entry; missing configuration
+            # must be a controlled error, not an exception escaping the transport.
+            with patch.object(hass.config_entries, "async_entries", lambda *_: []):
+                for name in ("get", "diagnostics"):
+                    missing = await settings_command(name)
+                    assert not missing["success"] and missing["error"]["code"] == "settings_error"
             listed = await command(admin_ws, "list", limit=1)
             assert listed["success"], listed
             assert listed["result"]["total"] == 2
@@ -532,6 +542,20 @@ async def run():
             stale = await command(admin_ws, "accept", job_id=candidate["id"])
             assert stale["error"]["code"] == "conflict", stale
             assert (await command(admin_ws, "discard", job_id=candidate["id"]))["success"]
+            # Native successful acceptance and restore-auto, with no provider call.
+            accepted_candidate = queue._new_job("Accept Existing Artwork", "manual")
+            accepted_candidate.update(state="review", result_url="/local/activity_images/" + selected["filename"])
+            queue._jobs.append(accepted_candidate)
+            await queue._save()
+            accepted = await command(admin_ws, "accept", job_id=accepted_candidate["id"])
+            assert accepted["success"] and accepted["result"]["state"] == "accepted"
+            revision = queue._manual_block_info("accept existing artwork")["revision"]
+            restored = await command(admin_ws, "restore_auto", title="Accept Existing Artwork", revision=revision, confirm=True)
+            assert restored["success"] and restored["result"]["restored"]
+            assert not (await command(admin_ws, "retry"))["success"]
+            assert not (await command(admin_ws, "retry", title="Unknown"))["success"]
+            response = await client.get("/api/activity_images/library/" + "a"*32 + "/master", headers={"Authorization": "Bearer " + admin_token})
+            assert response.status == 404
             # Test public action validation through the actual current HA registry.
             for data in ({"title": "   "}, {"title": "!!!"}, {"title": 123}):
                 try:

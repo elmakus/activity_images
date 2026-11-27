@@ -79,6 +79,66 @@ async def run():
             out_of_order = ActivityImagesOptionsFlow()
             out_of_order.hass = hass
             assert (await out_of_order.async_step_confirm_auto({"confirm_paid": True}))["reason"] == "invalid_settings"
+            # Real reconfigure flow shares revision checks and paid confirmation.
+            out_of_order = ActivityImagesConfigFlow()
+            out_of_order.hass = hass
+            out_of_order.handler = DOMAIN
+            out_of_order.context = {"source":"reconfigure", "entry_id":entry.entry_id}
+            assert (await out_of_order.async_step_confirm_reconfigure({"confirm_paid":True}))["reason"] == "invalid_settings"
+            async def reconfigure():
+                return await manager.flow.async_init(DOMAIN, context={"source":"reconfigure", "entry_id":entry.entry_id})
+            hass.states.async_set("ai_task.other", "idle", {"supported_features":6})
+            original_data = dict(entry.data)
+            original_id = entry.entry_id
+            with patch.object(manager, "async_schedule_reload") as reload:
+                form = await reconfigure()
+                assert form["step_id"] == "reconfigure"
+                flow_id = form["flow_id"]
+                rejected = await manager.flow.async_configure(flow_id, {**form_values(), CONF_AI_ENTITY:"ai_task.missing"})
+                assert rejected["errors"]["base"] == "provider_unavailable"
+                rejected = await manager.flow.async_configure(flow_id, {**form_values(), CONF_PROMPT_TEMPLATE:"Bad prompt"})
+                assert rejected["errors"]["base"] == "invalid_settings"
+                step = await manager.flow.async_configure(flow_id, {**form_values(), CONF_AI_ENTITY:"ai_task.other"})
+                assert step["step_id"] == "confirm_reconfigure"
+                again = await manager.flow.async_configure(flow_id, {"confirm_paid":False})
+                assert again["step_id"] == "confirm_reconfigure"
+                assert effective_settings(entry)[CONF_AI_ENTITY] == "ai_task.fake"
+                hass.states.async_set("ai_task.other", "unavailable")
+                aborted = await manager.flow.async_configure(flow_id, {"confirm_paid":True})
+                assert aborted["reason"] == "provider_unavailable"
+                hass.states.async_set("ai_task.other", "idle", {"supported_features":6})
+                form = await reconfigure()
+                flow_id = form["flow_id"]
+                step = await manager.flow.async_configure(flow_id, {**form_values(), CONF_AI_ENTITY:"ai_task.other"})
+                assert step["step_id"] == "confirm_reconfigure"
+                manager.async_update_entry(entry, options={CONF_LOOKAHEAD_DAYS:15})
+                aborted = await manager.flow.async_configure(flow_id, {"confirm_paid":True})
+                assert aborted["reason"] == "settings_conflict"
+                form = await reconfigure()
+                flow_id = form["flow_id"]
+                step = await manager.flow.async_configure(flow_id, {**form_values(), CONF_AI_ENTITY:"ai_task.other"})
+                assert step["step_id"] == "confirm_reconfigure"
+                result = await manager.flow.async_configure(flow_id, {"confirm_paid":True})
+                assert result["reason"] == "reconfigure_successful"
+                assert effective_settings(entry)[CONF_AI_ENTITY] == "ai_task.other"
+                assert effective_settings(entry)[CONF_AUTO_CALENDARS] == ["calendar.demo"]
+                form = await reconfigure()
+                flow_id = form["flow_id"]
+                # No new paid authorization: update lookahead in place.
+                result = await manager.flow.async_configure(flow_id, {**form_values(), CONF_LOOKAHEAD_DAYS:25})
+                assert result["reason"] == "reconfigure_successful"
+                assert effective_settings(entry)[CONF_LOOKAHEAD_DAYS] == 25
+                form = await reconfigure()
+                values = form_values()
+                values.pop(CONF_AI_ENTITY)
+                values[CONF_AUTO_CALENDARS] = []
+                result = await manager.flow.async_configure(form["flow_id"], values)
+                assert result["reason"] == "reconfigure_successful"
+                assert effective_settings(entry)[CONF_AI_ENTITY] == ""
+                assert not effective_settings(entry)[CONF_AUTO_CALENDARS]
+                assert dict(entry.data) == original_data and entry.entry_id == original_id
+                assert len(manager.async_entries(DOMAIN)) == 1
+                reload.assert_not_called()
             assert revision(entry)
             assert provider.call_count == 0
         await hass.async_stop()

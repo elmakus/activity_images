@@ -56,11 +56,11 @@ def test_diagnostics_are_read_only_and_service_safe():
     entry = SimpleNamespace(data={}, options={
         const.CONF_AI_ENTITY: "ai_task.mock",
         const.CONF_CALENDARS: ["calendar.family", "calendar.work"],
-        const.CONF_LUCIDA_URL: "http://lucida.local:7000/",
+        "lucida_url": "http://lucida.local:7000/",
     })
     result = diag.diagnostics(hass, entry)
     assert result["provider"]["status"] == "available"
-    assert result["lucida"]["status"] == "configured_not_probed"
+    assert "lucida" not in result
     assert [x["status"] for x in result["calendar"]["entities"]] == ["available", "unavailable"]
     assert service_calls == [("ai_task", "generate_image"), ("calendar", "get_events")]
 
@@ -115,9 +115,9 @@ def test_reference_preview_rejects_non_images_and_oversized_files(tmp_path, monk
     Image.new("RGB", (4, 4)).save(path)
     native_open = os.open
     flags = []
-    def record_open(path, mode):
+    def record_open(path, mode, **kwargs):
         flags.append(mode)
-        return native_open(path, mode)
+        return native_open(path, mode, **kwargs)
     native_stat = os.fstat
     def nonregular(fd):
         fields = list(native_stat(fd))
@@ -128,4 +128,16 @@ def test_reference_preview_rejects_non_images_and_oversized_files(tmp_path, monk
         scoped.setattr(os, "fstat", nonregular)
         with pytest.raises(ValueError, match="regular"):
             media.read_preview(path)
-    assert flags[0] & os.O_NONBLOCK
+    assert flags[-1] & os.O_NONBLOCK and flags[-1] & os.O_NOFOLLOW
+
+    link = tmp_path / "linked.png"
+    link.symlink_to(path)
+    with pytest.raises(OSError):
+        media.read_preview(link)
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    Image.new("RGB", (4, 4)).save(real_dir / "ref.png")
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_dir, target_is_directory=True)
+    with pytest.raises(OSError):
+        media.read_preview(alias / "ref.png")

@@ -2,11 +2,15 @@ name: Python checks
 on:
   push:
   pull_request:
+permissions:
+  contents: read
 jobs:
   engine-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -26,6 +30,8 @@ jobs:
         ha-version: ['2026.11.0', '2026.11.3']
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
@@ -33,12 +39,15 @@ jobs:
         run: >-
           python -m pip install homeassistant==${{ matrix.ha-version }}
           gazetteer-matcher==1.1.0 hassil==3.12.1
-          home-assistant-intents==2026.10.27 pytest pytest-asyncio
-      - run: PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p pytest_asyncio.plugin -q -o asyncio_default_fixture_loop_scope=function tests
-      - run: python tests/smoke_library_ha.py
-      - run: python tests/smoke_settings_ha.py
-      - run: python tests/smoke_config_flow_ha.py
-      - run: python tests/smoke_ha_runtime.py
-      - run: python tests/smoke_ai_wrapper_ha.py
-      - run: python tests/smoke_calendar_startup_ha.py
-      - run: python tests/smoke_calendar_coverage_ha.py
+          home-assistant-intents==2026.10.27 pytest pytest-asyncio coverage==7.17.5 mypy==2.4.1
+      - name: Enforce strict typing against target Home Assistant
+        run: python -m mypy --strict --no-incremental custom_components/activity_images
+      - name: Measure all Python modules and native HA runtime
+        run: |
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m coverage run --source=custom_components/activity_images -m pytest -p pytest_asyncio.plugin -q -o asyncio_default_fixture_loop_scope=function tests
+          for script in tests/smoke*.py; do
+            python -m coverage run --append --source=custom_components/activity_images "$script"
+          done
+          python -m coverage report -m
+          python -m coverage json -o coverage.json
+          python tests/check_coverage.py coverage.json

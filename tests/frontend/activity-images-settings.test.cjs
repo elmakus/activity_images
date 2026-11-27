@@ -12,7 +12,7 @@ const deferred = () => {
 };
 let fixtureId = 0;
 const settingsValues = () => ({ai_task_entity_id:"ai_task.provider",generate_missing_calendar_images:false,
-  calendar_entity_ids:[],calendar_lookahead_days:30,lucida_url:"",
+  calendar_entity_ids:[],calendar_lookahead_days:30,
   reference_media_content_id:"",prompt_template:"Draw {title}"});
 async function settingsFixture(callWS) {
   const window = new Window({url:"http://localhost:8123"});
@@ -35,13 +35,12 @@ test("Settings edit a snapshot, save once and run passive diagnostics", async ()
   const element = new ActivityImagesSettings();
   const calls = [];
   const values = {ai_task_entity_id:"ai_task.provider",generate_missing_calendar_images:false,
-    calendar_entity_ids:["calendar.family"],calendar_lookahead_days:30,
-    lucida_url:"",reference_media_content_id:"",prompt_template:"Draw {title}"};
+    calendar_entity_ids:["calendar.family"],calendar_lookahead_days:30,reference_media_content_id:"",prompt_template:"Draw {title}"};
   element.hass = {states:{"ai_task.provider":{}},callWS:async (query) => {
     calls.push(query);
     if (query.type.endsWith("/get")) return {revision:"a".repeat(64),values};
     if (query.type.endsWith("/diagnostics")) return {
-      provider:{status:"available",entity_id:"ai_task.provider"},lucida:{status:"not_configured"},
+      provider:{status:"available",entity_id:"ai_task.provider"},
       calendar:{entities:[]}};
     if (query.type.endsWith("/save")) return {changed:true,revision:"b".repeat(64)};
   }};

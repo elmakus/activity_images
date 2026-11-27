@@ -7,7 +7,6 @@
         "data": {
           "ai_task_entity_id": "AI Task provider (optional for library-only mode)",
           "reference_media_content_id": "Reference image (media-source://)",
-          "lucida_url": "Lucida background-removal URL",
           "calendar_entity_ids": "Monitor calendars (optional)",
           "calendar_lookahead_days": "Upcoming calendar days (1–60)",
           "prompt_template": "Activity image prompt template (exactly one {title})",
@@ -16,7 +15,6 @@
         "data_description": {
           "ai_task_entity_id": "Choose an image-capable AI Task entity. Leave empty to use the existing library without generating images.",
           "reference_media_content_id": "Optional local style reference passed as an image attachment. The provider must support attachments.",
-          "lucida_url": "Optional trusted background-removal endpoint. Leave empty for local processing only.",
           "calendar_entity_ids": "Only these calendars are monitored.",
           "calendar_lookahead_days": "Number of future days included in calendar coverage.",
           "prompt_template": "Use exactly one {title} placeholder for the activity name.",
@@ -29,24 +27,12 @@
         "data": {
           "confirm_paid": "I authorize potentially paid automatic generation for these calendars"
         }
-      }
-    },
-    "error": {
-      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, reference and trusted HTTP(S) Lucida URL.",
-      "provider_unavailable": "The selected provider is unavailable or does not support the requested image generation or attachment. Choose another provider or leave it empty for library-only mode."
-    },
-    "abort": {
-      "already_configured": "Activity Images is already configured."
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Activity Images settings",
+      },
+      "reconfigure": {
+        "title": "Reconfigure Activity Images",
         "data": {
           "ai_task_entity_id": "AI Task provider (optional for library-only mode)",
           "reference_media_content_id": "Reference image (media-source://)",
-          "lucida_url": "Lucida background-removal URL",
           "calendar_entity_ids": "Monitor calendars (optional)",
           "calendar_lookahead_days": "Upcoming calendar days (1–60)",
           "prompt_template": "Activity image prompt template (exactly one {title})",
@@ -56,7 +42,48 @@
         "data_description": {
           "ai_task_entity_id": "Choose an image-capable AI Task entity. Leave empty to use the existing library without generating images.",
           "reference_media_content_id": "Optional local style reference passed as an image attachment. The provider must support attachments.",
-          "lucida_url": "Optional trusted background-removal endpoint. Leave empty for local processing only.",
+          "calendar_entity_ids": "Only these calendars are monitored.",
+          "calendar_lookahead_days": "Number of future days included in calendar coverage.",
+          "prompt_template": "Use exactly one {title} placeholder for the activity name.",
+          "auto_generate_calendar_entity_ids": "Automatic missing-image requests may incur charges; confirmation is required."
+        }
+      },
+      "confirm_reconfigure": {
+        "title": "May incur AI charges",
+        "description": "Enable automatic missing-image generation for these calendars: {calendars}. The next automatic scan may send paid requests. Explicit rate-limit rejections may be retried up to three attempts. Provider-internal retries and charges are not controlled by this integration. Disabling later cannot cancel a request already sent.",
+        "data": {
+          "confirm_paid": "I authorize potentially paid automatic generation for these calendars"
+        }
+      }
+    },
+    "error": {
+      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, and reference.",
+      "provider_unavailable": "The selected provider is unavailable or does not support the requested image generation or attachment. Choose another provider or leave it empty for library-only mode.",
+      "settings_conflict": "Settings changed elsewhere. Close and reopen Configure before saving."
+    },
+    "abort": {
+      "already_configured": "Activity Images is already configured.",
+      "settings_conflict": "Settings changed elsewhere. Close and reopen Configure before saving.",
+      "invalid_settings": "Settings are no longer valid. Close and reopen Configure.",
+      "provider_unavailable": "The selected provider is unavailable or does not support the requested image generation or attachment. Choose another provider or leave it empty for library-only mode."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Activity Images settings",
+        "data": {
+          "ai_task_entity_id": "AI Task provider (optional for library-only mode)",
+          "reference_media_content_id": "Reference image (media-source://)",
+          "calendar_entity_ids": "Monitor calendars (optional)",
+          "calendar_lookahead_days": "Upcoming calendar days (1–60)",
+          "prompt_template": "Activity image prompt template (exactly one {title})",
+          "auto_generate_calendar_entity_ids": "Auto-generate missing images (select only monitored calendars)"
+        },
+        "description": "Select real calendars to monitor. New calendars default to disabled. Automatic generation is a separate paid opt-in. Settings apply without reload. Disabling auto prevents new attempts, not charges for a request already sent.",
+        "data_description": {
+          "ai_task_entity_id": "Choose an image-capable AI Task entity. Leave empty to use the existing library without generating images.",
+          "reference_media_content_id": "Optional local style reference passed as an image attachment. The provider must support attachments.",
           "calendar_entity_ids": "Only these calendars are monitored.",
           "calendar_lookahead_days": "Number of future days included in calendar coverage.",
           "prompt_template": "Use exactly one {title} placeholder for the activity name.",
@@ -72,12 +99,125 @@
       }
     },
     "error": {
-      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, reference and trusted HTTP(S) Lucida URL.",
+      "invalid_settings": "Select at most 10 monitored calendars. Automatic calendars must be a subset and require an AI provider. Check the prompt, and reference.",
       "settings_conflict": "Settings changed elsewhere. Close and reopen Configure before saving."
     },
     "abort": {
       "settings_conflict": "Settings changed elsewhere. Close and reopen Configure before saving.",
       "invalid_settings": "Settings are no longer valid. Close and reopen Configure."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "library": {
+        "name": "Library"
+      }
+    }
+  },
+  "exceptions": {
+    "calendar_refresh_failed": {
+      "message": "Calendar refresh failed; cached images retained. Check Activity Images diagnostics"
+    },
+    "confirm_replacement": {
+      "message": "The title is already linked; confirm replacement."
+    },
+    "deletion_unavailable": {
+      "message": "Activity Images deletion manager is unavailable"
+    },
+    "empty_image": {
+      "message": "Image provider returned an entirely transparent image; check provider settings before retrying."
+    },
+    "entry_required": {
+      "message": "Exactly one Activity Images config entry is required"
+    },
+    "explicit_retry": {
+      "message": "Previous generation requires explicit retry."
+    },
+    "forget_requires_target": {
+      "message": "Specify a title or image_url to forget"
+    },
+    "generation_failed": {
+      "message": "Image generation failed; review Queue & history before retrying"
+    },
+    "generation_settings_changed": {
+      "message": "Image generation settings changed; review the request again."
+    },
+    "generation_suppressed": {
+      "message": "Image generation is no longer authorized; review the request before retrying."
+    },
+    "home_tasks_attachments": {
+      "message": "Home Tasks wrapper does not accept custom attachments; configure a shared style reference in Activity Images"
+    },
+    "home_tasks_protocol": {
+      "message": "Activity Images wrapper expects the Home Tasks image request format"
+    },
+    "home_tasks_title": {
+      "message": "Home Tasks must provide a valid single-line title"
+    },
+    "invalid_action_values": {
+      "message": "Activity Images rejected the supplied action values"
+    },
+    "invalid_image_filename": {
+      "message": "Invalid image filename"
+    },
+    "invalid_image_url": {
+      "message": "Activity Images returned an invalid image URL"
+    },
+    "invalid_link_url": {
+      "message": "Only /local/activity_images/<filename>.png can be linked"
+    },
+    "invalid_local_png": {
+      "message": "Local PNG is missing or invalid"
+    },
+    "local_storage_failed": {
+      "message": "Activity Images could not access or persist local data"
+    },
+    "mapping_conflict": {
+      "message": "Image or title associations changed or are reserved for deletion. Refresh the library and review the request."
+    },
+    "nonlocal_image_url": {
+      "message": "Activity Images returned a nonlocal image URL"
+    },
+    "not_loaded": {
+      "message": "Activity Images is not loaded"
+    },
+    "not_ready": {
+      "message": "Activity Images is not configured or ready"
+    },
+    "opaque_image": {
+      "message": "Image provider returned an image without a transparent background; check provider settings before retrying."
+    },
+    "outstanding_job": {
+      "message": "An outstanding generation job already exists."
+    },
+    "provider_required": {
+      "message": "Configure a real AI Task image provider in Activity Images"
+    },
+    "read_png_failed": {
+      "message": "Unable to read processed Activity Images PNG"
+    },
+    "self_provider": {
+      "message": "Activity Images cannot use itself as its image provider"
+    },
+    "title_reserved": {
+      "message": "Title is reserved for permanent deletion."
+    },
+    "unloading": {
+      "message": "Activity Images is unloading; retry after setup"
+    }
+  },
+  "issues": {
+    "provider_self_reference": {
+      "title": "Activity Images is configured to use itself",
+      "description": "Open Activity Images in Settings > Devices & services and choose Reconfigure. Select a different image-capable AI Task provider, or clear the provider and automatic calendar generation to use the library only."
+    },
+    "provider_image_unsupported": {
+      "title": "The selected AI Task provider cannot generate images",
+      "description": "Open Activity Images in Settings > Devices & services and choose Reconfigure. Select a provider that supports image generation and returns a local media-source image with real transparency, or use library-only mode."
+    },
+    "provider_attachments_unsupported": {
+      "title": "The selected AI Task provider cannot use the style reference",
+      "description": "Open Activity Images in Settings > Devices & services and choose Reconfigure. Clear the optional reference image or select an image-capable provider that supports attachments. Existing images remain available."
     }
   }
 }

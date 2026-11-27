@@ -10,6 +10,8 @@ import stat
 import time
 import unicodedata
 from copy import deepcopy
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Concatenate, NotRequired, ParamSpec, TypeVar, TypedDict
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
@@ -20,7 +22,7 @@ from homeassistant.helpers.storage import Store
 from PIL import Image
 
 from .const import DOMAIN
-from .deletion_files import open_root, validate_filename
+from .deletion_files import FileSnapshot, open_root, validate_filename
 from .storage import async_drain, async_save_verified
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,10 +84,80 @@ class MappingConflict(ValueError):
     """An exact association changed or replacement was not confirmed."""
 
 
-def _transaction(method):
+class MappingEntry(TypedDict):
+    image_url: str
+    title: NotRequired[str]
+    tokens: NotRequired[list[str]]
+    last_used_at: NotRequired[float]
+
+
+class ImageMetadata(TypedDict, total=False):
+    origin: str
+    created_at: str
+    background_status: str
+
+
+class CandidateContext(TypedDict):
+    operation_id: str
+    image_id: str
+    key: str
+
+
+class RecoveredCandidate(TypedDict):
+    url: str
+    identity: FileSnapshot
+
+
+class DeletionItem(TypedDict):
+    id: str
+    filename: str
+    state: str
+    error: str | None
+    needed_titles: list[str]
+    job_ids: list[str]
+    # Compact terminal receipts deliberately omit recovery fields.
+    files: NotRequired[list[str]]
+    titles: NotRequired[list[str]]
+    safe_without_regeneration: NotRequired[bool]
+    blocked_reason: NotRequired[str | None]
+    identity: NotRequired[FileSnapshot]
+    mappings: NotRequired[dict[str, MappingEntry]]
+    urls: NotRequired[list[str]]
+    reserved_titles: NotRequired[list[str]]
+    expected_titles: NotRequired[dict[str, str | None]]
+    candidates: NotRequired[dict[str, str]]
+    jobs: NotRequired[dict[str, str]]
+    candidate_identities: NotRequired[dict[str, FileSnapshot]]
+    recoveries: NotRequired[dict[str, RecoveredCandidate]]
+
+
+class DeletionOperation(TypedDict):
+    id: str
+    token: str
+    state: str
+    replacement_requests: int
+    items: list[DeletionItem]
+    demand: NotRequired[list[str]]
+    retry_tokens: NotRequired[list[str]]
+    archived: NotRequired[bool]
+
+
+class CacheData(TypedDict, total=False):
+    entries: dict[str, MappingEntry]
+    images: dict[str, ImageMetadata]
+    canvas_normalization_version: int
+    deletions: dict[str, DeletionOperation]
+    tombstones: list[str]
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _transaction(method: Callable[Concatenate[ActivityImageCache, P], Awaitable[R]]) -> Callable[Concatenate[ActivityImageCache, P], Awaitable[R]]:
     """Serialize mutations and restore memory if persistence fails."""
     @wraps(method)
-    async def wrapped(self, *args, **kwargs):
+    async def wrapped(self: ActivityImageCache, /, *args: P.args, **kwargs: P.kwargs) -> R:
         async with self._write_lock:
             # Entries, metadata and journal values are replaced, never edited in place.
             entries, metadata = self._entries.copy(), self._metadata.copy()
@@ -107,17 +179,17 @@ class ActivityImageCache:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
-        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY, atomic_writes=True)
-        self._entries: dict[str, dict] = {}
+        self._store: Store[CacheData] = Store(hass, STORAGE_VERSION, STORAGE_KEY, atomic_writes=True)
+        self._entries: dict[str, MappingEntry] = {}
         self._token_index: dict[str, set[str]] = {}
         self._canvas_normalization_version = 0
         self._loaded = False
         self._load_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
-        self._metadata: dict[str, dict] = {}
+        self._metadata: dict[str, ImageMetadata] = {}
         self.image_revision = 0
         self._save_generation = 0
-        self._deletions: dict[str, dict] = {}
+        self._deletions: dict[str, DeletionOperation] = {}
         self._tombstones: set[str] = set()
 
     async def async_setup(self) -> None:
@@ -253,7 +325,7 @@ class ActivityImageCache:
             self._token_index.setdefault(token, set()).add(key)
 
     @_transaction
-    async def async_remember_many(self, tasks: list[dict]) -> None:
+    async def async_remember_many(self, tasks: list[Mapping[str, str | None]]) -> None:
         """Seed the library from already visible task images with one disk write."""
         changed = False
         remembered_at = time.time()
@@ -325,7 +397,7 @@ class ActivityImageCache:
             return None
         image_url = self._entries[best_key]["image_url"]
         if not await self._async_url_exists(image_url):
-            if self._entries.get(best_key, {}).get("image_url") != image_url:
+            if self._mapped_url(best_key) != image_url:
                 raise MappingConflict("Image mapping changed during lookup; retry lookup")
             if prune:
                 await self._async_forget_keys({best_key}, expected_url=image_url)
@@ -341,7 +413,7 @@ class ActivityImageCache:
         return image_url
 
     def _check_lookup(self, key: str, url: str) -> None:
-        if self._entries.get(key, {}).get("image_url") != url or self.is_deleted(url):
+        if self._mapped_url(key) != url or self.is_deleted(url):
             raise MappingConflict("Image mapping changed during lookup; retry lookup")
 
     async def async_find_many(self, titles: list[str]) -> dict[str, str]:
@@ -376,8 +448,8 @@ class ActivityImageCache:
     @_transaction
     async def _async_forget_keys(self, keys: set[str], *, expected_url: str | None = None) -> None:
         if expected_url is not None:
-            keys = {key for key in keys if self._entries.get(key, {}).get("image_url") == expected_url}
-        keys = {key for key in keys if not self.reserved(key, self._entries.get(key, {}).get("image_url", ""))}
+            keys = {key for key in keys if self._mapped_url(key) == expected_url}
+        keys = {key for key in keys if not self.reserved(key, (self._mapped_url(key) or ""))}
         if not keys:
             return
         for key in keys:
@@ -436,7 +508,7 @@ class ActivityImageCache:
                 return False
         return await self.hass.async_add_executor_job(exists)
 
-    async def async_metadata(self, titles: list[str]) -> dict[str, dict]:
+    async def async_metadata(self, titles: list[str]) -> dict[str, dict[str, int]]:
         """Metadata helper for standalone callers."""
         images = await self.async_find_many(titles)
         return await self.async_image_metadata(images)
@@ -460,19 +532,23 @@ class ActivityImageCache:
             await self._async_save()
         return len(keys)
 
-    def entries(self) -> dict[str, dict]:
+    def entries(self) -> dict[str, MappingEntry]:
         """Return a detached snapshot without touching recency."""
         return deepcopy(self._entries)
 
+    def _mapped_url(self, key: str) -> str | None:
+        entry = self._entries.get(key)
+        return entry["image_url"] if entry is not None else None
+
     def exact(self, title: str) -> str | None:
         """Return the exact URL, including its version, without fuzzy lookup."""
-        return self._entries.get(normalize_title(title), {}).get("image_url")
+        return self._mapped_url(normalize_title(title))
 
-    def image_metadata(self, url: str) -> dict:
+    def image_metadata(self, url: str) -> ImageMetadata:
         return deepcopy(self._metadata.get(asset_url(url), self._metadata.get(_canonical_url(url), {})))
 
     @_transaction
-    async def async_record_image(self, url: str, metadata: dict, *, title: str | None = None) -> None:
+    async def async_record_image(self, url: str, metadata: ImageMetadata, *, title: str | None = None) -> None:
         """Commit provenance and an approved automatic association together."""
         self.check_mapping(title or "", url)
         self._metadata[asset_url(url)] = deepcopy(metadata)
@@ -515,7 +591,7 @@ class ActivityImageCache:
         await self._async_save()
 
     @staticmethod
-    def mapping_identity(entries: dict) -> dict:
+    def mapping_identity(entries: Mapping[str, MappingEntry]) -> dict[str, tuple[str, str]]:
         return {key: (entry["title"], entry["image_url"]) for key, entry in entries.items()}
 
     def is_deleted(self, url: str) -> bool:
@@ -538,7 +614,7 @@ class ActivityImageCache:
             raise MappingConflict("Image or title is reserved for permanent deletion; refresh the library")
 
     @_transaction
-    async def async_journal(self, operation: dict, *, expected_entries: dict | None = None) -> None:
+    async def async_journal(self, operation: DeletionOperation, *, expected_entries: dict[str, MappingEntry] | None = None) -> None:
         if expected_entries is not None and self.mapping_identity(self._entries) != self.mapping_identity(expected_entries):
             raise MappingConflict("Library associations changed; review a fresh deletion plan")
         self._deletions[operation["id"]] = deepcopy(operation)
@@ -553,17 +629,19 @@ class ActivityImageCache:
         for key in terminal[:-DETAILED_DELETION_HISTORY]:
             operation = self._deletions[key]
             self._deletions[key] = {
-                **{name: operation[name] for name in ("id", "token", "state", "replacement_requests")},
+                "id": operation["id"], "token": operation["token"], "state": operation["state"],
+                "replacement_requests": operation["replacement_requests"],
                 "retry_tokens": list(operation.get("retry_tokens", [])),
                 "archived": True,
-                "items": [{name: item[name] for name in ("id", "filename", "state", "error", "needed_titles", "job_ids")}
+                "items": [{"id": item["id"], "filename": item["filename"], "state": item["state"],
+                           "error": item["error"], "needed_titles": item["needed_titles"], "job_ids": item["job_ids"]}
                           for item in operation["items"]],
             }
             changed = True
         return changed
 
     @_transaction
-    async def async_record_candidate(self, url: str, metadata: dict, context: dict) -> None:
+    async def async_record_candidate(self, url: str, metadata: ImageMetadata, context: CandidateContext) -> None:
         operation = deepcopy(self._deletions[context["operation_id"]])
         item = next(item for item in operation["items"] if item["id"] == context["image_id"])
         if item["state"] != "running":
@@ -592,7 +670,7 @@ class ActivityImageCache:
             key = normalize_title(title)
             if key not in item["candidates"]:
                 raise MappingConflict("Not all replacements are durable")
-            if self._entries.get(key, {}).get("image_url") != item["expected_titles"][key]:
+            if self._mapped_url(key) != item["expected_titles"][key]:
                 raise MappingConflict("Replacement title changed; original files retained")
         for key in current:
             self._entries.pop(key)
@@ -610,15 +688,14 @@ class ActivityImageCache:
         self.image_revision += 1
 
     async def _async_save(self) -> None:
-        _, cancelled = await async_drain(async_save_verified(self.hass, self._store,
-            {
+        snapshot: CacheData = {
                 "entries": deepcopy(self._entries),
                 "images": deepcopy(self._metadata),
                 "canvas_normalization_version": self._canvas_normalization_version,
                 "deletions": deepcopy(self._deletions),
                 "tombstones": sorted(self._tombstones),
-            }
-        ))
+        }
+        _, cancelled = await async_drain(async_save_verified(self.hass, self._store, snapshot))
         self._save_generation += 1
         if cancelled:
             raise asyncio.CancelledError

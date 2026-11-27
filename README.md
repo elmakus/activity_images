@@ -4,7 +4,9 @@
 
 Standalone activity-icon generator for [Home Assistant](https://www.home-assistant.io/), developed from the image-generation approach used by the MIT-licensed [Home Tasks](https://github.com/L3t4l3s/home-tasks).
 
-**Stable version: 0.6.1.** This maintenance release improves paid-request safety, image validation, library persistence, calendar authorization, native diagnostics and measured cache performance. See [release notes](docs/RELEASE_NOTES_v0.6.1.md), [audit validation](docs/AUDIT_HARDENING_VALIDATION.md) and [optimization validation](docs/OPTIMIZATION_VALIDATION.md). Previous [0.6.0 review hardening](docs/RELEASE_NOTES_v0.6.0.md), [Calendar Coverage](docs/RELEASE_NOTES_v0.5.0.md), [Settings](docs/RELEASE_NOTES_v0.4.0.md) and [library recovery](docs/RELEASE_NOTES_v0.3.0.md) remain applicable.
+**Stable release: 0.6.1.** The main branch contains the unreleased 0.7.0 candidate; use published tags for installation. See [candidate release notes](docs/RELEASE_NOTES_v0.7.0.md) and [Platinum verification](docs/PLATINUM_VALIDATION.md).
+
+The 0.6.1 maintenance release improves paid-request safety, image validation, library persistence, calendar authorization, native diagnostics and measured cache performance. See [release notes](docs/RELEASE_NOTES_v0.6.1.md), [audit validation](docs/AUDIT_HARDENING_VALIDATION.md) and [optimization validation](docs/OPTIMIZATION_VALIDATION.md). Previous [0.6.0 review hardening](docs/RELEASE_NOTES_v0.6.0.md), [Calendar Coverage](docs/RELEASE_NOTES_v0.5.0.md), [Settings](docs/RELEASE_NOTES_v0.4.0.md) and [library recovery](docs/RELEASE_NOTES_v0.3.0.md) remain applicable.
 
 Existing entity IDs, public URLs, reference-image behavior, fuzzy title matching, and Home Tasks integration remain compatible. This release deliberately tightens retry, queue-restart and error-clearing behavior to prevent unknown-outcome paid requests from replaying. The completed original migration is not repeated. The [0.2.0 notes](docs/RELEASE_NOTES_v0.2.0.md) and [0.2.0 validation](docs/LIBRARY_MANAGER_VALIDATION.md) remain historical release evidence.
 
@@ -13,7 +15,7 @@ Existing entity IDs, public URLs, reference-image behavior, fuzzy title matching
 - Generate images through the standard `ai_task.generate_image` service
 - **Original full tactile 3D activity-icon prompt by default**, with an optional global Settings template. No room/isometric or per-source prompt.
 - Optional `media-source://` reference image passed as an AI Task attachment
-- Optional **Lucida** background removal using a user-configured trusted endpoint; deterministic Pillow-based fallback
+- Require genuine provider-generated alpha transparency; no background removal or external image-processing endpoint
 - Output normalized transparent PNG masters, WebP thumbnails, and light/dark QA previews
 - Persistent normalized-title associations and unchanged conservative similar-title matching; tested with 4,001 unique images, with no capacity-based eviction
 - Persistent background queue, unique-title deduplication, **no cooldown**, failure tracking and no automatic requeue of failed titles
@@ -32,11 +34,35 @@ Existing entity IDs, public URLs, reference-image behavior, fuzzy title matching
 
 On Home Assistant **2026.11.0 or later**, add `elmakus/activity_images` as a custom **Integration** in **Settings → Marketplace** and install the stable release. Restart Home Assistant when prompted, then add **Activity Images** in **Settings → Devices & services**. See [installation, updates and recovery](docs/INSTALLATION_AND_RELEASE.md) for manual installation and existing development builds.
 
-An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID, a trusted Lucida background-removal URL, and selected calendars. The original tactile 3D style remains the default, now requesting true alpha-channel transparency with a uniform chroma-key fallback. Only the exact previous built-in default is upgraded automatically; custom prompt overrides remain unchanged. Calendar scanning is opt-in. Each monitored calendar has its own automatic-generation opt-in, off for newly selected calendars.
+An `ai_task.*` provider is **optional in library-only mode**; configure it later to enable generation. Optionally supply a reference-image `media-source://` ID and selected calendars. The original tactile 3D style remains the default, now requesting genuine alpha-channel transparency without fallback. Only the exact previous built-in defaults are upgraded automatically; custom prompt overrides remain unchanged. Calendar scanning is opt-in. Each monitored calendar has its own automatic-generation opt-in, off for newly selected calendars.
 
 Images are stored in `/config/www/activity_images` and served under `/local/activity_images/`. Those existing export URLs are public; the authenticated manager does not make old exports private.
 
 For upgrades and rollback, see [the deployment checklist](docs/LIBRARY_MANAGER_DEPLOYMENT.md). Updating from 0.6.0 to 0.6.1 changes runtime code and requires the normal installer restart. Review waiting queue work and explained manual blocks first. Preserve the current images and Activity Images storage first; a code downgrade cannot restore permanently deleted files.
+
+## Supported services and entities
+
+Activity Images is a local software service, not a physical device or a network
+gateway. It registers one service device named **Activity Images** with two
+primary entities. The default entity IDs and unique IDs remain compatible
+with existing dashboards and Home Tasks. An existing custom entity ID and
+registry name are preserved; Home Assistant can prefix the displayed name
+with the new device name.
+
+| Platform | Default entity | Function |
+| --- | --- | --- |
+| Sensor | `sensor.activity_images_library` | Number of matched calendar titles, with image URLs, calendar display rules, selected calendars and scan status in attributes. |
+| AI Task | `ai_task.activity_images` | Home Tasks-compatible image generator and cached image retrieval through the native AI Task interface. |
+
+There are no secondary diagnostic entities, custom device classes, or hardware
+controls. Both entities are enabled by default because they provide the main
+features. Supported inputs are standard Home Assistant calendar entities,
+local reference media, and an image-capable AI Task provider that returns a
+local media-source image with real transparency. A provider used with a
+reference must also support image attachments. Text-only providers, direct
+remote image URLs, opaque images, and direct hardware integrations are not
+supported for generation. Other calendar/provider integrations own their
+own device discovery, network settings and credentials.
 
 ## Image library manager
 
@@ -46,7 +72,7 @@ Open **Activity Images** in the Home Assistant sidebar as an administrator, or n
 - **Details:** inspect the master, available thumbnail/QA previews, dimensions, format, filename, associated titles, and reliable dates. Gallery and detail previews preserve the entire image composition and outline the actual image canvas. Switch detail backgrounds between **Dark**, **Light**, and **Transparency checkerboard** without modifying image files. Old assets have **unknown** origin unless explicit metadata exists; a hash is not evidence of generation or import. Modification time is not creation time. There is no guessed Imported filter.
 - **Assign title:** reuse the selected image without contacting AI. Replacing another exact title association requires confirmation. Other aliases remain unchanged.
 - **Unlink:** remove one confirmed title association. Files and other titles remain. **Unlinked does not mean safe to delete**: dashboards, Home Tasks, or other integrations may still use the file.
-- **Generate new image / Regenerate:** enter a title or choose exactly one existing alias, then explicitly authorize the potentially paid request. The shared AI Task/reference/Lucida pipeline creates a new file and leaves the current mapping unchanged. Review the candidate, then **Accept for this title** or **Discard candidate**. Discard never deletes files. Acceptance rejects a stale request if another operation changed that title's mapping.
+- **Generate new image / Regenerate:** enter a title or choose exactly one existing alias, then explicitly authorize the potentially paid request. The shared AI Task/reference pipeline creates a new file and leaves the current mapping unchanged. Review the candidate, then **Accept for this title** or **Discard candidate**. Discard never deletes files. Acceptance rejects a stale request if another operation changed that title's mapping.
 - **Delete permanently / Delete selected:** review the exact files, aliases, current calendar consumers, and external-reference warning before confirming. If replacements are necessary, **Delete & Regenerate** requires separate paid authorization and preserves each original until its replacements are durable. Batch items can finish independently. Failed/interrupted precommit operations support explicit retry or **Keep originals…**. See [deletion behavior, safety, and rollback](docs/LIBRARY_DELETION.md).
 - **Queue & history:** inspect running/pending jobs, failures, candidates, deletion operations, and the last 100 terminal generation records. The last 100 completed/abandoned deletion operations retain detailed recovery evidence; older terminal operations retain compact idempotency receipts, not visible in the active history. Tombstones and retry/manual protections are never automatically removed. Small authenticated previews show real available results without cropping; missing/deleted results have clear placeholders. Cancel only waiting work. Retry is an explicit potentially paid action. Closing the panel does not cancel a job. Interrupted requests are not replayed after restart. Legacy unclassified background work remains visible for explicit review/retry; provenance-aware calendar work requires fresh verification.
 
@@ -61,11 +87,11 @@ Regeneration in Activity Images does **not** replace copies previously saved by 
 ## Settings
 
 The administrator-only **Settings** tab in the Activity Images sidebar offers four sections:
-**General** (AI Task provider, calendars, lookahead, automatic generation, Lucida URL),
+**General** (AI Task provider, calendars, lookahead, automatic generation),
 **Prompt** (editable global template with required `{title}` token and text-only preview),
 **Reference** (manual `media-source://` ID with authenticated preview, plus HA's media
-picker when already loaded), and **Diagnostics** (passive provider capabilities,
-Lucida configuration and calendar status).
+picker when already loaded), and **Diagnostics** (passive provider capabilities
+and calendar status).
 
 Native **Settings → Devices & services → Activity Images → Configure** provides the
 supported HA media picker. The sidebar links there when `ha-selector` is not already
@@ -79,9 +105,20 @@ Disabling automatic generation stops new calendar jobs, not already accepted wor
 Cancel waiting work explicitly in **Queue & history**. A save can wait for an ongoing
 calendar scan or deletion boundary. No-op saves do not notify update listeners.
 Both the panel and native **Configure** reject stale editors rather than overwrite changes.
+Native **Reconfigure** in the integration entry menu also uses this transaction.
+It checks changed provider and reference capabilities without a paid probe,
+keeps the same config entry, and requires renewed consent for paid calendar
+generation when changing providers. No restart or reload is required.
+Existing cached artwork remains available.
+
+Home Assistant Repairs reports actionable incompatible provider settings
+(self-reference, missing image-generation support, or missing attachment
+support when a reference is configured). It clears the issue after correction.
+Transient provider unavailability and intentional library-only mode do not
+create repair issues. Use Diagnostics for temporary service failures.
 If a save result is unknown, explicitly discard edits and reload saved settings before retrying.
 
-**The Settings Diagnostics view does not test real AI generation or Lucida connectivity.**
+**The Settings Diagnostics view does not test real AI generation.**
 It checks provider state, registered services and advertised image-generation/attachment
 feature bits; an available status is not proof a request will succeed or be free.
 Reference previews accept only HA's local `media-source://media_source/` source and
@@ -93,6 +130,30 @@ Visit [Settings architecture](docs/SETTINGS_ARCHITECTURE.md) and the
 [Settings review](docs/SETTINGS_REVIEW.md) for verified results and limitations,
 including the outstanding full-browser check. The feature was independently reviewed for v0.4.0; full authenticated
 desktop/mobile browser validation remains an important post-install check.
+
+### Configuration parameters
+
+These settings are available both during installation and afterwards through
+**Configure** or the administrator-only Settings tab. None requires a separate
+Activity Images account or API key.
+
+| Setting (stored key) | Required / default | Purpose |
+| --- | --- | --- |
+| AI Task provider (`ai_task_entity_id`) | Optional; none | Select an existing image-capable AI Task entity. Without it, local library browsing, linking and lookup work. Never select the wrapper itself. |
+| Reference image (`reference_media_content_id`) | Optional; none | Native local media-source ID passed to a provider that supports image attachments. The configured image is not modified. |
+| Prompt template (`prompt_template`) | Optional; built-in tactile 3D prompt | Global image instructions, with exactly the supported `{title}` placeholder. Custom prompts remain intact across updates. |
+| Monitored calendars (`calendar_entity_ids`) | Optional; none | Up to ten existing calendar entities; used to resolve upcoming titles. |
+| Lookahead (`calendar_lookahead_days`) | 30 days | Integer from 1 to 60. |
+| Automatic calendars (`auto_generate_calendar_entity_ids`) | Optional; none | Subset of monitored calendars; new paid authorization requires explicit confirmation. |
+
+An unavailable or incompatible AI provider makes the AI Task wrapper unavailable
+for advertised generation capability. The native AI Task interface can still
+return an existing cached image for a valid request; the library, sensor and
+resolve-only actions remain usable. Provider state is observed passively.
+Calendar refresh failures retain existing cached images, mark stale results in
+the scan status, and log once per outage and once on successful recovery.
+Explicit refresh actions raise a Home Assistant error on failure; check Settings
+Diagnostics and the sensor's scan_error attribute for details.
 
 ## Public actions
 
@@ -195,8 +256,8 @@ The installed wrapper matches the upstream Home Tasks request format:
 `instructions: <title> + "\\n\\nThe image must have a square 1:1 aspect ratio."`.
 It reads the human title from `instructions` (never from the hash), ignores
 Home Tasks' extra aspect instruction, and delegates to the shared engine
-so the **complete original 3D prompt, optional style reference, Lucida,
-Pillow processing and fuzzy cache** remain consistent.
+so the **complete original 3D prompt, optional style reference,
+Pillow normalization and fuzzy cache** remain consistent.
 
 Limitations:
 - Upstream Home Tasks checks its own image library before invoking
@@ -220,11 +281,64 @@ another paid provider request. A separate test dashboard is available at
 `/home-tasks-image-test/validation`; the user confirmed the original card renders the generated image.
 Automatic generation remains an explicit opt-in; publishing or installing a release does not enable it.
 
+## Use cases and automation examples
+
+Use the library on a family calendar to show recognizable activity icons.
+Monitor only the calendars needed for the dashboard, assign existing images
+first, and optionally authorize automatic generation for missing titles.
+For a task board, configure the [Home Tasks wrapper](#home-tasks-wrapper)
+to reuse the same artwork. For an independent dashboard, use the public
+resolve action or browse and assign images in the manager without an AI provider.
+
+Example: look up a known activity once each morning without paid generation.
+The automation uses a response variable and stores no new persistent state.
+Replace the activity title with one from your library. A notification appears
+only if a matching image is missing.
+
+```yaml
+alias: Check activity icon
+triggers:
+  - trigger: time
+    at: "07:00:00"
+actions:
+  - action: activity_images.resolve_images
+    data:
+      titles:
+        - Green Waste Collection
+      enqueue_missing: false
+    response_variable: artwork
+  - condition: template
+    value_template: "{{ 'Green Waste Collection' not in artwork.images }}"
+  - action: persistent_notification.create
+    data:
+      title: Activity Images
+      message: Assign an image for Green Waste Collection in the library.
+mode: single
+```
+
+## Troubleshooting
+
+| Symptom | Checks and next steps |
+| --- | --- |
+| AI Task unavailable | Check Settings → Diagnostics for provider availability and capabilities. Select a different image-capable entity if needed; do not select Activity Images itself. |
+| Provider output has no transparency | Check the provider's model and output settings. The integration does not remove backgrounds. Review custom prompts, especially old fallback instructions. Retry explicitly only after resolving the problem. |
+| Reference attachment unsupported | Choose a provider advertising attachment support or clear the optional reference. |
+| Calendar icons are missing or stale | Check the monitored calendar selections and sensor scan error. Use Refresh coverage to resolve existing images without queuing new ones. A successful complete scan is required for automatic generation and permanent deletion. |
+| Queue failed or interrupted | Inspect Queue & history. A request may already have incurred a charge. Clearing error text does not authorize a repeat. Use explicit Retry only after checking the provider and its billing. |
+| A replacement or deletion is blocked | Review the exact file, calendar demand and reservation reason. Resolve outstanding work or use Keep originals for failed precommit operations. Committed cleanup must be retried, not abandoned. |
+| An editor reports a revision conflict | Reload the saved settings or current deletion plan; do not overwrite a newer decision blindly. |
+| Library works but a dashboard shows old artwork | Check the dashboard's entity ID and image URL. Home Tasks copies are independent; old URLs and external references are not automatically rewritten. |
+
+Check **Settings → System → Repairs** for actionable provider configuration issues.
+Use native integration diagnostics and Home Assistant logs for further investigation.
+Do not include private prompts, local media paths or credentials in public reports.
+No diagnostic runs a paid probe.
+
 ## Safety and migration
 
 Home Tasks source, `.storage` state, and generated files remain untouched. Activity Images retains its existing `.storage/activity_images_image_cache` and `.storage/activity_images_jobs` envelopes with additive metadata. The existing `.storage/activity_images_calendar_snapshot` retains its bounded title map and adds raw occurrences for private admin Coverage. Restored snapshots are display-only until verified by a fresh complete scan. Exact ignores use a separate revisioned `.storage/activity_images_ignored_titles` Store; ConfigEntry options own calendar selection, paid authorization and stable registry bindings. Verified atomic saves detect native Store write failures instead of reporting an unpersisted association as saved. Version 0.3.0 adds deletion journals, reservations, and tombstones to its cache Store, plus private `.storage/activity_images_deletions` quarantine. Only previously confirmed committed cleanup can resume after restart. There is no new migration of the original image collection and no automatic garbage collection.
 
-Generated results must resolve through the native AI Task local media source; arbitrary provider-returned HTTP URLs are not fetched. The optional Lucida URL is configured locally; no server address or API credential is embedded in this repository. Generated image URLs are not automatically written to external services. Review generated images and QA previews before relying on them for important displays. New images with uncertain background processing are saved as unlinked review candidates. Automatic jobs and Home Tasks do not assign them until explicit acceptance in Queue & history. A deletion replacement requiring background review leaves the original intact; choose Keep originals and explicitly link the saved candidate, or authorize a fresh retry. Existing images are left unchanged. Generation inputs are limited to 20 MiB and 25 million pixels, with normalized masters limited to 4096 pixels wide.
+Generated results must resolve through the native AI Task local media source; arbitrary provider-returned HTTP URLs are not fetched. Activity Images requires meaningful native alpha transparency and a visible subject. Opaque, simulated-transparent or entirely transparent output fails generation before library publication. Check the selected provider and its settings, then explicitly retry if desired. There is no automatic paid retry for rejected output. Provider-owned source media remains untouched. Manual generation still supports review and acceptance of valid candidates. Existing images, including older background-review candidates, remain unchanged and retain their existing review and deletion safeguards. Generation inputs are limited to 20 MiB and 25 million pixels, with normalized masters limited to 4096 pixels wide and nominally 512 pixels high (edge cropping can differ slightly). Legacy background-removal settings are removed from active config-entry data and options on setup; the two exact former built-in prompts are upgraded in the effective settings, while custom prompts remain unchanged.
 
 ## Roadmap
 
@@ -245,4 +359,4 @@ This project adapts ideas and portions of image-processing code from [L3t4l3s/ho
 
 ### Native diagnostics
 
-Home Assistant diagnostics export provider capability/status and aggregate calendar, queue and deletion counts only. They omit titles, entity IDs, media paths, prompts and Lucida URLs. Diagnostics never contact AI providers.
+Home Assistant diagnostics export provider capability/status and aggregate calendar, queue and deletion counts only. They omit titles, entity IDs, media paths, and prompts. Diagnostics never contact AI providers.

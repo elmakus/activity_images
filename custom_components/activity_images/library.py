@@ -10,12 +10,18 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from .image_queue import ActivityImageQueue, PublicJob
 
 from PIL import Image
 
 from .deletion_files import open_root, validate_filename
 from .generated_image import MAX_IMAGE_BYTES
-from .image_cache import ACTIVITY_IMAGE_PREFIX, RECOMMENDED_LIBRARY_SIZE, ActivityImageCache, asset_url, normalize_title
+from .image_cache import ACTIVITY_IMAGE_PREFIX, RECOMMENDED_LIBRARY_SIZE, ActivityImageCache, MappingEntry, asset_url, normalize_title
 from .image_processing import MAX_IMAGE_PIXELS
 
 IMAGE_API = "/api/activity_images/library"
@@ -62,13 +68,54 @@ def _verify(data: bytes, *, decode: bool = True) -> tuple[int, int, str]:
     return width, height, format_name
 
 
+class ImageDetails(TypedDict):
+    width: int
+    height: int
+    format: str
+    modified_at: str
+
+
+class InventoryImage(ImageDetails):
+    filename: str
+    files: dict[str, str]
+
+
+class LibraryItem(TypedDict):
+    id: str
+    filename: str
+    title: str
+    titles: list[str]
+    linked: bool
+    origin: str
+    background_status: str | None
+    image_url: str
+    thumbnail_url: str
+
+
+class LibraryDetails(LibraryItem, ImageDetails):
+    created_at: str | None
+    assets: dict[str, str]
+
+
+class LibraryPage(TypedDict):
+    items: list[LibraryItem]
+    total: int
+    offset: int
+    limit: int
+    stats: dict[str, int]
+    filters: list[str]
+
+
+type Fingerprint = tuple[int, int, int, int, int]
+
+
 class ActivityImageLibrary:
-    def __init__(self, hass, cache: ActivityImageCache) -> None:
+    def __init__(self, hass: HomeAssistant, cache: ActivityImageCache) -> None:
         self.hass = hass
         self.cache = cache
         self.root = Path(hass.config.path("www", "activity_images"))
-        self._verified: dict[str, tuple[tuple, dict | None]] = {}
-        self._images: dict[str, dict] = {}
+        self._verified: dict[str, tuple[Fingerprint, ImageDetails | None]] = {}
+        self._images: dict[str, InventoryImage] = {}
         self._storage_bytes = 0
         self._scanned_at = 0.0
         self._image_revision = -1
@@ -78,7 +125,7 @@ class ActivityImageLibrary:
     def image_id(filename: str) -> str:
         return hashlib.sha256(filename.encode()).hexdigest()[:32]
 
-    def _scan(self) -> tuple[dict, int]:
+    def _scan(self) -> tuple[dict[str, InventoryImage], int]:
         if not self.root.exists():
             self._verified = {}
             return {}, 0
@@ -90,8 +137,10 @@ class ActivityImageLibrary:
         finally:
             os.close(directory)
 
-    def _scan_directory(self, directory: int) -> tuple[dict, int]:
-        valid, fingerprints, storage_bytes = {}, {}, 0
+    def _scan_directory(self, directory: int) -> tuple[dict[str, InventoryImage], int]:
+        valid: dict[str, ImageDetails] = {}
+        fingerprints: dict[str, tuple[Fingerprint, ImageDetails | None]] = {}
+        storage_bytes = 0
         with os.scandir(directory) as entries:
             for entry in entries:
                 try:
@@ -122,8 +171,8 @@ class ActivityImageLibrary:
                 except OSError:
                     continue
         self._verified = fingerprints
-        grouped = {}
-        variants = set()
+        grouped: dict[str, dict[str, str]] = {}
+        variants: set[str] = set()
         for filename in valid:
             if filename.lower().endswith(".png"):
                 stem = filename[:-4]
@@ -160,13 +209,13 @@ class ActivityImageLibrary:
         self._scanned_at = 0
 
     @staticmethod
-    def _titles(entries: dict) -> dict[str, list[str]]:
+    def _titles(entries: Mapping[str, MappingEntry]) -> dict[str, list[str]]:
         titles: dict[str, list[str]] = {}
         for key, entry in entries.items():
             titles.setdefault(asset_url(entry["image_url"]), []).append(entry.get("title", key))
         return titles
 
-    def _item(self, image_id: str, titles_by_url: dict) -> dict:
+    def _item(self, image_id: str, titles_by_url: Mapping[str, list[str]]) -> LibraryItem:
         image = self._images[image_id]
         filename = image["filename"]
         url = ACTIVITY_IMAGE_PREFIX + quote(filename, safe="")
@@ -183,7 +232,7 @@ class ActivityImageLibrary:
             "thumbnail_url": assets.get("thumbnail", assets["master"]),
         }
 
-    async def async_list(self, *, query="", filter="all", offset=0, limit=48, refresh=False) -> dict:
+    async def async_list(self, *, query: str = "", filter: str = "all", offset: int = 0, limit: int = 48, refresh: bool = False) -> LibraryPage:
         if filter not in {"all", "linked", "unlinked", "generated"} or not 1 <= limit <= 96 or offset < 0 or len(query) > 255:
             raise ValueError("Invalid library query")
         await self.async_inventory(refresh=refresh)
@@ -205,7 +254,7 @@ class ActivityImageLibrary:
         return {"items": items[offset:offset + limit], "total": len(items), "offset": offset,
                 "limit": limit, "stats": stats, "filters": ["all", "linked", "unlinked", "generated"]}
 
-    async def async_get(self, image_id: str) -> dict:
+    async def async_get(self, image_id: str) -> LibraryDetails:
         await self.async_inventory()
         if image_id not in self._images:
             await self.async_inventory(refresh=True)
@@ -214,7 +263,8 @@ class ActivityImageLibrary:
         image = self._images[image_id]
         item = self._item(image_id, self._titles(self.cache.entries()))
         metadata = self.cache.image_metadata(ACTIVITY_IMAGE_PREFIX + quote(image["filename"], safe=""))
-        return {**item, **{key: image[key] for key in ("width", "height", "format", "modified_at")},
+        return {**item, "width": image["width"], "height": image["height"],
+                "format": image["format"], "modified_at": image["modified_at"],
                 "created_at": metadata.get("created_at"),
                 "assets": {kind: f"{IMAGE_API}/{image_id}/{kind}" for kind in image["files"]}}
 
@@ -232,7 +282,7 @@ class ActivityImageLibrary:
             image = self._images.get(image_id)
         if image is None or (asset != "preview" and asset not in image["files"]):
             raise ValueError("Image asset not found")
-        def read():
+        def read() -> tuple[bytes, str]:
             data = _read_owned(self.root, image["files"]["master" if asset == "preview" else asset])
             try:
                 _, _, format_name = _verify(data)
@@ -248,7 +298,7 @@ class ActivityImageLibrary:
             return data, {"PNG": "image/png", "WEBP": "image/webp", "JPEG": "image/jpeg", "GIF": "image/gif"}[format_name]
         return await self.hass.async_add_executor_job(read)
 
-    async def async_generate(self, queue, title: str, image_id: str | None = None) -> dict:
+    async def async_generate(self, queue: ActivityImageQueue, title: str, image_id: str | None = None) -> PublicJob:
         title = validate_title(title)
         if image_id:
             item = await self.async_get(image_id)

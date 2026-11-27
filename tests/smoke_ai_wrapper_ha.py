@@ -24,6 +24,7 @@ from homeassistant.helpers import entity_registry as er  # noqa: E402
 from custom_components.activity_images import (  # noqa: E402
     async_setup, async_setup_entry, async_unload_entry,
 )
+from custom_components.activity_images import ai_task as wrapper_module  # noqa: E402
 from custom_components.activity_images.ai_task import (  # noqa: E402
     ActivityImagesAITaskEntity,
     extract_home_tasks_title,
@@ -90,6 +91,7 @@ async def run():
             assert media == "media-source://ai_task/image/smoke.png"
             return SimpleNamespace(path=raw_source, url="/api/ai_task/image/smoke.png")
 
+        hass.states.async_set("ai_task.fake_real_provider", "idle", {"supported_features": 4})
         entry: Any = TestEntry()
         hass.config_entries.async_entries = lambda *_: [entry]
         with patch(
@@ -126,6 +128,47 @@ async def run():
             # Second invocation must reuse the independent cache, not call AI.
             second = await wrapper._async_generate_image(task, session)
             assert second.image_data == first.image_data
+            assert len(seen) == 1
+            # A native AI Task call can still reuse a local image when the
+            # advertised generation provider goes offline.
+            hass.states.async_set("ai_task.fake_real_provider", "unavailable", {"supported_features": 4})
+            assert not wrapper.available
+            cached_offline = await wrapper._async_generate_image(task, session)
+            assert cached_offline.image_data == first.image_data
+            assert len(seen) == 1
+            hass.states.async_set("ai_task.fake_real_provider", "idle", {"supported_features": 4})
+            assert wrapper.available
+            # Native event dispatch, listener rebinding, and removal: no provider requests.
+            with patch.object(wrapper, "async_write_ha_state") as write, \
+                 patch.object(wrapper_module._LOGGER, "warning") as warning, \
+                 patch.object(wrapper_module._LOGGER, "info") as info:
+                await wrapper.async_added_to_hass()
+                hass.states.async_set("ai_task.fake_real_provider", "unavailable", {"supported_features": 4})
+                await hass.async_block_till_done()
+                assert not wrapper.available and warning.call_count == 1
+                hass.states.async_set("ai_task.fake_real_provider", "unknown", {"supported_features": 4})
+                await hass.async_block_till_done()
+                assert warning.call_count == 1
+                hass.states.async_set("ai_task.fake_real_provider", "idle", {"supported_features": 4})
+                await hass.async_block_till_done()
+                assert wrapper.available and info.call_count == 1
+                hass.states.async_set("ai_task.replacement", "idle", {"supported_features": 4})
+                entry.options = {"ai_task_entity_id": "ai_task.replacement"}
+                await wrapper._async_settings_updated(hass, entry)
+                before = write.call_count
+                hass.states.async_set("ai_task.fake_real_provider", "unavailable")
+                await hass.async_block_till_done()
+                assert write.call_count == before and wrapper.available
+                hass.states.async_set("ai_task.replacement", "unavailable")
+                await hass.async_block_till_done()
+                assert not wrapper.available and warning.call_count == 2
+                # HA executes the registered cleanup callbacks on removal.
+                for cleanup in wrapper._on_remove:
+                    cleanup()
+                before = write.call_count
+                hass.states.async_set("ai_task.replacement", "idle", {"supported_features": 4})
+                await hass.async_block_till_done()
+                assert write.call_count == before
             assert len(seen) == 1
             assert await async_unload_entry(hass, entry)
             print("ACTUAL_HA_CORE_AI_TASK_WRAPPER_PASS", len(seen), first.width, first.height)

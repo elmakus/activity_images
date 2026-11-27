@@ -25,7 +25,7 @@ from custom_components.activity_images import (  # noqa: E402
     async_setup_entry,
     async_unload_entry,
 )
-from custom_components.activity_images.sensor import ActivityImagesLibrarySensor  # noqa: E402
+from custom_components.activity_images.sensor import async_setup_entry as setup_sensor  # noqa: E402
 
 
 class TestEntry:
@@ -125,7 +125,19 @@ async def run():
             assert first["reused"] is False
             assert entry.runtime_data.calendar.calendars == ("calendar.demo",)
             await asyncio.sleep(0.02)
-            sensor = ActivityImagesLibrarySensor(entry.entry_id, entry.runtime_data.calendar)
+            entities = []
+            await setup_sensor(hass, entry, entities.extend)
+            assert len(entities) == 1
+            sensor = entities[0]
+            assert sensor.unique_id == entry.entry_id + "_library"
+            with patch.object(sensor, "async_write_ha_state") as write:
+                await sensor.async_added_to_hass()
+                entry.runtime_data.calendar._notify()
+                write.assert_called_once()
+                await sensor.async_will_remove_from_hass()
+                entry.runtime_data.calendar._notify()
+                write.assert_called_once()
+                await sensor.async_will_remove_from_hass()
             assert sensor.native_value == 1
             assert sensor.extra_state_attributes["images"]["Green Waste Collection"] == first["image_url"]
             assert sensor.extra_state_attributes["calendar_rules"][0]["label_type"] == "image"
@@ -143,6 +155,12 @@ async def run():
             )
             assert found["images"]["Green Waste Collection"] == first["image_url"]
             assert found["image_metadata"]["Green Waste Collection"]["height"] == 512
+            from custom_components.activity_images.diagnostics import async_get_config_entry_diagnostics
+            diagnostics = await async_get_config_entry_diagnostics(hass, entry)
+            assert diagnostics["runtime_loaded"] and diagnostics["mappings"] == 1
+            assert diagnostics["queue_states"] == {"completed": 1}
+            assert diagnostics["deletion_states"] == {}
+            assert "entity_id" not in diagnostics["provider"]
             assert await async_unload_entry(hass, entry)
             try:
                 await hass.services.async_call(

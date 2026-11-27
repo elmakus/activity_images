@@ -28,7 +28,7 @@ The deletion check requires a fresh, successful, complete calendar read.
 If calendar data is unavailable or exceeds the verification bounds, deletion is blocked rather than guessed safe.
 Later events outside the configured window cannot be established as current consumers.
 
-Needed titles receive fresh replacements through the existing serialized AI Task/reference-image/Lucida pipeline.
+Needed titles receive fresh replacements through the existing serialized AI Task/reference-image pipeline.
 The confirmation states the number of new logical generation requests.
 Each logical request retains the existing maximum of **three AI Task service attempts by Activity Images** for eligible transient failures.
 The configured provider can apply its own internal retries and billing; this is not a billing ceiling or a bound on its internal HTTP calls.

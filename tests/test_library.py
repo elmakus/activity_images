@@ -720,3 +720,45 @@ async def test_active_excludes_idle_pending_and_includes_direct_generation(ha, c
     await generating
     assert queue.status()["active"] is False
     await queue.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_review_without_saved_image_cannot_be_accepted(ha, configured, monkeypatch):
+    cache, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    monkeypatch.setattr(queue, "_kick", lambda: None)
+    await queue.async_setup()
+    job = queue._new_job("Missing candidate", "manual")
+    queue._set_state(job, "review")
+    queue._jobs.append(job)
+    queue._touch_manual_block(job["title"], reason="active", job_id=job["id"])
+    await queue._save()
+    before = queue.status()
+    with pytest.raises(ValueError, match="no saved image"):
+        await queue.async_accept(job["id"])
+    assert queue.status() == before
+    assert cache.exact(job["title"]) is None
+    assert not ha.services.calls
+    await queue.async_shutdown()
+    resumed = queue_module.ActivityImageQueue(ha, engine)
+    await resumed.async_setup()
+    assert resumed._job(job["id"])["state"] == "review"
+    assert resumed.status()["manual_blocks"] == before["manual_blocks"]
+    assert not ha.services.calls
+    await resumed.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_replacement_without_job_id_is_not_persisted_or_dispatched(ha, configured):
+    _, engine = configured
+    queue = queue_module.ActivityImageQueue(ha, engine)
+    await queue.async_setup()
+    before = queue.status()
+    with pytest.raises(ValueError, match="requires a job ID"):
+        await queue.async_candidate(
+            "Replacement", deletion={"operation_id": "operation", "image_id": "image",
+                                     "key": "replacement", "job_id": "replacement-job"}
+        )
+    assert queue.status() == before
+    assert not ha.services.calls
+    await queue.async_shutdown()

@@ -23,9 +23,6 @@ export function renderGeneral(root, values, update, hass, hooks, excludedProvide
   lookahead.input.min = "1";
   lookahead.input.max = "60";
   root.append(lookahead.wrapper);
-  const lucida = field("Lucida endpoint (optional)", values.lucida_url,
-    (v) => update("lucida_url", v), {placeholder: "http://localhost:7000/remove-bg"});
-  root.append(lucida.wrapper, element("p", "Use a trusted HTTP(S) endpoint. Generated image bytes are sent to this address.", "muted"));
   root.append(element("p", "Settings use native Home Assistant config entry options. Running work keeps its settings; waiting work uses the settings selected when it starts. No integration reload is needed.", "muted"));
   return () => { disposeCalendars?.(); };
 }

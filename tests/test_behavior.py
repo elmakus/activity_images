@@ -15,6 +15,7 @@ import importlib
 import sys
 import types
 from pathlib import Path
+from enum import IntFlag
 from types import SimpleNamespace
 
 import pytest
@@ -43,6 +44,13 @@ _package("homeassistant.helpers.aiohttp_client")
 _package("homeassistant.helpers.entity_registry")
 _package("homeassistant.components")
 _package("homeassistant.components.media_source")
+_package("homeassistant.components.ai_task")
+ai_const = _package("homeassistant.components.ai_task.const")
+ai_const.AITaskEntityFeature = IntFlag("AITaskEntityFeature", {"GENERATE_IMAGE":4, "SUPPORT_ATTACHMENTS":2})
+ir = _package("homeassistant.helpers.issue_registry")
+ir.IssueSeverity = SimpleNamespace(WARNING="warning")
+ir.async_create_issue = lambda *_args, **_kwargs: None
+ir.async_delete_issue = lambda *_args, **_kwargs: None
 
 
 class MemoryStore:
@@ -158,7 +166,15 @@ class FakeServices:
 
 sys.modules["homeassistant.core"].CoreState = SimpleNamespace(running="running", stopping="stopping")
 sys.modules["homeassistant.core"].HomeAssistant = MockHA
-sys.modules["homeassistant.exceptions"].HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+class MockHomeAssistantError(Exception):
+    def __init__(self, *args, translation_domain=None, translation_key=None, translation_placeholders=None):
+        super().__init__(*args)
+        self.translation_domain = translation_domain
+        self.translation_key = translation_key
+        self.translation_placeholders = translation_placeholders
+
+sys.modules["homeassistant.exceptions"].HomeAssistantError = MockHomeAssistantError
+sys.modules["homeassistant.exceptions"].ServiceValidationError = type("ServiceValidationError", (sys.modules["homeassistant.exceptions"].HomeAssistantError,), {})
 sys.modules["homeassistant.helpers.storage"].Store = MemoryStore
 sys.modules["homeassistant.components.media_source"].async_resolve_media = fake_resolve_media
 sys.modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession = lambda hass: None
@@ -296,7 +312,7 @@ async def test_reference_and_shared_activity_prompt(ha, configured):
     assert "isometric" not in payload["instructions"].lower()
     assert "glossy" in payload["instructions"].lower()
     assert "Design first for immediate recognition at 25 px." in payload["instructions"]
-    assert payload["attachments"][0]["media_content_id"].startswith("media-source://")
+    assert payload["attachments"] == [{"media_content_id": "media-source://media_source/local/reference.png", "media_content_type": ""}]
     assert result["image_url"].startswith("/local/")
 
 
@@ -414,18 +430,6 @@ async def test_invalid_filename_rejected(ha):
         )
 
 
-def test_generated_image_alpha_detection():
-    from io import BytesIO
-    image = Image.new("RGBA", (8, 8), (20, 30, 40, 255))
-    out = BytesIO()
-    image.save(out, format="PNG")
-    assert generated_module._already_transparent(out.getvalue()) is False
-    image.putpixel((0, 0), (0, 0, 0, 0))
-    out = BytesIO()
-    image.save(out, format="PNG")
-    assert generated_module._already_transparent(out.getvalue()) is True
-
-
 @pytest.mark.asyncio
 async def test_batch_lookup_updates_cache_once(ha):
     path = ha.base / "www/activity_images/same.png"
@@ -477,21 +481,17 @@ async def test_legacy_cooldown_is_ignored(ha, configured, monkeypatch):
     assert queue.status()["next_run_at"] is None
 
 
-@pytest.mark.asyncio
-async def test_opaque_background_fallback(ha):
+def test_opaque_background_is_rejected_without_publishing(ha):
     from io import BytesIO
 
     image = Image.new("RGB", (128, 128), (255, 0, 255))
     ImageDraw.Draw(image).ellipse((30, 30, 98, 98), fill=(25, 90, 180))
     raw = BytesIO()
     image.save(raw, format="PNG")
-    data = await generated_module._maybe_remove_background(ha, raw.getvalue(), None)
     target = ha.base / "www/activity_images/opaque.png"
-    status = await ha.async_add_executor_job(generated_module._process, data, target)
-    assert status in ("background_removed", "review_needed_unsafe_mask", "review_needed_complex_background")
-    with Image.open(target) as normalized:
-        assert normalized.mode == "RGBA"
-        assert normalized.height == 512
+    with pytest.raises(generated_module.ImageTransparencyError, match="without a transparent background"):
+        generated_module._process(raw.getvalue(), target)
+    assert not target.parent.exists()
 
 
 @pytest.mark.asyncio
@@ -505,99 +505,13 @@ async def test_media_response_without_file_is_rejected(ha, configured):
 def test_unabridged_normal_activity_prompt_and_no_room_variant():
     isolated = prompts_module.build_activity_image_instructions("Posprzątaj zabawki")
     room = prompts_module.build_activity_image_instructions("Pokój Hani")
-    assert "chroma-key" in isolated
-    assert "chroma-key" in room
+    assert "chroma-key" not in isolated
+    assert "chroma-key" not in room
     assert "isometric" not in room
     assert "isometric" not in isolated
     assert isolated.split("Posprzątaj zabawki", 1)[-1] == room.split("Pokój Hani", 1)[-1]
     assert "genuine alpha-channel transparency" in isolated.lower()
-    assert "simulate a checkerboard" in isolated.lower()
-
-
-@pytest.mark.asyncio
-async def test_lucida_valid_transparency_is_used(ha, monkeypatch):
-    from io import BytesIO
-
-    opaque = Image.new("RGB", (64, 64), (255, 255, 255))
-    raw = BytesIO()
-    opaque.save(raw, format="PNG")
-    original = raw.getvalue()
-
-    cutout = Image.new("RGBA", (64, 64), (25, 50, 100, 0))
-    cutout.putpixel((20, 20), (25, 50, 100, 255))
-    out = BytesIO()
-    cutout.save(out, format="PNG")
-    returned = out.getvalue()
-
-    class Response:
-        content_length = len(returned)
-
-        @property
-        def content(self):
-            return self
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            pass
-
-        def raise_for_status(self):
-            pass
-
-        async def iter_chunked(self, _size):
-            yield returned
-
-    class Client:
-        def post(self, url, *, data, timeout, allow_redirects):
-            assert not allow_redirects
-            assert url == "http://lucida.test/remove"
-            return Response()
-
-    monkeypatch.setattr(generated_module, "async_get_clientsession", lambda _: Client())
-    result = await generated_module._maybe_remove_background(
-        ha, original, "http://lucida.test/remove"
-    )
-    assert result == returned
-
-
-@pytest.mark.asyncio
-async def test_lucida_failure_uses_original_fallback(ha, monkeypatch):
-    from io import BytesIO
-
-    import aiohttp
-
-    opaque = Image.new("RGB", (64, 64), (255, 255, 255))
-    raw = BytesIO()
-    opaque.save(raw, format="PNG")
-
-    class Client:
-        def post(self, *args, **kwargs):
-            raise aiohttp.ClientError("Unavailable")
-
-    monkeypatch.setattr(generated_module, "async_get_clientsession", lambda _: Client())
-    result = await generated_module._maybe_remove_background(
-        ha, raw.getvalue(), "http://lucida.test/remove"
-    )
-    assert result == raw.getvalue()
-
-
-@pytest.mark.asyncio
-async def test_lucida_is_skipped_for_existing_alpha(ha, monkeypatch):
-    from io import BytesIO
-
-    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    image.putpixel((20, 20), (50, 20, 100, 255))
-    raw = BytesIO()
-    image.save(raw, format="PNG")
-
-    def must_not_call(_):
-        raise AssertionError("Lucida should not run for transparent PNG")
-
-    monkeypatch.setattr(generated_module, "async_get_clientsession", must_not_call)
-    assert await generated_module._maybe_remove_background(
-        ha, raw.getvalue(), "http://lucida.test/remove"
-    ) == raw.getvalue()
+    assert "drawn checkerboard" in isolated.lower()
 
 
 @pytest.mark.asyncio
@@ -1351,11 +1265,16 @@ async def test_existing_png_can_be_linked_without_provider(ha, monkeypatch):
 
 # Stage 5: AI Task wrapper unit tests (official output contract, fake provider).
 def _load_ai_wrapper():
+    _load_integration_entrypoint()
     import dataclasses
     import importlib.util
     import types
 
     _load_integration_entrypoint()
+    if "homeassistant.helpers.device_registry" not in sys.modules:
+        dr = _package("homeassistant.helpers.device_registry")
+        dr.DeviceEntryType = SimpleNamespace(SERVICE="service")
+        dr.DeviceInfo = SimpleNamespace
     if "homeassistant.helpers.entity_platform" not in sys.modules:
         _package("homeassistant.helpers.entity_platform")
     sys.modules["homeassistant.helpers.entity_platform"].AddConfigEntryEntitiesCallback = object
@@ -1386,6 +1305,8 @@ def _load_ai_wrapper():
 
     fake_ai.AITaskEntity = AITaskEntity
     fake_ai.AITaskEntityFeature = SimpleNamespace(GENERATE_IMAGE=4)
+    ai_const = sys.modules.setdefault("homeassistant.components.ai_task.const", types.ModuleType("homeassistant.components.ai_task.const"))
+    ai_const.__dict__.setdefault("AITaskEntityFeature", SimpleNamespace(GENERATE_IMAGE=4, SUPPORT_ATTACHMENTS=2))
     fake_ai.GenImageTask = GenImageTask
     fake_ai.GenImageTaskResult = GenImageTaskResult
     sys.modules["homeassistant.components.ai_task"] = fake_ai
@@ -1431,6 +1352,8 @@ async def test_wrapper_returns_processed_png_and_reuses_original_cache(ha):
     entity = wrapper_module.ActivityImagesAITaskEntity(entry)
     entity.hass = ha
     entity._attr_entity_id = "ai_task.activity_images"
+    ha._states["ai_task.mock"] = SimpleNamespace(state="idle", attributes={"supported_features": 4})
+    ha.services.has_service = lambda domain, service: (domain, service) == ("ai_task", "generate_image") or (domain, service) in ha.services.registered
     assert entity.available
     assert entity._attr_supported_features == 4
     assert entity._attr_unique_id == f"{entry.entry_id}_ai_task"
@@ -1561,7 +1484,9 @@ async def test_ai_task_platform_exports_exactly_one_stable_entity(ha):
     )
     assert len(found) == 1
     assert found[0]._attr_unique_id == f"{entry.entry_id}_ai_task"
-    assert found[0]._attr_name == "Activity Images"
+    assert found[0]._attr_name is None
+    assert found[0]._attr_device_info.name == "Activity Images"
+    assert found[0]._attr_translation_key == "generator"
     assert found[0]._attr_supported_features == ai.AITaskEntityFeature.GENERATE_IMAGE
 
 @pytest.mark.asyncio
@@ -1571,3 +1496,66 @@ async def test_custom_prompt_reaches_provider_with_literal_title(ha, configured)
     generator.settings[const_module.CONF_PROMPT_TEMPLATE] = "Icon of {title}"
     await generator.async_generate("Craft {party}", force=True)
     assert ha.services.calls[-1][2]["instructions"] == "Icon of Craft {party}"
+
+
+@pytest.mark.asyncio
+async def test_native_action_error_boundary_preserves_retry_barriers(ha):
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    await integration.async_setup_entry(ha, entry)
+    try:
+        error = sys.modules["homeassistant.exceptions"].HomeAssistantError
+        validation = sys.modules["homeassistant.exceptions"].ServiceValidationError
+        ha.services.fail = True
+        with pytest.raises(error, match="review Queue & history"):
+            await ha.services.async_call("activity_images", "generate_image", {"title": "Failed provider"})
+        assert len(ha.services.calls) == 1
+        with pytest.raises(validation, match="explicit retry"):
+            await ha.services.async_call("activity_images", "generate_image", {"title": "Failed provider"})
+        assert len(ha.services.calls) == 1
+        with pytest.raises(validation, match="Specify a title"):
+            await ha.services.async_call("activity_images", "forget_image", {})
+        ha.services.fail = False
+        entry.options[const_module.CONF_AI_ENTITY] = ""
+        with pytest.raises(validation, match="Configure an ai_task"):
+            await ha.services.async_call("activity_images", "generate_image", {"title": "No provider"})
+        assert len(ha.services.calls) == 1
+    finally:
+        await integration.async_unload_entry(ha, entry)
+
+
+@pytest.mark.asyncio
+async def test_public_action_persistence_and_calendar_failures_are_native_errors(ha, monkeypatch):
+    integration = _load_integration_entrypoint()
+    await integration.async_setup(ha, {})
+    entry = MockConfigEntry()
+    await integration.async_setup_entry(ha, entry)
+    try:
+        runtime = entry.runtime_data
+        error = sys.modules["homeassistant.exceptions"].HomeAssistantError
+        validation = sys.modules["homeassistant.exceptions"].ServiceValidationError
+
+        async def disk_failure(*_args, **_kwargs):
+            raise OSError("Synthetic local write failure")
+
+        monkeypatch.setattr(runtime.queue, "async_clear_errors", disk_failure)
+        with pytest.raises(error, match="persist local data"):
+            await ha.services.async_call("activity_images", "clear_errors", {})
+
+        async def invalid_values(*_args, **_kwargs):
+            raise ValueError("Invalid requested values")
+
+        monkeypatch.setattr(runtime.queue, "async_cancel", invalid_values)
+        with pytest.raises(validation, match="rejected"):
+            await ha.services.async_call("activity_images", "cancel_queued", {"titles": ["Test"]})
+
+        async def unavailable():
+            return {"error": "Simulated calendar outage"}
+
+        monkeypatch.setattr(runtime.calendar, "async_refresh", unavailable)
+        with pytest.raises(error, match="Calendar refresh failed"):
+            await ha.services.async_call("activity_images", "refresh_calendars", {})
+        assert not ha.services.calls
+    finally:
+        await integration.async_unload_entry(ha, entry)

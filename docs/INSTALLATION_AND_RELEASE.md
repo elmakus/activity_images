@@ -13,7 +13,7 @@ they are not current installation instructions.
 - An administrator account for the library manager.
 - An existing image-capable `ai_task.*` provider only when generating images.
   Library-only operation does not require an AI provider.
-- Optional reference image and trusted Lucida background-removal endpoint.
+- Optional reference image; provider must generate actual alpha transparency.
 - No extra container, server, custom card, or theme dependency for the manager.
 
 ## Install through Marketplace
@@ -35,6 +35,12 @@ Git tag; this integration needs no separate ZIP asset or frontend build.
 Older HACS installations can use the same repository and stable releases,
 but the integration still requires the declared Home Assistant version.
 
+For the initial form and subsequent Configure dialog, see the
+[complete configuration parameter reference](../README.md#configuration-parameters)
+for all six fields, defaults, prerequisites, valid values and paid consent.
+You may leave the provider, reference and calendar selections empty for
+library-only setup.
+
 ## Configure library and generation
 
 Select calendars in the integration's options if calendar matching is wanted.
@@ -47,7 +53,7 @@ request a refresh.
 To enable generation, select a real image-capable `ai_task.*` provider in
 **Settings → Devices & services → Activity Images → Configure**. Never
 select `ai_task.activity_images` as its own backend. Optional reference
-images use `media-source://` URLs. The original tactile style with native transparency and a chroma-key fallback is the default; an optional global template is editable in the administrator-only Settings tab.
+images use `media-source://` URLs. The original tactile style with required native transparency is the default; an optional global template is editable in the administrator-only Settings tab.
 
 For unmodified Home Tasks, select `ai_task.activity_images` as its image
 provider and leave Home Tasks `prompt_prefix` empty. Existing Home Tasks

@@ -28,6 +28,10 @@ def test_defaults_keep_original_prompt_and_data_precedence():
 
 
 @pytest.mark.parametrize("changes", [
+    None,
+    {const.CONF_AUTO_CALENDARS: ["calendar.other"], const.CONF_AI_ENTITY: "ai_task.google"},
+    {const.CONF_PROMPT_TEMPLATE: ""},
+    {"lucida_url": "http://legacy.invalid"},
     {"unexpected": 1}, {const.CONF_AI_ENTITY: "sensor.fake"},
     {const.CONF_CALENDARS: ["calendar.one", "calendar.one"]},
     {const.CONF_CALENDARS: "calendar.one"},
@@ -36,14 +40,8 @@ def test_defaults_keep_original_prompt_and_data_precedence():
     {const.CONF_LOOKAHEAD_DAYS: 0},
     {const.CONF_AUTO_GENERATE: "true"},
     {const.CONF_AUTO_GENERATE: True},
-    {const.CONF_LUCIDA_URL: "file:///etc/passwd"},
-    {const.CONF_LUCIDA_URL: "http://username:password@host/"},
     {const.CONF_REFERENCE_MEDIA_ID: "/local/private.png"},
     {const.CONF_REFERENCE_MEDIA_ID: "media-source://media_source/local/a\x00.png"},
-    {const.CONF_LUCIDA_URL: "http://host:invalid/"},
-    {const.CONF_LUCIDA_URL: "http://host:65536/"},
-    {const.CONF_LUCIDA_URL: "http://host:0/"},
-    {const.CONF_LUCIDA_URL: "http://host/\n"},
     {const.CONF_PROMPT_TEMPLATE: "No placeholder"},
     {const.CONF_PROMPT_TEMPLATE: "Repeated {title} {title}"},
     {const.CONF_PROMPT_TEMPLATE: "{title.__class__}"},
@@ -73,6 +71,10 @@ def test_default_upgrade_preserves_style_and_custom_templates():
     assert hashlib.sha256(old.encode()).hexdigest() == "68163a62b71ee645f631a0ef1355bbc0ea9c60d10d6994bdac0e774a3ab5b0b9"
     entry = types.SimpleNamespace(data={const.CONF_PROMPT_TEMPLATE: prompts.LEGACY_DEFAULT_PROMPT_TEMPLATE}, options={})
     assert schema.effective_settings(entry)[const.CONF_PROMPT_TEMPLATE] == prompts.DEFAULT_PROMPT_TEMPLATE
+    entry.options = {const.CONF_PROMPT_TEMPLATE: prompts.PREVIOUS_DEFAULT_PROMPT_TEMPLATE, "lucida_url": "http://legacy.invalid"}
+    assert schema.effective_settings(entry)[const.CONF_PROMPT_TEMPLATE] == prompts.DEFAULT_PROMPT_TEMPLATE
+    assert "lucida_url" not in schema.effective_settings(entry)
+    assert "lucida_url" not in dict(schema.ConfigEntrySettings(entry))
     entry.options = {const.CONF_PROMPT_TEMPLATE: "Custom {title} on a chroma-key background"}
     assert schema.effective_settings(entry)[const.CONF_PROMPT_TEMPLATE] == entry.options[const.CONF_PROMPT_TEMPLATE]
 
@@ -80,6 +82,7 @@ def test_default_upgrade_preserves_style_and_custom_templates():
 def test_live_entry_view_does_not_retain_an_old_options_object():
     entry = types.SimpleNamespace(data={const.CONF_AI_ENTITY:"ai_task.old"}, options={})
     view = schema.ConfigEntrySettings(entry)
+    assert len(view) == len(schema.DEFAULTS)
     snapshot = dict(view)
     entry.options = {const.CONF_AI_ENTITY:"ai_task.new"}
     assert view[const.CONF_AI_ENTITY] == "ai_task.new"

@@ -7,6 +7,14 @@ import json
 import re
 import time
 from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Iterable, MutableMapping
+from typing import TYPE_CHECKING, TypedDict, Unpack, cast
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from .calendar_adapter import ActivityCalendarAdapter
+    from .image_queue import ActivityImageQueue
+    from .library import ActivityImageLibrary
 from copy import deepcopy
 from pathlib import Path
 from io import BytesIO
@@ -21,12 +29,12 @@ from .const import (
     CONF_REFERENCE_MEDIA_ID,
     DEFAULT_LOOKAHEAD_DAYS,
 )
-from .deletion_files import cleanup, group_files, snapshot
-from .engine import GenerationSuppressed, generation_stem
+from .deletion_files import FileSnapshot, cleanup, group_files, snapshot
+from .engine import DeletionContext, GenerationSuppressed, generation_stem
 from .image_cache import (
     ACTIVITY_IMAGE_PREFIX,
     CANVAS_NORMALIZATION_EXCLUDED_FILES,
-    MappingConflict,
+    MappingConflict, DeletionItem, DeletionOperation, MappingEntry, RecoveredCandidate,
     asset_url,
     normalize_title,
 )
@@ -39,47 +47,107 @@ EXTERNAL_WARNING = "External references (including dashboards and Home Tasks) ar
 _ID = re.compile(r"^[a-f0-9]{32}$")
 
 
+class PlanItem(TypedDict):
+    id: str
+    filename: str
+    files: list[str]
+    titles: list[str]
+    needed_titles: list[str]
+    safe_without_regeneration: bool
+    blocked_reason: str | None
+    identity: FileSnapshot
+    mappings: dict[str, MappingEntry]
+    urls: list[str]
+    reserved_titles: list[str]
+    expected_titles: dict[str, str | None]
+
+
+class DeletionPlan(TypedDict):
+    items: list[PlanItem]
+    demand: list[str]
+    entries: dict[str, MappingEntry]
+    replacement_requests: int
+
+
+class SavedPlan(TypedDict, total=False):
+    expires_at: float
+    plan: DeletionPlan
+    signature: str
+    retry: str
+    snapshot: DeletionOperation
+    replacement_requests: int
+    recoveries: dict[str, dict[str, RecoveredCandidate]]
+    blocked: dict[str, str]
+    invalid_candidates: dict[str, list[str]]
+    consumed: bool
+
+
+class ItemUpdate(TypedDict, total=False):
+    state: str
+    error: str | None
+    jobs: dict[str, str]
+    job_ids: list[str]
+
+
+class PublicDeletionItem(TypedDict):
+    id: str
+    filename: str
+    state: str
+    error: str | None
+    needed_titles: list[str]
+    job_ids: list[str]
+
+
+class PublicDeletion(TypedDict):
+    id: str
+    state: str
+    can_abandon: bool
+    replacement_requests: int
+    archived: bool
+    items: list[PublicDeletionItem]
+
+
 class ActivityImageDeletions:
-    def __init__(self, hass, library, queue, calendar):
+    def __init__(self, hass: HomeAssistant, library: ActivityImageLibrary, queue: ActivityImageQueue, calendar: ActivityCalendarAdapter) -> None:
         self.hass, self.library, self.queue, self.calendar = hass, library, queue, calendar
         self.cache = library.cache
         self.queue.deletion_authorizer = self.async_authorize_replacement
-        self._plans: dict[str, dict] = {}
+        self._plans: dict[str, SavedPlan] = {}
         self._lock = asyncio.Lock()
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Task[None] | None = None
         self._closed = False
         self._calendar_error: str | None = None
         self.quarantine_root = Path(hass.config.path(".storage", "activity_images_deletions"))
 
     @asynccontextmanager
-    async def _boundaries(self):
+    async def _boundaries(self) -> AsyncIterator[None]:
         # Existing call order is calendar -> queue -> generator -> cache. Never invert it.
         async with self.calendar._lock, self.queue._lock, self.queue.engine._lock:
             yield
 
-    def _remember_plan(self, token: str, plan: dict) -> None:
+    def _remember_plan(self, token: str, plan: SavedPlan) -> None:
         now = time.monotonic()
         self._plans = dict(list((key, value) for key, value in self._plans.items()
                                 if value["expires_at"] > now)[-63:])
         self._plans[token] = {**plan, "expires_at": now + 600}
 
-    def _get_plan(self, token: str) -> dict | None:
+    def _get_plan(self, token: str) -> SavedPlan | None:
         plan = self._plans.get(token)
         return plan if plan and plan["expires_at"] > time.monotonic() else None
 
-    def operations(self) -> list[dict]:
+    def operations(self) -> list[PublicDeletion]:
         return [self.public(operation) for operation in self.cache._deletions.values()
                 if not operation.get("archived")]
 
     @staticmethod
-    def public(operation: dict) -> dict:
+    def public(operation: DeletionOperation) -> PublicDeletion:
         return {"id": operation["id"], "state": operation["state"],
                 "can_abandon": any(item["state"] in {"failed", "interrupted"} for item in operation["items"]),
                 "replacement_requests": operation["replacement_requests"],
                 "archived": bool(operation.get("archived")),
-                "items": [{key: deepcopy(item[key]) for key in
-                           ("id", "filename", "state", "error", "needed_titles", "job_ids")}
-                          for item in operation["items"]]}
+                "items": [{"id": item["id"], "filename": item["filename"], "state": item["state"],
+                           "error": item["error"], "needed_titles": deepcopy(item["needed_titles"]),
+                           "job_ids": deepcopy(item["job_ids"])} for item in operation["items"]]}
 
     async def _refresh_demand(self) -> None:
         if not self.calendar.calendars:
@@ -105,7 +173,7 @@ class ActivityImageDeletions:
         if self._calendar_error:
             return self._calendar_error
         settings = self.queue.engine.settings
-        if (tuple(settings.get(CONF_CALENDARS) or ()) != self.calendar.calendars
+        if (tuple(cast(Iterable[str], settings.get(CONF_CALENDARS) or ())) != self.calendar.calendars
                 or settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS) != self.calendar.lookahead_days):
             return "Current calendar settings require a successful refresh before deletion"
         if not self.calendar.calendars:
@@ -134,7 +202,7 @@ class ActivityImageDeletions:
         ):
             raise ValueError("Reference image is reserved for permanent deletion")
 
-    async def _snapshot_plan(self, image_ids: list[str], *, own_operation: str | None = None) -> dict:
+    async def _snapshot_plan(self, image_ids: list[str], *, own_operation: str | None = None) -> DeletionPlan:
         if (not isinstance(image_ids, list) or not 1 <= len(image_ids) <= 64
                 or any(not isinstance(value, str) or not _ID.fullmatch(value) for value in image_ids)
                 or len(set(image_ids)) != len(image_ids)):
@@ -143,7 +211,7 @@ class ActivityImageDeletions:
         entries = self.cache.entries()
         demand = self._demand()
         resolved = {title: await self.cache.async_find(title, touch=False, prune=False) for title in demand}
-        items = []
+        items: list[PlanItem] = []
         for image_id in sorted(image_ids):
             image = self.library._images.get(image_id)
             if image is None:
@@ -158,7 +226,7 @@ class ActivityImageDeletions:
                 variants.update(stem + suffix for suffix in (".png", "_thumb.webp", "_qa.webp"))
             urls = sorted(ACTIVITY_IMAGE_PREFIX + quote(filename, safe="") for filename in variants)
             mappings = {key: entry for key, entry in entries.items() if asset_url(entry["image_url"]) in urls}
-            needed = {}
+            needed: dict[str, str] = {}
             for title, url in resolved.items():
                 if url and asset_url(url) in urls:
                     needed.setdefault(normalize_title(title), title)
@@ -166,7 +234,7 @@ class ActivityImageDeletions:
             reserved_titles = sorted(set(mappings) | set(needed))
             demand_error = self._demand_error()
             reasons = [demand_error] if demand_error else []
-            reference = unquote(self.queue.engine.settings.get(CONF_REFERENCE_MEDIA_ID) or "")
+            reference = unquote(cast(str, self.queue.engine.settings.get(CONF_REFERENCE_MEDIA_ID) or ""))
             if any(filename in CANVAS_NORMALIZATION_EXCLUDED_FILES or filename in reference for filename in variants):
                 reasons.append("Shared style/reference asset is protected")
             for other_id, other in self.library._images.items():
@@ -181,7 +249,7 @@ class ActivityImageDeletions:
                 if own_operation is not None and job.get("deletion", {}).get("operation_id") == own_operation:
                     continue
                 if (normalize_title(job["title"]) in reserved_titles
-                        or any(asset_url(job.get(field) or "") in urls for field in ("original_url", "result_url"))):
+                        or any(asset_url(value or "") in urls for value in (job.get("original_url"), job.get("result_url")))):
                     reasons.append("Outstanding generation/review job must be resolved first")
             if any(normalize_title(title) in reserved_titles for title in self.queue._pending):
                 reasons.append("Pending generation must be resolved first")
@@ -189,26 +257,26 @@ class ActivityImageDeletions:
                 file_identity = await self.hass.async_add_executor_job(snapshot, self.library.root, files)
             except (OSError, ValueError) as exc:
                 reasons.append(f"Cannot safely snapshot files: {exc}")
-                file_identity = {}
+                file_identity = cast(FileSnapshot, {})  # Blocked plan; never used for cleanup.
             items.append({"id": image_id, "filename": image["filename"], "files": files,
                           "titles": sorted({entry["title"] for entry in mappings.values()}, key=str.casefold),
                           "needed_titles": needed_titles, "safe_without_regeneration": not needed_titles and not reasons,
                           "blocked_reason": "; ".join(sorted(set(reasons))) if reasons else None,
                           "identity": file_identity, "mappings": mappings, "urls": urls,
                           "reserved_titles": reserved_titles,
-                          "expected_titles": {key: entries.get(key, {}).get("image_url") for key in needed}})
+                          "expected_titles": {key: entries[key]["image_url"] if key in entries else None for key in needed}})
         return {"items": items, "demand": demand, "entries": entries,
                 "replacement_requests": sum(len(item["needed_titles"]) for item in items)}
 
     @staticmethod
-    def _signature(plan: dict) -> str:
-        value = deepcopy(plan)
-        value["entries"] = {key: (entry["title"], entry["image_url"]) for key, entry in plan["entries"].items()}
-        for item in value["items"]:
-            item["mappings"] = {key: (entry["title"], entry["image_url"]) for key, entry in item["mappings"].items()}
+    def _signature(plan: DeletionPlan) -> str:
+        value = {**plan, "entries": {key: (entry["title"], entry["image_url"]) for key, entry in plan["entries"].items()},
+                 "items": [{**item, "mappings": {key: (entry["title"], entry["image_url"])
+                                                  for key, entry in item["mappings"].items()}}
+                           for item in plan["items"]]}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
-    async def async_plan(self, image_ids: list[str]) -> dict:
+    async def async_plan(self, image_ids: list[str]) -> dict[str, object]:
         await self._refresh_demand()
         async with self._lock, self._boundaries(), self.cache._write_lock:
             if self._closed:
@@ -217,15 +285,16 @@ class ActivityImageDeletions:
             token = uuid4().hex
             # Plans are short-lived review capabilities, never a durable authorization.
             self._remember_plan(token, {"plan": plan, "signature": self._signature(plan)})
-            result = {"token": token, "items": [{key: item[key] for key in
-                       ("id", "filename", "files", "titles", "needed_titles", "safe_without_regeneration", "blocked_reason")}
+            result: dict[str, object] = {"token": token, "items": [{"id": item["id"], "filename": item["filename"],
+                       "files": item["files"], "titles": item["titles"], "needed_titles": item["needed_titles"],
+                       "safe_without_regeneration": item["safe_without_regeneration"], "blocked_reason": item["blocked_reason"]}
                        for item in plan["items"]], "replacement_requests": plan["replacement_requests"],
                       "max_provider_attempts": plan["replacement_requests"] * MAX_ATTEMPTS, "external_warning": EXTERNAL_WARNING}
             if self.calendar.calendars and (self.calendar.last_error or not self.calendar.last_scan):
                 result["calendar_warning"] = "Calendar demand is the last available snapshot; unavailable or unseen future consumers are unknown."
             return result
 
-    async def async_delete(self, token: str, regenerate: bool, confirm: bool) -> dict:
+    async def async_delete(self, token: str, regenerate: bool, confirm: bool) -> PublicDeletion:
         if confirm is not True:
             raise ValueError("Permanent deletion requires confirmation")
         existing = next((op for op in self.cache._deletions.values() if op["token"] == token), None)
@@ -250,16 +319,16 @@ class ActivityImageDeletions:
                     raise MappingConflict("Deletion is blocked; resolve the displayed reasons first")
                 if plan["replacement_requests"] and not regenerate:
                     raise ValueError("Current calendar consumers require explicit replacement authorization")
-            operation = {"id": uuid4().hex, "token": token, "state": "pending",
-                         "items": deepcopy(plan["items"]), "demand": plan["demand"],
+            operation: DeletionOperation = {"id": uuid4().hex, "token": token, "state": "pending",
+                         "items": [cast(DeletionItem, {**item, "state": "pending", "error": None,
+                                                        "candidates": {}, "job_ids": [], "jobs": {}})
+                                   for item in deepcopy(plan["items"])], "demand": plan["demand"],
                          "replacement_requests": plan["replacement_requests"]}
-            for item in operation["items"]:
-                item.update(state="pending", error=None, candidates={}, job_ids=[], jobs={})
             await self.cache.async_journal(operation, expected_entries=plan["entries"])
             self._kick()
             return self.public(operation)
 
-    async def _invalid_candidates(self, item: dict) -> set[str]:
+    async def _invalid_candidates(self, item: DeletionItem) -> set[str]:
         invalid = set()
         for key, url in item["candidates"].items():
             evidence = item.get("candidate_identities", {}).get(key)
@@ -275,8 +344,8 @@ class ActivityImageDeletions:
                 invalid.add(key)
         return invalid
 
-    async def _recoverable(self, item: dict) -> dict:
-        recovered = {}
+    async def _recoverable(self, item: DeletionItem) -> dict[str, RecoveredCandidate]:
+        recovered: dict[str, RecoveredCandidate] = {}
         for title in item["needed_titles"]:
             key = normalize_title(title)
             if key in item["candidates"] or key not in item["jobs"]:
@@ -286,7 +355,7 @@ class ActivityImageDeletions:
             url = ACTIVITY_IMAGE_PREFIX + stem + ".png"
             if self.cache.image_metadata(url).get("background_status", "").startswith("review_needed"):
                 continue
-            def verify(files=files, url=url):
+            def verify(files: list[str] = files, url: str = url) -> FileSnapshot:
                 for filename in files:
                     data = _read_owned(self.library.root, filename)
                     _verify(data)
@@ -302,7 +371,7 @@ class ActivityImageDeletions:
             recovered[key] = {"url": ACTIVITY_IMAGE_PREFIX + stem + ".png", "identity": evidence}
         return recovered
 
-    async def _validate_original(self, operation: dict, item: dict) -> None:
+    async def _validate_original(self, operation: DeletionOperation, item: DeletionItem) -> None:
         demand_error = self._demand_error()
         if demand_error:
             raise MappingConflict(demand_error)
@@ -312,23 +381,25 @@ class ActivityImageDeletions:
         current = {key: entry for key, entry in entries.items() if asset_url(entry["image_url"]) in item["urls"]}
         if self.cache.mapping_identity(current) != self.cache.mapping_identity(item["mappings"]):
             raise MappingConflict("Original associations changed; original files retained")
-        if any(entries.get(key, {}).get("image_url") != url for key, url in item["expected_titles"].items()):
+        if any((entries[key]["image_url"] if key in entries else None) != url for key, url in item["expected_titles"].items()):
             raise MappingConflict("Replacement title changed; original files retained")
         current_files = await self.hass.async_add_executor_job(group_files, self.library.root, item["files"], item["filename"])
         current_identity = await self.hass.async_add_executor_job(snapshot, self.library.root, current_files)
         if current_identity != item["identity"]:
             raise MappingConflict("Original image changed; no files deleted")
-        reference = unquote(self.queue.engine.settings.get(CONF_REFERENCE_MEDIA_ID) or "")
+        reference = unquote(cast(str, self.queue.engine.settings.get(CONF_REFERENCE_MEDIA_ID) or ""))
         if reference and any(filename in reference for filename in item["files"]):
             raise MappingConflict("Shared style/reference asset is protected")
 
-    async def async_retry_plan(self, operation_id: str) -> dict:
+    async def async_retry_plan(self, operation_id: str) -> dict[str, object]:
         await self._refresh_demand()
         async with self._lock, self._boundaries(), self.cache._write_lock:
             operation = self._operation(operation_id)
             if operation["state"] not in {"failed", "interrupted", "cleanup_failed"}:
                 raise ValueError("Operation is not retryable")
-            recoveries, blocked, invalid_candidates = {}, {}, {}
+            recoveries: dict[str, dict[str, RecoveredCandidate]] = {}
+            blocked: dict[str, str] = {}
+            invalid_candidates: dict[str, list[str]] = {}
             for item in operation["items"]:
                 if item["state"] in {"done", "abandoned", "cleanup", "cleanup_failed"}:
                     continue
@@ -349,14 +420,15 @@ class ActivityImageDeletions:
                            or normalize_title(title) in invalid_candidates.get(item["id"], []))
                           and normalize_title(title) not in recoveries.get(item["id"], {})
                           and item["state"] not in {"done", "abandoned", "cleanup", "cleanup_failed"}]
-                items.append({key: deepcopy(item[key]) for key in ("id", "filename", "files", "titles", "state", "error")} | {
+                items.append({"id": item["id"], "filename": item["filename"], "files": deepcopy(item["files"]),
+                    "titles": deepcopy(item["titles"]), "state": item["state"], "error": item["error"],
                     "needed_titles": needed, "safe_without_regeneration": not needed and item["id"] not in blocked,
                     "blocked_reason": blocked.get(item["id"]),
                 })
             return {"token": token, "operation_id": operation_id, "items": items, "replacement_requests": count,
                     "max_provider_attempts": count * MAX_ATTEMPTS, "external_warning": EXTERNAL_WARNING}
 
-    async def async_retry(self, operation_id: str, token: str, confirm: bool) -> dict:
+    async def async_retry(self, operation_id: str, token: str, confirm: bool) -> PublicDeletion:
         if confirm is not True:
             raise ValueError("Explicit retry confirmation required")
         if token in self._operation(operation_id).get("retry_tokens", []):
@@ -394,11 +466,11 @@ class ActivityImageDeletions:
             await self.queue.async_supersede_replacements_locked(superseded)
             for item in operation["items"]:
                 if item["state"] in {"failed", "interrupted"}:
-                    item.update(state="pending", error=None)
+                    item.update({"state": "pending", "error": None})
                     item["jobs"] = {key: job_id for key, job_id in item["jobs"].items()
                                     if key in item["candidates"] or key in item.get("recoveries", {})}
                 elif item["state"] == "cleanup_failed":
-                    item.update(state="cleanup", error=None)
+                    item.update({"state": "cleanup", "error": None})
             operation["state"] = "pending"
             operation.setdefault("retry_tokens", []).append(token)
             await self.cache.async_journal(operation)
@@ -407,14 +479,14 @@ class ActivityImageDeletions:
             return self.public(operation)
 
     @staticmethod
-    def _state(items: list[dict]) -> str:
+    def _state(items: list[DeletionItem]) -> str:
         states = {item["state"] for item in items}
         return ("running" if states & {"running", "pending", "cleanup"} else
                 "cleanup_failed" if "cleanup_failed" in states else
                 "interrupted" if "interrupted" in states else "failed" if "failed" in states else
                 "abandoned" if "abandoned" in states else "done")
 
-    async def async_abandon(self, operation_id: str, confirm: bool) -> dict:
+    async def async_abandon(self, operation_id: str, confirm: bool) -> PublicDeletion:
         if confirm is not True:
             raise ValueError("Abandonment requires explicit confirmation")
         async with self._lock, self._boundaries():
@@ -437,12 +509,12 @@ class ActivityImageDeletions:
                 if item["id"] in selected:
                     if any(self.cache.is_deleted(url) for url in item["urls"]):
                         raise MappingConflict("Committed image cleanup cannot be abandoned")
-                    item.update(state="abandoned", error=None)
+                    item.update({"state": "abandoned", "error": None})
             operation["state"] = self._state(operation["items"])
             before = list(self.queue._jobs)
             values = deepcopy(before)
 
-            async def commit():
+            async def commit() -> None:
                 try:
                     for job in jobs:
                         item = next(item for item in operation["items"] if item["id"] == job["deletion"]["image_id"])
@@ -455,8 +527,9 @@ class ActivityImageDeletions:
                 except BaseException:
                     self.queue._jobs = before
                     for job, previous in zip(before, values, strict=True):
-                        job.clear()
-                        job.update(previous)
+                        raw_job = cast(MutableMapping[str, object], job)
+                        raw_job.clear()
+                        raw_job.update(previous)
                     if jobs:
                         await self.queue._save()
                     raise
@@ -466,25 +539,25 @@ class ActivityImageDeletions:
                 raise asyncio.CancelledError
             return self.public(self._operation(operation_id))
 
-    def _operation(self, operation_id: str) -> dict:
+    def _operation(self, operation_id: str) -> DeletionOperation:
         if operation_id not in self.cache._deletions:
             raise ValueError("Deletion operation not found")
         return self.cache._deletions[operation_id]
 
-    def _kick(self):
+    def _kick(self) -> None:
         if not self._closed and (not self._task or self._task.done()):
             task = self.hass.async_create_task(self._run())
             self._task = task
             task.add_done_callback(self._completed)
 
-    def _completed(self, task):
+    def _completed(self, task: asyncio.Task[None]) -> None:
         if task.cancelled() or self._closed:
             return
         if task.exception() is None and any(item["state"] in {"pending", "cleanup"}
                                             for operation in self.cache._deletions.values() for item in operation["items"]):
             self._kick()
 
-    async def async_setup(self):
+    async def async_setup(self) -> None:
         for operation in list(self.cache._deletions.values()):
             if operation["state"] in {"done", "abandoned"}:
                 continue
@@ -492,7 +565,7 @@ class ActivityImageDeletions:
             changed = False
             for item in operation["items"]:
                 if item["state"] in {"pending", "running"}:
-                    item.update(state="interrupted", error="Interrupted; explicit retry required. No generation resumed.")
+                    item.update({"state": "interrupted", "error": "Interrupted; explicit retry required. No generation resumed."})
                     changed = True
             if changed:
                 operation["state"] = "interrupted"
@@ -500,14 +573,14 @@ class ActivityImageDeletions:
         # Only committed, confirmed cleanup may resume on restart.
         self._kick()
 
-    async def _save_item(self, operation_id, image_id, **values):
+    async def _save_item(self, operation_id: str, image_id: str, **values: Unpack[ItemUpdate]) -> None:
         operation = deepcopy(self._operation(operation_id))
         item = next(item for item in operation["items"] if item["id"] == image_id)
-        item.update(values)
+        cast(MutableMapping[str, object], item).update(values)
         operation["state"] = self._state(operation["items"])
         await self.cache.async_journal(operation)
 
-    async def _run(self):
+    async def _run(self) -> None:
         for operation_id in list(self.cache._deletions):
             for initial in list(self._operation(operation_id)["items"]):
                 if self._closed:
@@ -532,19 +605,19 @@ class ActivityImageDeletions:
                         async with self.cache._write_lock:
                             operation = deepcopy(self._operation(operation_id))
                             item = next(item for item in operation["items"] if item["id"] == image_id)
-                            item.update(state=state, error="Persistence failed; explicit retry required")
+                            item.update({"state": state, "error": "Persistence failed; explicit retry required"})
                             operation["state"] = state
                             self.cache._deletions[operation_id] = operation
 
-    def _item(self, operation_id, image_id):
+    def _item(self, operation_id: str, image_id: str) -> DeletionItem:
         return next(item for item in self._operation(operation_id)["items"] if item["id"] == image_id)
 
-    async def async_authorize_replacement(self, title: str, context: dict) -> None:
+    async def async_authorize_replacement(self, title: str, context: DeletionContext) -> None:
         """Recheck live demand before every attempt, including a 429 retry."""
         operation = self._operation(context["operation_id"])
         item = self._item(operation["id"], context["image_id"])
         key = normalize_title(title)
-        def valid():
+        def valid() -> bool:
             return (not self._closed and item["state"] == "running"
                     and key == context["key"] and item["jobs"].get(key) == context["job_id"]
                     and key not in item["candidates"])
@@ -557,7 +630,7 @@ class ActivityImageDeletions:
         if (not valid() or operation is not self._operation(context["operation_id"])):
             raise GenerationSuppressed("Replacement authorization changed while checking demand")
 
-    async def _replace(self, operation_id: str, image_id: str):
+    async def _replace(self, operation_id: str, image_id: str) -> None:
         item = deepcopy(self._item(operation_id, image_id))
         await self._refresh_demand()
         async with self._boundaries(), self.cache._write_lock:
@@ -608,7 +681,7 @@ class ActivityImageDeletions:
             await self.cache.async_commit_deletion(operation_id, image_id)
         await self.calendar.async_reconcile()
 
-    async def _cleanup(self, operation_id, image_id):
+    async def _cleanup(self, operation_id: str, image_id: str) -> None:
         item = self._item(operation_id, image_id)
         # Queue history is another Store: redact durably before irreversible unlink.
         await self.queue.async_redact_deleted(item["urls"])
@@ -620,7 +693,7 @@ class ActivityImageDeletions:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def async_shutdown(self):
+    async def async_shutdown(self) -> None:
         self._closed = True
         if self._task and not self._task.done():
             self._task.cancel()

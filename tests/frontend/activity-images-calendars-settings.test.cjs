@@ -8,7 +8,7 @@ const location = (name) => pathToFileURL(path.resolve("custom_components/activit
 let fixtureId = 0;
 const settingsValues = () => ({ai_task_entity_id: "ai_task.provider",
   calendar_entity_ids: ["calendar.a", "calendar.saved_missing"], auto_generate_calendar_entity_ids: ["calendar.a"],
-  calendar_lookahead_days: 30, lucida_url: "", reference_media_content_id: "", prompt_template: "Draw {title}"});
+  calendar_lookahead_days: 30, reference_media_content_id: "", prompt_template: "Draw {title}"});
 const discovery = () => ({entities: [
   {entity_id: "calendar.a", name: "Family", state: "on", available: true, monitor: true, auto_generate: true, configured: true},
   {entity_id: "calendar.b", name: "Spouse", state: "off", available: true, monitor: false, auto_generate: false, configured: false},

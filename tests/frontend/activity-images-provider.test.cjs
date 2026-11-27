@@ -13,7 +13,7 @@ test("Provider suggestions exclude the integration's own wrapper IDs", async () 
   try {
     const {renderGeneral} = await import(location("general-view.mjs"));
     const root = window.document.createElement("div");
-    const values = {ai_task_entity_id: "", calendar_entity_ids: [], calendar_lookahead_days: 30, lucida_url: ""};
+    const values = {ai_task_entity_id: "", calendar_entity_ids: [], calendar_lookahead_days: 30,};
     const hass = {states: {"ai_task.own": {}, "ai_task.real": {}, "sensor.other": {}}};
     renderGeneral(root, values, () => {}, hass, {}, ["ai_task.own"]);
     const options = [...root.querySelectorAll("#activity-images-providers option")].map((x) => x.value);
@@ -30,7 +30,7 @@ test("Settings load passes additive exclusions without persisting them", async (
     const {ActivityImagesSettings} = await import(location("settings-view.mjs") + "?fixture=provider-exclusions");
     const element = new ActivityImagesSettings();
     const values = {ai_task_entity_id: "ai_task.real", generate_missing_calendar_images: false,
-      calendar_entity_ids: [], calendar_lookahead_days: 30, lucida_url: "",
+      calendar_entity_ids: [], calendar_lookahead_days: 30,
       reference_media_content_id: "", prompt_template: "Draw {title}"};
     element.hass = {states: {"ai_task.own": {}, "ai_task.real": {}},
       callWS: async (query) => {

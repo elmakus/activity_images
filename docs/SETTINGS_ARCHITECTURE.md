@@ -61,7 +61,7 @@ provider requests, restart workers or replay jobs. Genuine manual unload/reload
 and HA shutdown retain the integration's existing lifecycle behavior.
 
 - A generation captures settings immediately after acquiring its lock, before
-  any cache/provider await. Provider, prompt, reference, retries, Lucida and
+  any cache/provider await. Provider, prompt, reference, retries and
   returned prompt metadata use that same snapshot.
 - Waiting work uses the settings current when it acquires the generator lock.
   Different replacements in one deletion operation can therefore use different
@@ -70,7 +70,7 @@ and HA shutdown retain the integration's existing lifecycle behavior.
   the application boundary. It does **not** cancel accepted work. Cancel waiting
   jobs explicitly in Queue & history. Running requests can still incur charges.
 - Only calendar selection, lookahead or enabling automation requests a new scan.
-  Prompt, provider, reference and Lucida edits do not rescan calendars.
+  Prompt, provider, and reference edits do not rescan calendars.
 - Calendar selection changes rebind state subscriptions, prune removed demand,
   clear scan verification and save the filtered snapshot. An empty selection
   clears demand/images. Existing sensor listeners remain attached.
@@ -138,10 +138,7 @@ feature bits. They distinguish unavailable, unsupported image generation and mis
 attachment support when a reference is configured. An available status only means
 those passive checks passed, not that a real request will succeed.
 
-Lucida is an administrator-selected trusted HTTP(S) endpoint. Actual generation
-sends image bytes to it. Diagnostics report configuration only and do not probe it.
-Passive diagnostics do not establish connectivity, image quality, provider billing
-or reliability.
+Activity Images does not remove backgrounds or send image bytes to an external processing service. New provider output must contain genuine transparency and visible content. Setup removes the obsolete background-removal endpoint from stored config-entry data and options through the native manager. Custom prompts are preserved. Passive diagnostics do not establish image quality, provider billing or reliability.
 
 ## Verification
 
@@ -163,7 +160,7 @@ python tests/smoke_calendar_startup_ha.py
 `smoke_settings_ha.py` uses real ConfigEntry, ConfigEntries, options-flow
 completion, listeners and native delayed persistence. It flushes and reopens
 storage with a fresh manager. It bypasses integration discovery/platform loading
-and supplies local fake provider/calendar/Lucida responses. It covers cross-editor
+and supplies local fake provider/calendar responses. It covers cross-editor
 conflicts, no-op, provider/reference clearing, native media-selector object-to-string
 round-trips, unknown options, running/waiting generation, calendar lifecycle and
 reserved references. It does not prove a full HA reboot

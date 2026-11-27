@@ -1,37 +1,36 @@
-"""Persist AI-generated images with optional Lucida background removal.
-
-Refactored from the MIT-licensed Home Tasks image pipeline. The background
-remover address is provided by the user, never embedded in distributable code.
-"""
+"""Validate and persist native transparent AI-generated images."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-import logging
+from typing import cast
 import os
 import stat
 import tempfile
 
-import aiohttp
 from PIL import Image
 from homeassistant.components.media_source import async_resolve_media
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .image_processing import (
     create_theme_qa_preview,
     has_meaningful_transparency,
     validate_dimensions,
     normalize_icon_canvas,
-    normalize_generated_image,
 )
 
-_LOGGER = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 PUBLIC_DIRECTORY = "activity_images"
 PUBLIC_PREFIX = "/local/activity_images/"
-LUCIDA_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=5)
+
+
+class ImageTransparencyError(ValueError):
+    """Provider output violates the native transparency contract."""
+
+    def __init__(self, message: str, *, translation_key: str) -> None:
+        super().__init__(message)
+        self.translation_key = translation_key
 
 
 @dataclass(slots=True)
@@ -62,62 +61,7 @@ async def _read_source(hass: HomeAssistant, source: str) -> bytes:
     return await hass.async_add_executor_job(_read_local_source, Path(resolved.path))
 
 
-def _already_transparent(data: bytes) -> bool:
-    with Image.open(BytesIO(data)) as image:
-        return has_meaningful_transparency(image)
-
-
-def _validate_lucida(data: bytes) -> bytes:
-    if not data or len(data) > MAX_IMAGE_BYTES:
-        raise ValueError("Invalid Lucida response size")
-    with Image.open(BytesIO(data)) as image:
-        validate_dimensions(image)
-        if image.format != "PNG" or image.mode != "RGBA":
-            raise ValueError("Lucida did not return an RGBA PNG")
-        image.load()
-        if not has_meaningful_transparency(image) or image.getchannel("A").getextrema()[1] <= 8:
-            raise ValueError("Lucida did not return a visible transparent subject")
-    return data
-
-
-async def _maybe_remove_background(
-    hass: HomeAssistant, data: bytes, lucida_url: str | None
-) -> bytes:
-    if not lucida_url or await hass.async_add_executor_job(_already_transparent, data):
-        return data
-
-    def input_format() -> tuple[str, str]:
-        with Image.open(BytesIO(data)) as image:
-            validate_dimensions(image)
-            formats = {"PNG": ("png", "image/png"), "JPEG": ("jpg", "image/jpeg"),
-                       "WEBP": ("webp", "image/webp"), "GIF": ("gif", "image/gif")}
-            if image.format not in formats:
-                raise ValueError("Unsupported image source format")
-            image.verify()
-            return formats[image.format]
-
-    extension, mime = await hass.async_add_executor_job(input_format)
-    try:
-        form = aiohttp.FormData()
-        form.add_field("file", data, filename=f"image.{extension}", content_type=mime)
-        async with async_get_clientsession(hass).post(
-            lucida_url, data=form, timeout=LUCIDA_TIMEOUT, allow_redirects=False
-        ) as response:
-            response.raise_for_status()
-            if response.content_length and response.content_length > MAX_IMAGE_BYTES:
-                raise ValueError("Lucida response exceeds limit")
-            parts = bytearray()
-            async for chunk in response.content.iter_chunked(65536):
-                parts.extend(chunk)
-                if len(parts) > MAX_IMAGE_BYTES:
-                    raise ValueError("Lucida response exceeds limit")
-        return await hass.async_add_executor_job(_validate_lucida, bytes(parts))
-    except (aiohttp.ClientError, TimeoutError, ValueError, OSError, Image.DecompressionBombError, SyntaxError) as exc:
-        _LOGGER.warning("Lucida failed (%s); using image fallback", type(exc).__name__)
-        return data
-
-
-def _atomic_save(image: Image.Image, destination: Path, format: str, **kw) -> None:
+def _atomic_save(image: Image.Image, destination: Path, format: str, **kw: object) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     name = None
     try:
@@ -131,10 +75,17 @@ def _atomic_save(image: Image.Image, destination: Path, format: str, **kw) -> No
             os.unlink(name)
 
 
-def _process(data: bytes, target: Path) -> str:
+def _process(data: bytes, target: Path) -> None:
     with Image.open(BytesIO(data)) as source:
-        result = normalize_generated_image(source)
-        normalized = normalize_icon_canvas(result.image)
+        validate_dimensions(source)
+        if not has_meaningful_transparency(source):
+            raise ImageTransparencyError("Image provider returned an image without a transparent background; check provider settings before retrying", translation_key="opaque_image")
+        rgba = source.convert("RGBA")
+        # RGBA's alpha channel is a single-band 8-bit image, not a multiband extrema tuple.
+        alpha_extrema = cast(tuple[int, int], rgba.getchannel("A").getextrema())
+        if alpha_extrema[1] <= 8:
+            raise ImageTransparencyError("Image provider returned an entirely transparent image; check provider settings before retrying", translation_key="empty_image")
+        normalized = normalize_icon_canvas(rgba)
     preview = create_theme_qa_preview(normalized)
     thumb = normalized.copy()
     thumb.thumbnail((512, 512), Image.Resampling.LANCZOS)
@@ -160,7 +111,6 @@ def _process(data: bytes, target: Path) -> str:
                 except FileNotFoundError:
                     pass
             raise
-    return result.background_status
 
 
 def normalize_existing_generated_image(destination: Path) -> int:
@@ -184,20 +134,16 @@ def normalize_existing_generated_image(destination: Path) -> int:
 
 
 async def async_save_generated_image(
-    hass: HomeAssistant, image_url: str, filename_stem: str, *,
-    lucida_url: str | None = None,
+    hass: HomeAssistant, image_url: str, filename_stem: str,
 ) -> SavedGeneratedImage:
     """Save a 512px-height transparent PNG, thumbnail and theme QA preview."""
     if not filename_stem or filename_stem != os.path.basename(filename_stem):
         raise ValueError("Unsafe image name")
     data = await _read_source(hass, image_url)
-    data = await _maybe_remove_background(hass, data, lucida_url)
     target = Path(hass.config.path("www", PUBLIC_DIRECTORY, filename_stem + ".png"))
-    status = await hass.async_add_executor_job(_process, data, target)
-    if status.startswith("review_needed"):
-        _LOGGER.warning("Image %s requires background review: %s", filename_stem, status)
+    await hass.async_add_executor_job(_process, data, target)
     return SavedGeneratedImage(
         image_url=PUBLIC_PREFIX + target.name,
-        background_status=status,
+        background_status="existing_alpha",
         qa_url=PUBLIC_PREFIX + filename_stem + "_qa.webp",
     )

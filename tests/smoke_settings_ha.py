@@ -2,7 +2,7 @@
 
 Only platform discovery/loading is bypassed. ConfigEntry, ConfigEntries, options
 flow completion, update listeners, storage, services and image processing are real.
-All provider/calendar responses and Lucida processing are local test doubles.
+All provider/calendar responses are local test doubles.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from homeassistant.core import (  # noqa: E402
     SupportsResponse,
 )
 from homeassistant.helpers import device_registry as dr  # noqa: E402
-from homeassistant.helpers import entity_registry as er  # noqa: E402
+from homeassistant.helpers import entity_registry as er, selector  # noqa: E402
 from smoke_library_ha import prepare_http  # noqa: E402
 
 from custom_components.activity_images import (  # noqa: E402
@@ -44,7 +44,6 @@ from custom_components.activity_images.const import (  # noqa: E402
     CONF_AUTO_GENERATE,
     CONF_CALENDARS,
     CONF_LOOKAHEAD_DAYS,
-    CONF_LUCIDA_URL,
     CONF_PROMPT_TEMPLATE,
     CONF_REFERENCE_MEDIA_ID,
     DOMAIN,
@@ -79,14 +78,16 @@ async def run():
         await er.async_load(hass)
         entry = ConfigEntry(domain=DOMAIN, title="Activity Images", version=1, minor_version=1,
                             source="user", unique_id=DOMAIN, subentries_data=None, discovery_keys=MappingProxyType({}),
-                            data={CONF_AI_ENTITY:"ai_task.before", CONF_AUTO_GENERATE:True},
-                            options={"unrelated_option":{"preserved":True}, CONF_AUTO_GENERATE:False})
+                            data={CONF_AI_ENTITY:"ai_task.before", CONF_AUTO_GENERATE:True, "lucida_url":"http://old.invalid"},
+                            options={"unrelated_option":{"preserved":True}, CONF_AUTO_GENERATE:False, "lucida_url":"http://other.invalid"})
         # Only registration/setup discovery is bypassed; all mutations use the real manager.
         with patch.object(manager, "async_setup", AsyncMock(return_value=True)):
             await manager.async_add(entry)
         await async_setup(hass, {})
         with patch.object(manager, "async_forward_entry_setups", AsyncMock()):
             await async_setup_entry(hass, entry)
+        assert "lucida_url" not in entry.data and "lucida_url" not in entry.options
+        assert entry.options["unrelated_option"] == {"preserved":True}
         runtime = entry.runtime_data
         identities = runtime, runtime.generator, runtime.queue, runtime.deletions, runtime.calendar
         notifications = []
@@ -145,7 +146,7 @@ async def run():
             art.paste((200, 40, 60, 255), (3, 3, 21, 21))
             art.save(source)
             started, release = asyncio.Event(), asyncio.Event()
-            calls, processing = [], []
+            calls = []
             async def fake_provider(call) -> ServiceResponse:
                 calls.append(dict(call.data))
                 if len(calls) == 1:
@@ -154,28 +155,31 @@ async def run():
                 return {"media_source_id":"media-source://test/generated.png"}
             async def local_result(*_args):
                 return SimpleNamespace(path=source, url="")
-            async def local_processing(_hass, data, lucida):
-                processing.append(lucida)
-                return data
+            # Exercise the actual HA 2026.11 media-selector validation rather than
+            # letting a schema-free mock accept a missing media_content_type.
+            import probatio as vol
             hass.services.async_register("ai_task", "generate_image", fake_provider,
+                                         schema=vol.Schema({
+                                             vol.Required("task_name"): str,
+                                             vol.Required("entity_id"): str,
+                                             vol.Required("instructions"): str,
+                                             vol.Optional("attachments"): selector.MediaSelector({"accept":["*/*"], "multiple":True}),
+                                         }),
                                          supports_response=SupportsResponse.ONLY)
             wrapper = ActivityImagesAITaskEntity(entry)
             wrapper.hass = hass
             wrapper.entity_id = "ai_task.activity_images"
             task = GenImageTask(name="home_tasks_test", attachments=None,
                                    instructions="First image\n\nThe image must have a square 1:1 aspect ratio.")
-            await save_settings(hass, {CONF_REFERENCE_MEDIA_ID:"media-source://media_source/local/old.jpg",
-                                       CONF_LUCIDA_URL:"http://before.invalid/remove-bg"}, read_settings(hass)["revision"])
+            await save_settings(hass, {CONF_REFERENCE_MEDIA_ID:"media-source://media_source/local/old.jpg"}, read_settings(hass)["revision"])
             await hass.async_block_till_done()
-            with patch("custom_components.activity_images.generated_image.async_resolve_media", local_result), \
-                 patch("custom_components.activity_images.generated_image._maybe_remove_background", local_processing):
+            with patch("custom_components.activity_images.generated_image.async_resolve_media", local_result):
                 running = asyncio.create_task(wrapper._async_generate_image(task, ChatLog(hass, "test")))
                 await asyncio.wait_for(started.wait(), 5)
                 manual = await runtime.queue.async_candidate("Waiting manual")
                 await runtime.queue.async_enqueue(["Waiting background"])
                 await save_settings(hass, {CONF_AI_ENTITY:"ai_task.after", CONF_PROMPT_TEMPLATE:"New {title}",
-                                           CONF_REFERENCE_MEDIA_ID:"media-source://media_source/local/new.webp",
-                                           CONF_LUCIDA_URL:"http://after.invalid/remove-bg"}, read_settings(hass)["revision"])
+                                           CONF_REFERENCE_MEDIA_ID:"media-source://media_source/local/new.webp"}, read_settings(hass)["revision"])
                 assert not running.done() and runtime.generator.is_generating
                 assert identities == (entry.runtime_data, runtime.generator, runtime.queue, runtime.deletions, runtime.calendar)
                 release.set()
@@ -184,10 +188,9 @@ async def run():
                 assert result.revised_prompt == "First First image"
                 assert len(calls) == 3
                 assert calls[0]["entity_id"] == "ai_task.before"
-                assert calls[0]["attachments"] == [{"media_content_id":"media-source://media_source/local/old.jpg"}]
-                assert processing == ["http://before.invalid/remove-bg", "http://after.invalid/remove-bg", "http://after.invalid/remove-bg"]
+                assert calls[0]["attachments"] == [{"media_content_id":"media-source://media_source/local/old.jpg","media_content_type":""}]
                 assert all(call["entity_id"] == "ai_task.after" and call["instructions"].startswith("New ")
-                           and call["attachments"] == [{"media_content_id":"media-source://media_source/local/new.webp"}]
+                           and call["attachments"] == [{"media_content_id":"media-source://media_source/local/new.webp","media_content_type":""}]
                            for call in calls[1:])
                 assert runtime.queue._job(manual["id"])["state"] == "review"
                 assert runtime.queue.status()["pending"] == []
@@ -287,6 +290,7 @@ async def run():
             saved_entry = next(item for item in stored["data"]["entries"] if item["entry_id"] == entry.entry_id)
             assert saved_entry["options"] == dict(entry.options)
             assert saved_entry["data"] == dict(entry.data)
+            assert "lucida_url" not in saved_entry["data"] and "lucida_url" not in saved_entry["options"]
             with tempfile.TemporaryDirectory(prefix="activity-settings-reopen-") as unused:
                 reopened = HomeAssistant(unused)
                 reopened.config.config_dir = directory

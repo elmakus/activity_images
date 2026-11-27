@@ -16,8 +16,7 @@ def test_faint_alpha_does_not_skip_background_removal():
     image.putpixel((0, 0), (200, 200, 200, 249))
     data = BytesIO()
     image.save(data, format="PNG")
-    assert not generated._already_transparent(data.getvalue())
-    assert generated.normalize_generated_image(image).background_status != "existing_alpha"
+    assert not generated.has_meaningful_transparency(image)
 
 
 def test_extreme_aspect_rejected_before_resize(monkeypatch):
@@ -60,11 +59,12 @@ async def test_public_generation_failure_blocks_unattended_repeat(ha):
     await integration.async_setup_entry(ha, entry)
     try:
         ha.services.fail = True
-        with pytest.raises(RuntimeError):
+        with pytest.raises(behavior.sys.modules["homeassistant.exceptions"].HomeAssistantError, match="review Queue & history") as failure:
             await ha.services.async_call("activity_images", "generate_image", {"title": "Audit failure"})
+        assert isinstance(failure.value.__cause__, RuntimeError)
         assert len(ha.services.calls) == 1
         ha.services.fail = False
-        with pytest.raises(ValueError, match="explicit retry"):
+        with pytest.raises(behavior.sys.modules["homeassistant.exceptions"].ServiceValidationError, match="explicit retry"):
             await ha.services.async_call("activity_images", "generate_image", {"title": "Audit failure"})
         assert len(ha.services.calls) == 1
         result = await ha.services.async_call("activity_images", "generate_image", {"title": "Audit failure", "force": True})
@@ -97,7 +97,7 @@ async def test_provider_url_is_never_fetched(ha, configured, monkeypatch):
     ha.services.response = {"url": "http://127.0.0.1/private"}
     def forbidden(*args, **kwargs):
         pytest.fail("Provider-controlled HTTP URL must not be fetched")
-    monkeypatch.setattr(generated, "async_get_clientsession", forbidden)
+    monkeypatch.setattr(generated, "async_resolve_media", forbidden)
     with pytest.raises(ValueError, match="local media-source image ID"):
         await engine.async_generate("Untrusted URL")
 
@@ -171,7 +171,9 @@ async def test_pending_queue_is_bounded(ha, configured, monkeypatch):
 
 def test_processing_error_does_not_publish_partial_set(ha, monkeypatch):
     data = BytesIO()
-    Image.new("RGBA", (10, 10), "red").save(data, format="PNG")
+    art = Image.new("RGBA", (10, 10))
+    art.paste("red", (2, 2, 8, 8))
+    art.save(data, format="PNG")
     target = ha.base / "www/activity_images/partial.png"
     original = generated._atomic_save
     def fail_second(image, destination, format, **kwargs):
@@ -208,13 +210,14 @@ async def test_direct_failure_barrier_survives_reload(ha):
     entry = behavior.MockConfigEntry()
     await integration.async_setup_entry(ha, entry)
     ha.services.fail = True
-    with pytest.raises(RuntimeError):
+    with pytest.raises(behavior.sys.modules["homeassistant.exceptions"].HomeAssistantError, match="review Queue & history") as failure:
         await ha.services.async_call("activity_images", "generate_image", {"title": "Persisted failure"})
+    assert isinstance(failure.value.__cause__, RuntimeError)
     await integration.async_unload_entry(ha, entry)
     await integration.async_setup_entry(ha, entry)
     try:
         ha.services.fail = False
-        with pytest.raises(ValueError, match="explicit retry"):
+        with pytest.raises(behavior.sys.modules["homeassistant.exceptions"].ServiceValidationError, match="explicit retry"):
             await ha.services.async_call("activity_images", "generate_image", {"title": "Persisted failure"})
         assert len(ha.services.calls) == 1
     finally:
@@ -241,11 +244,12 @@ async def test_direct_unload_stops_inflight_without_replay(ha):
     assert "in flight direct" in ha.saved["activity_images_jobs"]["retry_blocked"]
 
 
-def test_lucida_fully_transparent_result_is_rejected():
+def test_fully_transparent_result_is_rejected(ha):
     data = BytesIO()
     Image.new("RGBA", (16, 16)).save(data, format="PNG")
-    with pytest.raises(ValueError, match="visible transparent subject"):
-        generated._validate_lucida(data.getvalue())
+    with pytest.raises(generated.ImageTransparencyError, match="entirely transparent"):
+        generated._process(data.getvalue(), ha.base / "empty.png")
+    assert not (ha.base / "empty.png").exists()
 
 
 @pytest.mark.asyncio
@@ -296,7 +300,9 @@ def test_publish_collision_preserves_original_and_rolls_back_variants(ha):
     Image.new("RGBA", (20, 20), "blue").save(target)
     before = target.read_bytes()
     data = BytesIO()
-    Image.new("RGBA", (20, 20), "red").save(data, format="PNG")
+    art = Image.new("RGBA", (20, 20))
+    art.paste("red", (2, 2, 18, 18))
+    art.save(data, format="PNG")
     with pytest.raises(FileExistsError):
         generated._process(data.getvalue(), target)
     assert target.read_bytes() == before
@@ -335,7 +341,7 @@ async def test_native_diagnostics_redacts_sensitive_configuration(ha):
     diagnostics = importlib.import_module("custom_components.activity_images.diagnostics")
     entry = SimpleNamespace(entry_id="entry", data={}, options={
         behavior.const_module.CONF_AI_ENTITY: "ai_task.private_provider",
-        behavior.const_module.CONF_LUCIDA_URL: "http://private.example/secret",
+        "lucida_url": "http://private.example/secret",
         behavior.const_module.CONF_REFERENCE_MEDIA_ID: "media-source://private/reference.png",
         behavior.const_module.CONF_PROMPT_TEMPLATE: "Private prompt {title}",
         behavior.const_module.CONF_CALENDARS: ["calendar.private"],
@@ -383,8 +389,8 @@ async def test_setup_failure_unloads_runtime_without_paid_dispatch(ha, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_background_review_is_retained_without_automatic_assignment(ha, configured, monkeypatch):
-    """Opaque provider output must become a manual candidate, not a paid replay."""
+async def test_invalid_background_is_failed_without_automatic_assignment(ha, configured, monkeypatch):
+    """Opaque provider output must fail durably without a paid replay."""
     import asyncio
     cache, engine = configured
     path = ha.base / "opaque.png"
@@ -396,20 +402,20 @@ async def test_background_review_is_retained_without_automatic_assignment(ha, co
     assert await queue.async_enqueue(["Review activity"]) == ["Review activity"]
     await asyncio.wait_for(queue._worker, 3)
     job = queue._jobs[-1]
-    assert job["state"] == "review" and job["kind"] == "manual"
+    assert job["state"] == "failed" and job["result_url"] is None
+    assert "without a transparent background" in job["error"]
     assert cache.exact("Review activity") is None
-    assert cache.image_metadata(job["result_url"])["background_status"].startswith("review_needed")
+    assert not list((ha.base / "www/activity_images").glob("*"))
     assert await queue.async_enqueue(["Review activity"]) == []
-    with pytest.raises(ValueError, match="outstanding"):
+    with pytest.raises(ValueError, match="explicit retry"):
         await queue.async_generate_direct("Review activity")
     assert len(ha.services.calls) == 1
     await queue.async_shutdown()
     restarted = behavior.queue_module.ActivityImageQueue(ha, engine)
     await restarted.async_setup()
-    assert restarted._job(job["id"])["state"] == "review"
-    await restarted.async_accept(job["id"])
-    assert cache.exact("Review activity") == job["result_url"]
-    assert len(ha.services.calls) == 1
+    assert restarted._job(job["id"])["state"] == "failed"
+    assert await restarted.async_enqueue(["Review activity"]) == []
+    assert path.exists() and len(ha.services.calls) == 1
     await restarted.async_shutdown()
 
 
@@ -430,10 +436,10 @@ async def test_public_opaque_result_requires_review_preserves_old_mapping(ha):
         Image.new("RGB", (20, 20), "red").save(opaque)
         ha.medias["media-source://generated/opaque"] = opaque
         ha.services.response = {"media_source_id": "media-source://generated/opaque"}
-        with pytest.raises(behavior.sys.modules["homeassistant.exceptions"].HomeAssistantError, match="manual background review"):
+        with pytest.raises(behavior.sys.modules["homeassistant.exceptions"].HomeAssistantError, match="without a transparent background"):
             await ha.services.async_call("activity_images", "generate_image", {"title": "Activity", "force": True})
         assert runtime.cache.exact("Activity") == old
-        assert runtime.queue._jobs[-1]["state"] == "review"
+        assert runtime.queue._jobs[-1]["state"] == "failed"
         result = await ha.services.async_call("activity_images", "generate_image", {"title": "Activity"})
         assert result["image_url"] == old and len(ha.services.calls) == 1
     finally:
@@ -487,17 +493,17 @@ async def test_replacement_review_cannot_delete_original(ha, configured):
     await settled(deletions)
     current = deletions._operation(op["id"])
     assert current["state"] == "failed"
-    candidate = current["items"][0]["candidates"]["activity"]
-    assert cache.image_metadata(candidate)["background_status"].startswith("review_needed")
+    assert current["items"][0]["candidates"] == {}
+    assert "without a transparent background" in current["items"][0]["error"]
     assert original.exists() and cache.exact("Activity") == url
     retry = await deletions.async_retry_plan(op["id"])
     assert retry["replacement_requests"] == 1
     assert len(ha.services.calls) == 1
     await deletions.async_abandon(op["id"], True)
     assert not cache.reserved("Activity")
-    await cache.async_link("Activity", candidate, replace=True)
-    assert cache.exact("Activity") == candidate
+    assert cache.exact("Activity") == url
     assert original.exists() and len(ha.services.calls) == 1
+
 
 
 @pytest.mark.asyncio
@@ -608,13 +614,14 @@ async def test_home_tasks_review_result_not_returned_as_image(ha):
         entity._attr_entity_id = "ai_task.activity_images"
         task = ai.GenImageTask(name="home_tasks_review", instructions="Review output\n\nThe image must have a square 1:1 aspect ratio.")
         chat = SimpleNamespace(conversation_id="test")
-        with pytest.raises(wrapper.HomeAssistantError, match="manual background review"):
+        with pytest.raises(wrapper.HomeAssistantError, match="without a transparent background"):
             await entity._async_generate_image(task, chat)
         runtime = entry.runtime_data
         job = runtime.queue._jobs[-1]
-        assert job["state"] == "review" and runtime.cache.exact("Review output") is None
-        await runtime.queue.async_accept(job["id"])
-        assert (await entity._async_generate_image(task, chat)).image_data
+        assert job["state"] == "failed" and runtime.cache.exact("Review output") is None
+        assert job["result_url"] is None
+        with pytest.raises(wrapper.HomeAssistantError, match="explicit retry"):
+            await entity._async_generate_image(task, chat)
         assert len(ha.services.calls) == 1
     finally:
         await integration.async_unload_entry(ha, entry)

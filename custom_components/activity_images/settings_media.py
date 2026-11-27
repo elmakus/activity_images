@@ -15,16 +15,24 @@ from homeassistant.components.http import KEY_HASS, HomeAssistantView, require_a
 from homeassistant.components.media_source import MediaSourceError, async_resolve_media
 from PIL import Image
 
+from .deletion_files import open_root
+
 MAX_REFERENCE_BYTES = 8 * 1024 * 1024
 MIME = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
 
 
 def read_preview(path: Path) -> tuple[bytes, str]:
-    # Nonblocking open prevents a selected FIFO/device from occupying an executor forever.
-    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as file:
-        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
-            raise ValueError("Reference must be a regular image file")
-        data = file.read(MAX_REFERENCE_BYTES + 1)
+    # Match the owned-library no-follow boundary; reject symlink directories
+    # and files before reading. Nonblocking open also rejects FIFO/device input.
+    directory = open_root(path.parent)
+    try:
+        with os.fdopen(os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                               dir_fd=directory), "rb") as file:
+            if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+                raise ValueError("Reference must be a regular image file")
+            data = file.read(MAX_REFERENCE_BYTES + 1)
+    finally:
+        os.close(directory)
     if not data or len(data) > MAX_REFERENCE_BYTES:
         raise ValueError("Reference file exceeds size limit")
     with Image.open(BytesIO(data)) as image:
@@ -41,7 +49,7 @@ class ReferencePreviewView(HomeAssistantView):
     requires_auth = True
 
     @require_admin
-    async def get(self, request):
+    async def get(self, request: web.Request) -> web.Response:
         media_id = request.query.get("media_id", "")
         if (not media_id.startswith("media-source://media_source/")
                 or len(media_id) > 1024 or "\x00" in media_id):

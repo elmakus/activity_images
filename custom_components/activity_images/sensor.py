@@ -1,35 +1,49 @@
 """Read-only sensor exposing image URLs and Calendar Card Pro rules."""
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from . import ActivityImagesConfigEntry
+
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .calendar_adapter import ActivityCalendarAdapter
+from .entity import service_device_info
+
+# A local read-only snapshot; no platform I/O or outbound actions.
+PARALLEL_UPDATES = 0
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: ActivityImagesConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Create the singleton image-library sensor for the config entry."""
-    async_add_entities([ActivityImagesLibrarySensor(entry.entry_id, entry.runtime_data.calendar)])
+    runtime = entry.runtime_data
+    assert runtime is not None  # Platform setup follows runtime initialization.
+    async_add_entities([ActivityImagesLibrarySensor(entry.entry_id, runtime.calendar)])
 
 
 class ActivityImagesLibrarySensor(SensorEntity):
-    """Expose only bounded, pre-rendered data, never performing I/O in properties."""
+    """Expose the local map even when optional calendar sources are stale.
+
+    Scan freshness and errors are reported separately; cached links stay usable.
+    """
 
     _attr_has_entity_name = True
-    _attr_name = "Activity Images Library"
-    _attr_icon = "mdi:image-multiple"
+    _attr_translation_key = "library"
     _attr_should_poll = False
 
     def __init__(self, entry_id: str, calendar: ActivityCalendarAdapter) -> None:
         self._attr_unique_id = f"{entry_id}_library"
+        self._attr_device_info = service_device_info(entry_id)
         self._calendar = calendar
-        self._unsubscribe = None
+        self._unsubscribe: Callable[[], None] | None = None
 
     @property
     def native_value(self) -> int:  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -37,7 +51,7 @@ class ActivityImagesLibrarySensor(SensorEntity):
         return len(self._calendar.images)
 
     @property
-    def extra_state_attributes(self) -> dict:  # pyright: ignore[reportIncompatibleVariableOverride]
+    def extra_state_attributes(self) -> dict[str, object]:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Keep the bounded image map and Calendar Card Pro rules dynamic."""
         return {
             "images": dict(self._calendar.images),

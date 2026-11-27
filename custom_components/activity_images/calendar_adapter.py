@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from typing import NotRequired, TypedDict, cast
 from contextlib import suppress
 from datetime import datetime, timedelta
 from functools import partial
@@ -34,7 +35,7 @@ from .const import (
 )
 from .engine import GenerationSuppressed
 from .image_cache import ActivityImageCache, normalize_title
-from .image_queue import ActivityImageQueue
+from .image_queue import ActivityImageQueue, CalendarSource
 from .settings import calendar_identity
 from .settings_schema import calendar_auto_ids
 from .storage import async_drain, async_save_verified
@@ -51,7 +52,7 @@ def escape_event_title(title: str) -> str:
     return _REGEX_META.sub(lambda match: "\\" + match.group(0), title)
 
 
-def event_summary(event) -> tuple[str, str] | None:
+def event_summary(event: object) -> tuple[str, str] | None:
     """Return untouched summary and display title; reject malformed live input."""
     if not isinstance(event, dict):
         raise ValueError("Invalid calendar event")
@@ -68,6 +69,47 @@ def event_summary(event) -> tuple[str, str] | None:
     return raw, title
 
 
+class Occurrence(TypedDict):
+    raw_summary: str
+    start: NotRequired[str | None]
+    end: NotRequired[str | None]
+
+
+class CalendarPresentation(TypedDict):
+    titles: list[str]
+    occurrences: list[Occurrence]
+    last_ok: str | None
+    last_error: str | None
+    identity: str | None
+
+
+class CalendarStatus(TypedDict):
+    calendars: list[str]
+    tracked_titles: int
+    images: int
+    last_scan: str | None
+    error: str | None
+    ignore_error: str | None
+    automatic_generation: bool
+    complete: bool
+    stale: bool
+
+
+class IgnoreData(TypedDict):
+    titles: list[str]
+    revision: int
+
+
+class IgnoreResult(TypedDict):
+    revision: int
+    ignored: bool
+
+
+type CalendarConfig = tuple[tuple[str, ...], int]
+# The additive legacy snapshot has dynamic calendar entity IDs alongside metadata.
+type CalendarSnapshot = dict[str, list[str] | dict[str, list[Occurrence]] | dict[str, str | None] | int]
+
+
 class ActivityCalendarAdapter:
     """Keep a bounded, reactive map from future event summaries to image URLs."""
 
@@ -76,28 +118,28 @@ class ActivityCalendarAdapter:
         hass: HomeAssistant,
         cache: ActivityImageCache,
         queue: ActivityImageQueue,
-        settings: Mapping,
+        settings: Mapping[str, object],
     ) -> None:
         self.hass = hass
         self.cache = cache
         self.queue = queue
         self.settings = settings
-        self.calendars: tuple[str, ...] = tuple(settings.get(CONF_CALENDARS) or ())
-        self.lookahead_days = int(settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS))
+        self.calendars: tuple[str, ...] = tuple(cast(Iterable[str], settings.get(CONF_CALENDARS) or ()))
+        self.lookahead_days = int(cast(int, settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS)))
         self.auto_calendars = calendar_auto_ids(settings)
         self.auto_generate = bool(self.auto_calendars)
         self.calendar_titles: dict[str, list[str]] = {}
-        self.raw_occurrences: dict[str, list[dict]] = {}
+        self.raw_occurrences: dict[str, list[Occurrence]] = {}
         self.calendar_identities: dict[str, str | None] = {}
         # Bounded in-memory presentation only: per-calendar titles/occurrences plus
         # last_ok/last_error/identity. Never authorizes paid work or deletion.
-        self._presentation: dict[str, dict] = {}
-        self._fetch_tasks: set[asyncio.Task] = set()
+        self._presentation: dict[str, CalendarPresentation] = {}
+        self._fetch_tasks: set[asyncio.Task[object]] = set()
         self.ignored_titles: frozenset[str] = frozenset()
         self.ignore_revision = 0
         self._ignores_loaded = False
         self._ignore_error: str | None = None
-        self._verified_config: tuple | None = None
+        self._verified_config: CalendarConfig | None = None
         self._scan_in_progress = False
         self.queue.calendar_authorizer = self.async_authorize_generation
         self.images: dict[str, str] = {}
@@ -107,9 +149,9 @@ class ActivityCalendarAdapter:
         self._unsubscribers: list[Callable[[], None]] = []
         self._state_unsubscribe: Callable[[], None] | None = None
         self._lock = asyncio.Lock()
-        self._scan_task: asyncio.Task | None = None
-        self._reconcile_task: asyncio.Task | None = None
-        self._snapshot_task: asyncio.Task | None = None
+        self._scan_task: asyncio.Task[None] | None = None
+        self._reconcile_task: asyncio.Task[None] | None = None
+        self._snapshot_task: asyncio.Task[None] | None = None
         self._rescan_needed = False
         self._rescan_allow_generation = False
         self._generation_suppressed = 0
@@ -119,9 +161,9 @@ class ActivityCalendarAdapter:
         self._start_registered = False
         self._retry_cancel: Callable[[], None] | None = None
         self._retry_count = 0
-        self._warned_error: str | None = None
-        self._store = Store(hass, 1, f"{DOMAIN}_calendar_snapshot", atomic_writes=True)
-        self._ignore_store = Store(hass, 1, f"{DOMAIN}_ignored_titles", atomic_writes=True)
+        self._scan_unavailable = False
+        self._store: Store[CalendarSnapshot] = Store(hass, 1, f"{DOMAIN}_calendar_snapshot", atomic_writes=True)
+        self._ignore_store: Store[IgnoreData] = Store(hass, 1, f"{DOMAIN}_ignored_titles", atomic_writes=True)
 
     async def async_setup(self) -> None:
         async with self._lock:
@@ -151,7 +193,7 @@ class ActivityCalendarAdapter:
         self._ignores_loaded = True
         self._ignore_error = None
 
-    async def async_ignore(self, raw_summary: str, ignored: bool, revision: int) -> dict:
+    async def async_ignore(self, raw_summary: str, ignored: bool, revision: int) -> IgnoreResult:
         """Persist exact HA summaries before acknowledging an authorization change."""
         if not isinstance(raw_summary, str) or not 1 <= len(raw_summary) <= 1024 or type(ignored) is not bool:
             raise ValueError("Invalid exact title")
@@ -167,9 +209,8 @@ class ActivityCalendarAdapter:
                 raise ValueError("At most 512 exact ignored titles are supported")
             if titles != self.ignored_titles:
                 next_revision = self.ignore_revision + 1
-                _, cancelled = await async_drain(async_save_verified(self.hass, self._ignore_store, {
-                    "titles": sorted(titles), "revision": next_revision,
-                }))
+                snapshot: IgnoreData = {"titles": sorted(titles), "revision": next_revision}
+                _, cancelled = await async_drain(async_save_verified(self.hass, self._ignore_store, snapshot))
                 # No await between publishing the new policy and its acknowledgement.
                 self.ignored_titles = frozenset(titles)
                 self.ignore_revision = next_revision
@@ -178,11 +219,11 @@ class ActivityCalendarAdapter:
                     raise asyncio.CancelledError
             return {"revision": self.ignore_revision, "ignored": raw_summary in self.ignored_titles}
 
-    def _current_config(self) -> tuple:
-        return (tuple(self.settings.get(CONF_CALENDARS) or ()),
-                int(self.settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS)))
+    def _current_config(self) -> CalendarConfig:
+        return (tuple(cast(Iterable[str], self.settings.get(CONF_CALENDARS) or ())),
+                int(cast(int, self.settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS))))
 
-    def _policy_bindings(self) -> dict:
+    def _policy_bindings(self) -> dict[str, str | None]:
         bindings = self.settings.get(CALENDAR_BINDINGS, {})
         return bindings if isinstance(bindings, dict) else {}
 
@@ -200,12 +241,12 @@ class ActivityCalendarAdapter:
                    or bindings[entity] != calendar_identity(self.hass, entity)
                    for entity in self.calendars)
 
-    def automatic_sources(self, title: str | None = None) -> list[dict]:
+    def automatic_sources(self, title: str | None = None) -> list[CalendarSource]:
         """Read current authorization without taking calendar after generator/queue."""
         if (not self._ignores_loaded or self._generation_suppressed or self._scan_in_progress
                 or self._demand_truncated or self.coverage_stale()):
             return []
-        selected = set(self.settings.get(CONF_CALENDARS) or ())
+        selected = set(cast(Iterable[str], self.settings.get(CONF_CALENDARS) or ()))
         automatic = set(calendar_auto_ids(self.settings)) & selected
         demands = dict.fromkeys((entity, event["raw_summary"])
                                 for entity, events in self.raw_occurrences.items() if entity in automatic
@@ -214,7 +255,7 @@ class ActivityCalendarAdapter:
                                 and (title is None or normalize_title(event["raw_summary"]) == normalize_title(title)))
         return [{"calendar_entity_id": entity, "raw_summary": raw} for entity, raw in demands]
 
-    async def async_authorize_generation(self, title: str, sources: list[dict]) -> None:
+    async def async_authorize_generation(self, title: str, sources: list[CalendarSource]) -> None:
         """Recheck after cache I/O, immediately before each new paid invocation."""
         if not any(source in self.automatic_sources(title) for source in sources):
             raise GenerationSuppressed("Calendar automatic generation is no longer authorized or needs a fresh complete scan")
@@ -224,7 +265,7 @@ class ActivityCalendarAdapter:
         if not any(source in self.automatic_sources(title) for source in sources):
             raise GenerationSuppressed("Calendar authorization changed while waiting")
 
-    def _snapshot(self) -> dict:
+    def _snapshot(self) -> CalendarSnapshot:
         # Additive envelope: older versions still see the original per-calendar map.
         return {**self.calendar_titles, "_raw_occurrences": self.raw_occurrences,
                 "_calendar_registry_ids": self.calendar_identities, "_coverage_version": 1}
@@ -254,15 +295,15 @@ class ActivityCalendarAdapter:
                 result[entity] = list(self.calendar_titles.get(entity, []))
         return result
 
-    def display_occurrences_map(self) -> dict[str, list[dict]]:
+    def display_occurrences_map(self) -> dict[str, list[Occurrence]]:
         """Merged read-only occurrences; failed calendars retain last-known rows."""
-        result: dict[str, list[dict]] = {}
+        result: dict[str, list[Occurrence]] = {}
         for entity in self.calendars:
             live = self._presentation.get(entity)
             if live is not None:
-                result[entity] = [dict(event) for event in live.get("occurrences", [])]
+                result[entity] = [event.copy() for event in live.get("occurrences", [])]
             else:
-                result[entity] = [dict(event) for event in self.raw_occurrences.get(entity, [])]
+                result[entity] = [event.copy() for event in self.raw_occurrences.get(entity, [])]
         return result
 
     def display_stale(self, entity_id: str) -> bool:
@@ -279,15 +320,15 @@ class ActivityCalendarAdapter:
         if entity_id not in bindings or bindings[entity_id] != calendar_identity(self.hass, entity_id):
             return True
         try:
-            scanned = datetime.fromisoformat(live["last_ok"])
+            scanned = datetime.fromisoformat(cast(str, live["last_ok"]))
         except (ValueError, TypeError):
             return True
         return dt_util.now() - scanned > timedelta(minutes=CALENDAR_SCAN_MINUTES + 1)
 
     @property
-    def rules(self) -> list[dict]:
+    def rules(self) -> list[dict[str, str]]:
         """Pre-escaped native Calendar Card Pro entity entries, including fallback."""
-        rules: list[dict] = []
+        rules: list[dict[str, str]] = []
         for entity, titles in self.display_titles_map().items():
             patterns: list[str] = []
             for title in titles:
@@ -306,7 +347,7 @@ class ActivityCalendarAdapter:
         return rules
 
     @callback
-    def _schedule_scan(self, _event=None, *, allow_generation=True) -> None:
+    def _schedule_scan(self, _event: object = None, *, allow_generation: bool = True) -> None:
         if (self._closed or not self.calendars
                 or self.hass.state is not CoreState.running or self._retry_cancel):
             return
@@ -316,7 +357,7 @@ class ActivityCalendarAdapter:
             return
         self._scan_task = self.hass.async_create_task(self._drain_scans(allow_generation))
 
-    async def _drain_scans(self, allow_generation=True) -> None:
+    async def _drain_scans(self, allow_generation: bool = True) -> None:
         while not self._closed:
             self._rescan_needed = False
             self._rescan_allow_generation = False
@@ -326,7 +367,7 @@ class ActivityCalendarAdapter:
             allow_generation = self._rescan_allow_generation
 
     @callback
-    def _retry_scan(self, _now, *, allow_generation: bool) -> None:
+    def _retry_scan(self, _now: datetime, *, allow_generation: bool) -> None:
         self._retry_cancel = None
         self._schedule_scan(allow_generation=allow_generation)
 
@@ -334,14 +375,14 @@ class ActivityCalendarAdapter:
     def _scan_failed(self, exc: Exception, *, allow_generation: bool) -> None:
         self.last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
         self._rescan_needed = False
+        if not self._scan_unavailable:
+            _LOGGER.warning("Unable to refresh Activity Images calendars (%s); retaining cached images", type(exc).__name__)
+            self._scan_unavailable = True
         if self._retry_count < len(_RETRY_DELAYS):
             delay = _RETRY_DELAYS[self._retry_count]
             self._retry_count += 1
             self._retry_cancel = async_call_later(self.hass, delay, partial(
                 self._retry_scan, allow_generation=allow_generation and not self._generation_suppressed))
-        elif self._warned_error != self.last_error:
-            _LOGGER.warning("Unable to refresh Activity Images calendars: %s", self.last_error)
-            self._warned_error = self.last_error
         self._notify()
 
     def _snapshot_titles(self, snapshot: object) -> dict[str, list[str]]:
@@ -395,7 +436,7 @@ class ActivityCalendarAdapter:
                 self._presentation = {
                     entity: {
                         "titles": list(parsed.get(entity, [])),
-                        "occurrences": [dict(event) for event in self.raw_occurrences.get(entity, [])],
+                        "occurrences": [event.copy() for event in self.raw_occurrences.get(entity, [])],
                         "last_ok": None,
                         "last_error": "Restored snapshot; awaiting fresh scan",
                         "identity": bindings.get(entity),
@@ -425,13 +466,13 @@ class ActivityCalendarAdapter:
         )
         self._unsubscribers.append(async_at_started(self.hass, self._at_started))
 
-    async def async_update_settings(self, settings) -> None:
+    async def async_update_settings(self, settings: Mapping[str, object]) -> None:
         """Apply the latest options between scans, without stopping accepted jobs."""
         async with self._lock:
             if self._closed:
                 return
-            calendars = tuple(settings.get(CONF_CALENDARS) or ())
-            days = int(settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS))
+            calendars = tuple(cast(Iterable[str], settings.get(CONF_CALENDARS) or ()))
+            days = int(cast(int, settings.get(CONF_LOOKAHEAD_DAYS, DEFAULT_LOOKAHEAD_DAYS)))
             auto_calendars = calendar_auto_ids(settings)
             selection_changed = calendars != self.calendars
             lookahead_changed = days != self.lookahead_days
@@ -446,7 +487,8 @@ class ActivityCalendarAdapter:
                 self._retry_cancel()
                 self._retry_cancel = None
             self._retry_count = 0
-            self._warned_error = None
+            if selection_changed:
+                self._scan_unavailable = False
             if demand_changed:
                 self.last_scan = None
                 self.last_error = None
@@ -464,7 +506,7 @@ class ActivityCalendarAdapter:
                     if entity not in self._presentation:
                         self._presentation[entity] = {"titles": [], "occurrences": [], "last_ok": None,
                                                         "last_error": "Awaiting fresh scan", "identity": None}
-                wanted = {title for entity in calendars for title in self._presentation.get(entity, {}).get("titles", [])}
+                wanted = {title for entity in calendars for title in self._presentation[entity]["titles"]}
                 if not wanted:
                     wanted = {title for titles in self.calendar_titles.values() for title in titles}
                 self.images = {title: url for title, url in self.images.items() if title in wanted}
@@ -491,7 +533,7 @@ class ActivityCalendarAdapter:
         elif demand_changed or enable_generation:
             self._schedule_scan(allow_generation=enable_generation)
 
-    async def async_refresh(self, *, allow_generation=True) -> dict:
+    async def async_refresh(self, *, allow_generation: bool = True) -> CalendarStatus:
         """Join the owned scan; public actions must obey the same lifecycle guards."""
         if self._closed or self.hass.state is not CoreState.running:
             return self.status()
@@ -501,7 +543,7 @@ class ActivityCalendarAdapter:
             await asyncio.shield(self._scan_task)
         return self.status()
 
-    async def _async_refresh_resolve_only(self) -> dict:
+    async def _async_refresh_resolve_only(self) -> CalendarStatus:
         """Keep joined scans nonbillable even when the requesting client disconnects."""
         self._generation_suppressed += 1
         try:
@@ -512,18 +554,18 @@ class ActivityCalendarAdapter:
         finally:
             self._generation_suppressed -= 1
 
-    async def async_refresh_for_deletion(self) -> dict:
+    async def async_refresh_for_deletion(self) -> CalendarStatus:
         """Verify live demand without authorizing automatic missing-image jobs."""
         result = await self._async_refresh_resolve_only()
         if self._demand_truncated:
             raise ValueError("Calendar demand exceeded 64 distinct titles or 512 events; permanent deletion is blocked")
         return result
 
-    async def async_refresh_coverage(self) -> dict:
+    async def async_refresh_coverage(self) -> CalendarStatus:
         """Use the same scan, but never authorize paid work from the UI."""
         return await self._async_refresh_resolve_only()
 
-    async def _fetch_calendar(self, entity: str, start_iso: str, end_iso: str):
+    async def _fetch_calendar(self, entity: str, start_iso: str, end_iso: str) -> object:
         async with asyncio.timeout(_CALENDAR_FETCH_TIMEOUT):
             return await self.hass.services.async_call(
                 "calendar", "get_events", {
@@ -580,7 +622,7 @@ class ActivityCalendarAdapter:
             raise GenerationSuppressed("Calendar selection changed during verification")
         return sorted(titles)
 
-    async def _async_refresh_once(self, *, allow_generation=True) -> dict:
+    async def _async_refresh_once(self, *, allow_generation: bool = True) -> CalendarStatus:
         """Read a 30-day by-default window, group by calendar, resolve, then queue."""
         async with self._lock:
             if (self._closed or not self.calendars
@@ -634,7 +676,7 @@ class ActivityCalendarAdapter:
                                 fetch_results[entity] = result
                 if self._closed:
                     return self.status()
-                events_by_entity: dict[str, list] = {}
+                events_by_entity: dict[str, list[object]] = {}
                 for entity in self.calendars:
                     if entity in fetch_errors:
                         continue
@@ -655,7 +697,7 @@ class ActivityCalendarAdapter:
                         continue
                     events_by_entity[entity] = events
                 parsed: dict[str, list[str]] = {}
-                occurrences: dict[str, list[dict]] = {}
+                occurrences: dict[str, list[Occurrence]] = {}
                 seen: set[str] = set()
                 raw_seen: set[str] = set()
                 truncated = False
@@ -682,9 +724,9 @@ class ActivityCalendarAdapter:
                         truncated = True
                     titles: list[str] = []
                     occurrences[entity] = []
-                    for event in events[:512]:
+                    for raw_event in events[:512]:
                         try:
-                            summary = event_summary(event)
+                            summary = event_summary(raw_event)
                         except ValueError:
                             truncated = True
                             continue
@@ -697,10 +739,11 @@ class ActivityCalendarAdapter:
                             truncated = True
                             continue
                         raw_seen.add(raw_summary)
+                        assert isinstance(raw_event, dict)  # event_summary already validates the input.
                         occurrences[entity].append({
                             "raw_summary": raw_summary,
-                            "start": event.get("start") if isinstance(event.get("start"), str) else None,
-                            "end": event.get("end") if isinstance(event.get("end"), str) else None,
+                            "start": raw_event.get("start") if isinstance(raw_event.get("start"), str) else None,
+                            "end": raw_event.get("end") if isinstance(raw_event.get("end"), str) else None,
                         })
                         if title not in titles:
                             titles.append(title)
@@ -725,7 +768,7 @@ class ActivityCalendarAdapter:
                         if entity not in fetch_errors:
                             self._presentation[entity] = {
                                 "titles": list(parsed.get(entity, [])),
-                                "occurrences": [dict(event) for event in occurrences.get(entity, [])],
+                                "occurrences": [event.copy() for event in occurrences.get(entity, [])],
                                 "last_ok": now.isoformat(),
                                 "last_error": None,
                                 "identity": bindings.get(entity),
@@ -734,12 +777,12 @@ class ActivityCalendarAdapter:
                             previous = self._presentation.get(entity)
                             if previous is None:
                                 previous_titles = list(self.calendar_titles.get(entity, []))
-                                previous_occurrences = [dict(event) for event in self.raw_occurrences.get(entity, [])]
+                                previous_occurrences = [event.copy() for event in self.raw_occurrences.get(entity, [])]
                                 previous_ok = None
                                 previous_identity = None
                             else:
                                 previous_titles = list(previous.get("titles", []))
-                                previous_occurrences = [dict(event) for event in previous.get("occurrences", [])]
+                                previous_occurrences = [event.copy() for event in previous.get("occurrences", [])]
                                 previous_ok = previous.get("last_ok")
                                 previous_identity = previous.get("identity")
                             try:
@@ -775,14 +818,16 @@ class ActivityCalendarAdapter:
                     images = await self.cache.async_find_many(wanted)
                 if self._closed:
                     return self.status()
-                snapshot = {**parsed, "_raw_occurrences": occurrences,
+                snapshot: CalendarSnapshot = {**parsed, "_raw_occurrences": occurrences,
                             "_calendar_registry_ids": bindings, "_coverage_version": 1}
                 self._snapshot_task = self.hass.async_create_task(async_save_verified(self.hass, self._store, snapshot))
                 await asyncio.shield(self._snapshot_task)
                 if self._closed:
                     return self.status()
                 self._retry_count = 0
-                self._warned_error = None
+                if self._scan_unavailable:
+                    _LOGGER.info("Activity Images calendar refresh recovered")
+                    self._scan_unavailable = False
                 self.calendar_titles = parsed
                 self.raw_occurrences = occurrences
                 self.calendar_identities = bindings
@@ -791,7 +836,7 @@ class ActivityCalendarAdapter:
                 for entity in self.calendars:
                     self._presentation[entity] = {
                         "titles": list(parsed.get(entity, [])),
-                        "occurrences": [dict(event) for event in occurrences.get(entity, [])],
+                        "occurrences": [event.copy() for event in occurrences.get(entity, [])],
                         "last_ok": now.isoformat(),
                         "last_error": None,
                         "identity": bindings.get(entity),
@@ -818,7 +863,7 @@ class ActivityCalendarAdapter:
                         if live is None:
                             self._presentation[entity] = {
                                 "titles": list(self.calendar_titles.get(entity, [])),
-                                "occurrences": [dict(event) for event in self.raw_occurrences.get(entity, [])],
+                                "occurrences": [event.copy() for event in self.raw_occurrences.get(entity, [])],
                                 "last_ok": None,
                                 "last_error": message,
                                 "identity": self.calendar_identities.get(entity),
@@ -862,7 +907,7 @@ class ActivityCalendarAdapter:
                 self.images = images
                 self._notify()
 
-    def status(self) -> dict:
+    def status(self) -> CalendarStatus:
         return {
             "calendars": list(self.calendars),
             "tracked_titles": sum(len(items) for items in self.display_titles_map().values()),
@@ -892,11 +937,11 @@ class ActivityCalendarAdapter:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
-        for task in list(self._fetch_tasks):
-            if not task.done():
-                task.cancel()
+        for fetch_task in list(self._fetch_tasks):
+            if not fetch_task.done():
+                fetch_task.cancel()
                 with suppress(asyncio.CancelledError):
-                    await task
+                    await fetch_task
         self._fetch_tasks.clear()
         # Executor writes cannot be cancelled; finish this instance's write before reload.
         if self._snapshot_task:

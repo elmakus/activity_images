@@ -340,14 +340,14 @@ async def test_native_migration_preserves_only_prior_selected_authorization_and_
     entry = SimpleNamespace(entry_id="migrated", data={const.CONF_AI_ENTITY: "ai_task.mock"},
                             options={const.CONF_CALENDARS: ["calendar.school"], const.CONF_AUTO_GENERATE: legacy_auto,
                                      "unrelated": {"preserved": True}})
-    settings_api.migrate_calendar_options(ha, entry)
+    settings_api.migrate_settings(ha, entry)
     assert entry.options[const.CONF_AUTO_CALENDARS] == (["calendar.school"] if legacy_auto else [])
     assert entry.options[const.CONF_AUTO_GENERATE] is False
     assert entry.options[const.CALENDAR_BINDINGS] == {"calendar.school": "registry-calendar.school"}
     assert entry.options["unrelated"] == {"preserved": True}
     before = deepcopy(entry.options)
     ha.registry["calendar.school"].id = "unrelated-replacement"
-    settings_api.migrate_calendar_options(ha, entry)
+    settings_api.migrate_settings(ha, entry)
     assert entry.options == before  # Restart cannot bind a reused entity ID again.
 
 
@@ -771,3 +771,28 @@ async def test_display_stale_turns_truthful_before_next_scan(ha, configured, mon
     assert adapter.display_titles_map()["calendar.school"] == ["Stay Fresh"]
     assert adapter.automatic_sources() == [] and queue._pending == ["Stay Fresh"]
     await adapter.async_shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("location", ["data", "options", "both"])
+async def test_removed_background_endpoint_is_purged_without_rebinding_calendar(ha, location):
+    """Existing migrated settings and their authorization must remain unchanged."""
+    entry = SimpleNamespace(
+        entry_id="migrated",
+        data={const.CONF_AI_ENTITY: "ai_task.mock", "lucida_url": "http://old.invalid", "unrelated_data": 7},
+        options={const.CONF_CALENDARS: ["calendar.school"], const.CONF_AUTO_CALENDARS: ["calendar.school"],
+                 const.CALENDAR_BINDINGS: {"calendar.school": "old-calendar-binding"},
+                 "lucida_url": "http://other.invalid", "unrelated": {"preserved": True}},
+    )
+    if location == "options":
+        entry.data.pop("lucida_url")
+    if location == "data":
+        entry.options.pop("lucida_url")
+    expected_data = {k: v for k, v in entry.data.items() if k != "lucida_url"}
+    expected_options = {k: v for k, v in entry.options.items() if k != "lucida_url"}
+    settings_api.migrate_settings(ha, entry)
+    assert entry.data == expected_data and entry.options == expected_options
+    # A reload must not write anything when migration is already complete.
+    ha.config_entries.async_update_entry = lambda *args, **kwargs: pytest.fail("Unexpected settings write")
+    settings_api.migrate_settings(ha, entry)
+    assert not ha.services.calls

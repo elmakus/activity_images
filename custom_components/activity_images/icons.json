@@ -1,0 +1,14 @@
+{
+  "entity": {
+    "sensor": {
+      "library": {
+        "default": "mdi:image-multiple"
+      }
+    },
+    "ai_task": {
+      "generator": {
+        "default": "mdi:image-auto-adjust"
+      }
+    }
+  }
+}

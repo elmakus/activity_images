@@ -192,10 +192,12 @@ def test_native_selector_excludes_own_current_ids():
         pkg = types.ModuleType("homeassistant.config_entries")
         pkg.__path__ = []
         sys.modules["homeassistant.config_entries"] = pkg
+    base_flow = type("ConfigEntryBaseFlow", (), {})
+    sys.modules["homeassistant.config_entries"].ConfigEntryBaseFlow = base_flow
     sys.modules["homeassistant.config_entries"].__dict__["ConfigFlow"] = type(
-        "ConfigFlow", (), {"__init_subclass__": classmethod(lambda cls, **kwargs: None)}
+        "ConfigFlow", (base_flow,), {"__init_subclass__": classmethod(lambda cls, **kwargs: None)}
     )
-    sys.modules["homeassistant.config_entries"].__dict__["OptionsFlow"] = type("OptionsFlow", (), {})
+    sys.modules["homeassistant.config_entries"].__dict__["OptionsFlow"] = type("OptionsFlow", (base_flow,), {})
     if "homeassistant.core" not in sys.modules:
         pkg = types.ModuleType("homeassistant.core")
         pkg.__path__ = []

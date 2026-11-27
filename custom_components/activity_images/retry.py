@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import logging
-from typing import Awaitable, Callable, TypeVar
+from typing import Awaitable, Callable, Iterator, TypeVar
 
 _LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -13,7 +13,7 @@ MAX_ATTEMPTS = 3  # Includes the first request: only two retries.
 MAX_DELAY_SECONDS = 120.0
 
 
-def _chain(exc: BaseException):
+def _chain(exc: BaseException) -> Iterator[BaseException]:
     """Walk wrapped provider errors (HA may wrap aiohttp/OpenAI exceptions)."""
     seen: set[int] = set()
     current: BaseException | None = exc

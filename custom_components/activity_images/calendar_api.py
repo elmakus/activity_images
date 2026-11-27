@@ -2,6 +2,15 @@
 from __future__ import annotations
 
 from urllib.parse import quote, unquote
+from collections.abc import Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.components.websocket_api import ActiveConnection
+    from . import ActivityImagesRuntime
+    from .calendar_adapter import ActivityCalendarAdapter, CalendarStatus
+    from .library import LibraryItem
 
 import probatio as p
 from homeassistant.exceptions import HomeAssistantError
@@ -19,7 +28,7 @@ _QUERY = {
     p.Optional("limit", default=25): p.All(int, p.Range(min=1, max=96)),
     p.Optional("sort", default="title"): p.In(["title", "occurrences"]),
 }
-_SCHEMAS = {
+_SCHEMAS: dict[str, dict[Any, Any]] = {
     "discover": {}, "coverage": _QUERY, "refresh": _QUERY,
     "ignore": {
         p.Required("raw_summary"): p.All(str, p.Length(min=1, max=1024)),
@@ -29,20 +38,86 @@ _SCHEMAS = {
 }
 
 
-def discover(calendar) -> dict:
+class CalendarDiscovery(TypedDict):
+    entity_id: str
+    name: str
+    state: str
+    available: bool
+    monitor: bool
+    auto_generate: bool
+    configured: bool
+    registry_status: str
+    warning: str | None
+
+
+class DiscoveryResult(TypedDict):
+    entities: list[CalendarDiscovery]
+
+
+class CoverageOccurrence(TypedDict):
+    calendar_entity_id: str
+    start: str | None
+    end: str | None
+
+
+class CoverageSource(TypedDict):
+    entity_id: str
+    name: str
+    available: bool
+    auto_generate: bool
+    stale: bool
+    count: int
+
+
+class CoverageManualBlock(TypedDict):
+    reason: str
+    revision: str | None
+    uncertain: bool
+
+
+class CoverageItem(TypedDict):
+    raw_summary: str
+    title: str
+    ignored: bool
+    scheduled: bool
+    occurrence_count: int
+    calendars: list[CoverageSource]
+    occurrences: list[CoverageOccurrence]
+    image_status: str
+    resolution: str
+    image: LibraryItem | None
+    job_status: str | None
+    job_id: str | None
+    job_error: str | None
+    manual_block: CoverageManualBlock | None
+    eligible_for_auto: bool
+
+
+class CoverageResult(TypedDict):
+    items: list[CoverageItem]
+    total: int
+    offset: int
+    limit: int
+    stats: dict[str, int]
+    scan: CalendarStatus
+    ignore_revision: int
+    entities: list[CalendarDiscovery]
+
+
+def discover(calendar: ActivityCalendarAdapter) -> DiscoveryResult:
     """Keep saved missing IDs visible; discovery never selects or fetches calendars."""
     from homeassistant.helpers import entity_registry as er
 
     registry = er.async_get(calendar.hass)
     states = {state.entity_id: state for state in calendar.hass.states.async_all("calendar")}
-    selected = set(calendar.settings.get(CONF_CALENDARS) or ())
+    selected = set(cast(Iterable[str], calendar.settings.get(CONF_CALENDARS) or ()))
     automatic = set(calendar_auto_ids(calendar.settings)) & selected
     bindings = calendar._policy_bindings()
     ids = selected | set(states) | {entity for entity in registry.entities if entity.startswith("calendar.")}
-    entities = []
+    entities: list[CalendarDiscovery] = []
     for entity_id in sorted(ids):
         state, entry = states.get(entity_id), registry.async_get(entity_id)
-        name = (state.attributes.get("friendly_name") if state else None) or (
+        name = (cast(str | None, state.attributes.get("friendly_name")) if state else None) or (
             entry.name or entry.original_name if entry else None
         ) or entity_id
         available = state is not None and state.state not in {"unknown", "unavailable"} and not (entry and entry.disabled_by)
@@ -65,7 +140,7 @@ def discover(calendar) -> dict:
     return {"entities": entities}
 
 
-async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, limit=25, sort="title") -> dict:
+async def coverage(runtime: ActivityImagesRuntime, *, query: str = "", filter: str = "all", calendar: str = "", offset: int = 0, limit: int = 25, sort: str = "title") -> CoverageResult:
     """Derive bounded exact-raw groups without queueing, touching or pruning mappings."""
     if (not isinstance(query, str) or len(query) > 255
             or filter not in {"all", "missing", "available", "ignored", "queued", "failed"}
@@ -80,8 +155,8 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
             raise ValueError("Activity Images is unloading")
         entities = discover(adapter)["entities"]
         by_entity = {entity["entity_id"]: entity for entity in entities}
-        selected = set(adapter.settings.get(CONF_CALENDARS) or ())
-        groups = {raw: [] for raw in adapter.ignored_titles}
+        selected = set(cast(Iterable[str], adapter.settings.get(CONF_CALENDARS) or ()))
+        groups: dict[str, list[CoverageOccurrence]] = {raw: [] for raw in adapter.ignored_titles}
         # Display projection only; authority stays in automatic_sources().
         for entity, events in adapter.display_occurrences_map().items():
             if entity in selected:
@@ -97,8 +172,8 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
         scan = adapter.status()
         automatic = adapter.automatic_sources()
         inventory_titles = library._titles(cache.entries())
-        resolved = {}
-        items = []
+        resolved: dict[str, tuple[LibraryItem | None, str, str]] = {}
+        items: list[CoverageItem] = []
         for raw, occurrences in groups.items():
             title, key = raw.strip(), normalize_title(raw)
             if title not in resolved:
@@ -116,7 +191,7 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
             job = next((job for job in reversed(jobs) if normalize_title(job["title"]) == key), None)
             job_status = {"pending": "queued", "running": "running", "review": "review",
                           "failed": "failed", "interrupted": "failed"}.get(job["state"]) if job else "failed" if key in failures else None
-            manual_block = None
+            manual_block: CoverageManualBlock | None = None
             if key in blocked and key in snapshot["manual_blocked"]:
                 entry = manual_blocks.get(key)
                 if entry is None:
@@ -124,7 +199,7 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
                 else:
                     manual_block = {"reason": entry.get("reason"), "revision": entry.get("revision"),
                                     "uncertain": bool(entry.get("uncertain"))}
-            sources = []
+            sources: list[CoverageSource] = []
             for entity in sorted({event["calendar_entity_id"] for event in occurrences}):
                 info = by_entity[entity]
                 sources.append({"entity_id": entity, "name": info["name"], "available": info["available"],
@@ -142,7 +217,7 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
         revision = adapter.ignore_revision
     stats = {"titles": len(items), **dict.fromkeys(("missing", "available", "ignored", "queued", "failed"), 0)}
 
-    def matches(item, category):
+    def matches(item: CoverageItem, category: str) -> bool:
         return (category == "all" or category in {"missing", "available"} and item["image_status"] == category
                 or category == "ignored" and item["ignored"]
                 or category == "queued" and item["job_status"] in {"queued", "running", "review"}
@@ -161,18 +236,19 @@ async def coverage(runtime, *, query="", filter="all", calendar="", offset=0, li
             "stats": stats, "scan": scan, "ignore_revision": revision, "entities": entities}
 
 
-def _handler(command: str, fields: dict):
+def _handler(command: str, fields: Mapping[Any, Any]) -> Callable[..., None]:
     from homeassistant.components import websocket_api
 
-    from .library_api import _runtime
+    from .settings import get_runtime as _runtime
 
     @websocket_api.websocket_command({"type": f"{DOMAIN}/calendar/{command}", **fields})
     @websocket_api.require_admin
     @websocket_api.async_response
-    async def handle(hass, connection, msg):
+    async def handle(hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]) -> None:
         try:
             runtime = _runtime(hass)
             args = {key: value for key, value in msg.items() if key not in {"id", "type"}}
+            result: object
             if command == "discover":
                 result = discover(runtime.calendar)
             elif command == "ignore":
@@ -188,7 +264,7 @@ def _handler(command: str, fields: dict):
     return handle
 
 
-def async_register_calendar_api(hass):
+def async_register_calendar_api(hass: HomeAssistant) -> None:
     from homeassistant.components import websocket_api
 
     for command, fields in _SCHEMAS.items():

@@ -33,5 +33,94 @@ rules:
     status: done
     comment: Validates stored settings, loads and verifies persistent state before enabling the worker. An unavailable optional provider does not prevent local library use.
   unique-config-entry: done
-  # Additional implemented rule
+  # Silver: self-assessed and verified on supported HA versions.
+  action-exceptions: done
+  config-entry-unloading: done
+  docs-configuration-parameters: done
+  docs-installation-parameters: done
+  entity-unavailable:
+    status: done
+    comment: Observes native AI Task provider readiness; the library is still available locally.
+  integration-owner: done
+  log-when-unavailable:
+    status: done
+    comment: Provider and calendar loss/recovery transitions log once per observed outage; no billable probes.
+  parallel-updates: done
+  reauthentication-flow:
+    status: exempt
+    comment: No credentials stored by Activity Images; authentication belongs to the selected AI Task integration.
+  test-coverage:
+    status: done
+    comment: All 27 modules exceed 95% statement coverage, config_flow 100%, on HA 2026.11.0 and 2026.11.3; CI enforces exact counts.
+  # Gold
   diagnostics: done
+  devices:
+    status: done
+    comment: One stable service device, shared by both primary entities; native registry smoke verifies creation and reload.
+  discovery:
+    status: exempt
+    comment: Local singleton software service has no discoverable physical or network device.
+  discovery-update-info:
+    status: exempt
+    comment: No network address or device discovery; the selected provider integration owns connectivity.
+  docs-data-update:
+    status: done
+    comment: README describes event-driven state, bounded calendar polling, backoff and refresh behavior.
+  docs-examples:
+    status: done
+    comment: README includes a complete resolve-only automation and calendar card/action examples.
+  docs-known-limitations:
+    status: done
+    comment: README covers native transparency, provider restrictions, matching, public exports, Home Tasks and deletion boundaries.
+  docs-supported-devices:
+    status: done
+    comment: README documents supported native services and input capabilities; no physical device support.
+  docs-supported-functions:
+    status: done
+    comment: README lists both entities and all public actions, manager and calendar functions.
+  docs-troubleshooting:
+    status: done
+    comment: README includes actionable troubleshooting for provider, transparency, calendar, queue, deletion and editor errors.
+  docs-use-cases:
+    status: done
+    comment: README documents calendar icons, task boards and independent library/dashboard use.
+  dynamic-devices:
+    status: done
+    comment: Fixed singleton service and two primary entities; no external devices can be added dynamically.
+  entity-category:
+    status: done
+    comment: Both entities are primary functionality, not configuration or diagnostics; default category is appropriate.
+  entity-device-class:
+    status: done
+    comment: No native device class describes a matched image count or AI Task wrapper.
+  entity-disabled-by-default:
+    status: done
+    comment: Both primary entities are useful and not noisy; no optional secondary entities.
+  entity-translations:
+    status: done
+    comment: Native Library translation; generator is the main feature and inherits the service name.
+  exception-translations:
+    status: done
+    comment: Native HomeAssistantError and ServiceValidationError carry domain/key; English fallback preserves local logs and manager messages. Native loader and action tests pass.
+  icon-translations:
+    status: done
+    comment: Both icons use native translation keys and icons.json; native HA icon loader tested.
+  reconfiguration-flow:
+    status: done
+    comment: Native Reconfigure shares the options transaction, revision check and paid consent, validates changed provider/reference capabilities, and updates the same entry without reload.
+  repair-issues:
+    status: done
+    comment: Entry-owned native Repairs for self-reference, unsupported image generation and unsupported reference attachments; passive, actionable, stable, clears on recovery or unload.
+  stale-devices:
+    status: done
+    comment: No remote device inventory. Native config-entry removal removes the singleton device and both entities; tested.
+  # Platinum
+  async-dependency:
+    status: done
+    comment: Native async HA services/media/store handle I/O. No external API client dependency; Core-provided Pillow CPU/file work runs in the executor. Native blocking-call audit passes.
+  inject-websession:
+    status: exempt
+    comment: No outbound HTTP client; native AI Task and media source handle provider access. aiohttp is used only for authenticated server views.
+  strict-typing:
+    status: done
+    comment: All 27 integration modules pass mypy 2.4.1 --strict against HA 2026.11.0 and 2026.11.3; both target-version CI jobs enforce it.

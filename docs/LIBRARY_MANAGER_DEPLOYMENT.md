@@ -12,7 +12,7 @@ The tested target is Home Assistant Core **2026.11.0** on Python **3.14**, with 
 
 ## Before deployment
 
-1. Verify the intended HA instance and its Core version. Inspect the loaded Activity Images entry, installed manifest, Marketplace version, provider/reference/Lucida settings, selected calendars, and automatic-generation setting.
+1. Verify the intended HA instance and its Core version. Inspect the loaded Activity Images entry, installed manifest, Marketplace version, provider/reference settings, selected calendars, and automatic-generation setting.
 2. Compare every installed Activity Images source file with the known working release. Record the installed file hashes and the candidate commit/package hashes. Do not infer deployed code from the displayed version alone.
 3. Ensure the generation queue is idle. Ask users not to submit image-management operations during the upgrade. Do not clear or cancel outstanding work merely to make the queue appear empty.
 4. Preserve the entire working `custom_components/activity_images` directory and all Activity Images storage envelopes: `activity_images_image_cache`, `activity_images_jobs`, and `activity_images_calendar_snapshot` if present.

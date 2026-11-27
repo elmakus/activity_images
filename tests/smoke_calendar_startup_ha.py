@@ -208,7 +208,7 @@ async def bounded_retries_and_readiness(hass):
             await subject.async_start()
             await hass.async_block_till_done()
             assert calls == [] and "not ready" in subject.last_error
-            assert warnings.messages == []
+            assert len(warnings.messages) == 1
             hass.states.async_set(ENTITY, "unavailable")
             await timers.fire(hass)
             assert calls == []
@@ -222,7 +222,19 @@ async def bounded_retries_and_readiness(hass):
             assert len(timers.entries) == 3 and len(warnings.messages) == 1
             failure = "Changed failure"
             await subject.async_refresh()
-            assert len(warnings.messages) == 2
+            assert len(warnings.messages) == 1  # Different errors during the same outage do not spam.
+            async def recovered(_call):
+                return {ENTITY: {"events": []}}
+            register(hass, recovered)
+            with patch.object(module._LOGGER, "info") as info:
+                await subject.async_refresh()
+                assert subject.last_error is None
+                info.assert_called_once_with("Activity Images calendar refresh recovered")
+                await subject.async_refresh()
+                info.assert_called_once()
+            register(hass, service)
+            await subject.async_refresh()
+            assert len(warnings.messages) == 2  # A new outage logs once again.
             assert subject.queue.calls == []
             await subject.async_shutdown()
             clean(hass, subject, timers)

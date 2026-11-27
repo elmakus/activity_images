@@ -1,19 +1,29 @@
-"""Read-only diagnostics for Settings; never calls a paid AI service.
-
-Lucida diagnostics are intentionally passive: network probing a configured URL
-could hit internal services and is not required for saving settings.
-"""
+"""Read-only diagnostics for Settings; never calls a paid AI service."""
 from __future__ import annotations
+
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from . import ActivityImagesConfigEntry
 
 from homeassistant.components.ai_task.const import AITaskEntityFeature
 
 from .const import (
-    CONF_AI_ENTITY, CONF_CALENDARS, CONF_LUCIDA_URL, CONF_REFERENCE_MEDIA_ID,
+    CONF_AI_ENTITY, CONF_CALENDARS, CONF_REFERENCE_MEDIA_ID,
 )
-from .settings_schema import effective_settings
+from .settings_schema import Settings, effective_settings
 
 
-def provider_diagnostics(hass, entry, values: dict) -> dict:
+class ProviderDiagnostics(TypedDict):
+    entity_id: str
+    status: str
+    image_service_registered: bool
+    image_generation_supported: bool
+    attachments_supported: bool
+
+
+def provider_diagnostics(hass: HomeAssistant, entry: ActivityImagesConfigEntry | None, values: Settings) -> ProviderDiagnostics:
     from .settings import is_own_provider_entity
 
     provider = values[CONF_AI_ENTITY]
@@ -45,9 +55,29 @@ def provider_diagnostics(hass, entry, values: dict) -> dict:
     }
 
 
-def diagnostics(hass, entry) -> dict:
+class CalendarDiagnostic(TypedDict):
+    entity_id: str
+    status: str
+
+
+class CalendarDiagnostics(TypedDict):
+    service_registered: bool
+    entities: list[CalendarDiagnostic]
+
+
+class ReferenceDiagnostics(TypedDict):
+    configured: bool
+
+
+class SettingsDiagnostics(TypedDict):
+    provider: ProviderDiagnostics
+    reference: ReferenceDiagnostics
+    calendar: CalendarDiagnostics
+
+
+def diagnostics(hass: HomeAssistant, entry: ActivityImagesConfigEntry) -> SettingsDiagnostics:
     values = effective_settings(entry)
-    calendars = []
+    calendars: list[CalendarDiagnostic] = []
     for entity_id in values[CONF_CALENDARS]:
         item = hass.states.get(entity_id)
         calendars.append({
@@ -57,10 +87,6 @@ def diagnostics(hass, entry) -> dict:
         })
     return {
         "provider": provider_diagnostics(hass, entry, values),
-        "lucida": {
-            "configured": bool(values[CONF_LUCIDA_URL]),
-            "status": "configured_not_probed" if values[CONF_LUCIDA_URL] else "not_configured",
-        },
         "reference": {
             "configured": bool(values[CONF_REFERENCE_MEDIA_ID]),
         },

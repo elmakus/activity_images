@@ -7,8 +7,14 @@ import os
 import stat
 from contextlib import suppress
 from pathlib import Path
+from typing import TypedDict
 
 from .generated_image import MAX_IMAGE_BYTES
+
+
+class FileSnapshot(TypedDict):
+    root: list[int]
+    files: dict[str, list[int | str]]
 
 
 def validate_filename(filename: str) -> None:
@@ -33,7 +39,7 @@ def open_root(root: Path) -> int:
         raise
 
 
-def identity(directory: int, filename: str) -> list:
+def identity(directory: int, filename: str) -> list[int | str]:
     fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -83,7 +89,7 @@ def _rename_no_replace(source: str, target: str, directory: int, quarantine: int
         raise OSError(error, os.strerror(error))
 
 
-def snapshot(root: Path, files: list[str]) -> dict:
+def snapshot(root: Path, files: list[str]) -> FileSnapshot:
     directory = open_root(root)
     try:
         info = os.fstat(directory)
@@ -132,7 +138,7 @@ def _restore(quarantine: int, name: str, directory: int, filename: str) -> None:
         _rename_no_replace(name, filename, quarantine, directory)
 
 
-def cleanup(root: Path, quarantine_root: Path, expected: dict, operation_id: str, image_id: str) -> None:
+def cleanup(root: Path, quarantine_root: Path, expected: FileSnapshot, operation_id: str, image_id: str) -> None:
     """Quarantine first: a raced-in unrelated inode is never unlinked."""
     directory = open_root(root)
     quarantine = None
